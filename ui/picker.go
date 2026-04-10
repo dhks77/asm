@@ -39,9 +39,13 @@ type ClaudeStateUpdatedMsg struct {
 	State claude.State
 }
 
+type spinnerTickMsg time.Time
+
 type sessionExitedMsg struct {
 	WorktreeName string
 }
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
 	cfg           *config.Config
@@ -50,6 +54,7 @@ type PickerModel struct {
 	gitStatus     map[string]worktree.GitStatus
 	taskNames     map[string]string
 	claudeStates  map[string]claude.State
+	spinnerFrame  int
 	cursor        int
 	currentWT     string // worktree name currently shown in right pane
 	dooray        *integration.DoorayClient
@@ -76,7 +81,7 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanWorktrees(), tickCmd(), claudeStateTickCmd())
+	return tea.Batch(m.scanWorktrees(), tickCmd(), claudeStateTickCmd(), spinnerTickCmd())
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -115,6 +120,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.claudeStates[msg.Name] = msg.State
 		}
 		return m, nil
+
+	case spinnerTickMsg:
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		return m, spinnerTickCmd()
 
 	case sessionExitedMsg:
 		delete(m.claudeStates, msg.WorktreeName)
@@ -391,7 +400,10 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	line1 := fmt.Sprintf(" %s %s", indicator, nameStyle.Render(wt.Name))
 
 	if state, ok := m.claudeStates[wt.Name]; ok && hasSession {
-		line1 += " " + renderClaudeState(state)
+		rendered := renderClaudeState(state, m.spinnerFrame)
+		if rendered != "" {
+			line1 += " " + rendered
+		}
 	}
 
 	var line2 string
@@ -461,31 +473,57 @@ func claudeStateTickCmd() tea.Cmd {
 	})
 }
 
+func spinnerTickCmd() tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+		return spinnerTickMsg(t)
+	})
+}
+
 func (m PickerModel) fetchClaudeState(worktreeName string) tea.Cmd {
 	currentWT := m.currentWT
 	return func() tea.Msg {
 		isDisplayed := currentWT == worktreeName
-		content, err := csmtmux.CapturePaneContent(worktreeName, isDisplayed)
+		title, err := csmtmux.GetPaneTitle(worktreeName, isDisplayed)
 		if err != nil {
 			return ClaudeStateUpdatedMsg{Name: worktreeName, State: claude.StateUnknown}
 		}
-		state := claude.DetectState(content)
+		state := claude.DetectStateFromTitle(title)
+
+		// If busy, refine with pane content for detail (thinking/tool/responding)
+		if state == claude.StateBusy {
+			content, err := csmtmux.CapturePaneContent(worktreeName, isDisplayed)
+			if err == nil {
+				detail := claude.DetectBusyDetail(content)
+				if detail != claude.StateBusy {
+					state = detail
+				}
+			}
+		}
+
 		return ClaudeStateUpdatedMsg{Name: worktreeName, State: state}
 	}
 }
 
-func renderClaudeState(state claude.State) string {
-	switch state {
-	case claude.StateIdle:
+func renderClaudeState(state claude.State, frame int) string {
+	if state == claude.StateIdle {
 		return IdleStateStyle.Render(state.Label())
-	case claude.StateThinking:
-		return ThinkingStateStyle.Render(state.Label())
-	case claude.StateToolUse:
-		return ToolUseStateStyle.Render(state.Label())
-	case claude.StateResponding:
-		return RespondingStateStyle.Render(state.Label())
-	default:
+	}
+	if !state.IsBusy() {
 		return ""
 	}
+
+	spinner := spinnerFrames[frame%len(spinnerFrames)]
+	var style lipgloss.Style
+	switch state {
+	case claude.StateThinking:
+		style = ThinkingStateStyle
+	case claude.StateToolUse:
+		style = ToolUseStateStyle
+	case claude.StateResponding:
+		style = RespondingStateStyle
+	default:
+		style = BusyStateStyle
+	}
+	return style.Render(spinner + " " + state.Label())
 }
 

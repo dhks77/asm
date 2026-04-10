@@ -2,6 +2,7 @@ package claude
 
 import (
 	"strings"
+	"unicode"
 )
 
 // State represents the current state of a Claude session.
@@ -9,11 +10,17 @@ type State int
 
 const (
 	StateUnknown    State = iota
-	StateIdle             // Waiting for user input (> prompt visible)
+	StateIdle             // Waiting for user input
+	StateBusy             // Generic busy (can't determine detail)
 	StateThinking         // Claude is thinking/processing
 	StateToolUse          // Running a tool
 	StateResponding       // Streaming response text
 )
+
+// IsBusy returns true if Claude is doing any kind of work.
+func (s State) IsBusy() bool {
+	return s == StateBusy || s == StateThinking || s == StateToolUse || s == StateResponding
+}
 
 // Label returns a display label for the state.
 func (s State) Label() string {
@@ -26,23 +33,52 @@ func (s State) Label() string {
 		return "tool…"
 	case StateResponding:
 		return "responding…"
+	case StateBusy:
+		return "busy…"
 	default:
 		return ""
 	}
 }
 
-// DetectState analyzes captured tmux pane content to determine Claude's current state.
-// It inspects the bottom of the visible pane to identify characteristic patterns.
-func DetectState(content string) State {
-	if strings.TrimSpace(content) == "" {
+// DetectStateFromTitle determines Claude's state from the tmux pane title.
+// Claude Code sets the pane title with a leading icon:
+//   - ✳ (U+2733) = idle
+//   - Braille spinner chars (U+2800..U+28FF) = busy/working
+func DetectStateFromTitle(title string) State {
+	if title == "" {
 		return StateUnknown
+	}
+
+	for _, r := range title {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if r == '✳' {
+			return StateIdle
+		}
+		// Braille pattern block: U+2800..U+28FF (spinner characters)
+		if r >= 0x2800 && r <= 0x28FF {
+			return StateBusy
+		}
+		return StateUnknown
+	}
+
+	return StateUnknown
+}
+
+// DetectBusyDetail analyzes pane content to determine what kind of busy.
+// Only called when pane title already confirmed busy state.
+// Returns a more specific state or StateBusy as fallback.
+func DetectBusyDetail(content string) State {
+	if strings.TrimSpace(content) == "" {
+		return StateBusy
 	}
 
 	lines := strings.Split(content, "\n")
 
-	// Collect last non-empty lines (bottom of screen is most informative)
+	// Collect last non-empty lines from the bottom
 	var bottom []string
-	for i := len(lines) - 1; i >= 0 && len(bottom) < 20; i-- {
+	for i := len(lines) - 1; i >= 0 && len(bottom) < 15; i-- {
 		trimmed := strings.TrimSpace(lines[i])
 		if trimmed != "" {
 			bottom = append(bottom, trimmed)
@@ -50,76 +86,24 @@ func DetectState(content string) State {
 	}
 
 	if len(bottom) == 0 {
-		return StateUnknown
+		return StateBusy
 	}
 
-	// Priority: active states first, then idle.
-	// ❯ prompt line stays visible on screen after user submits,
-	// so idle must be checked LAST to avoid false positives.
-
-	// 1. Thinking (highest priority when Claude is working)
-	if detectThinking(bottom) {
-		return StateThinking
-	}
-
-	// 2. Tool use
-	if detectToolUse(bottom) {
-		return StateToolUse
-	}
-
-	// 3. Idle: prompt visible at the very bottom
-	if detectIdle(bottom) {
-		return StateIdle
-	}
-
-	// 4. Default: unknown
-	return StateUnknown
-}
-
-// detectIdle checks for Claude Code's input prompt at the bottom of the screen.
-// Claude Code renders a prompt like:
-//
-//	─────────────────────────
-//	❯
-//	─────────────────────────
-//	  ⏵⏵ bypass permissions on (shift+tab to cycle)
-func detectIdle(bottom []string) bool {
-	// Only check the last 3 non-empty lines — the prompt must be
-	// at the very bottom, not scrolled up from a previous input.
-	for i := 0; i < min(3, len(bottom)); i++ {
-		// Claude Code prompt character
-		if strings.HasPrefix(bottom[i], "❯") {
-			return true
-		}
-		// Legacy box-style prompt
-		if strings.HasPrefix(bottom[i], "╰") && strings.Contains(bottom[i], "─") {
-			return true
-		}
-	}
-	return false
-}
-
-// detectThinking checks for Claude's thinking indicator.
-func detectThinking(bottom []string) bool {
+	// Check for thinking
 	for i := 0; i < min(8, len(bottom)); i++ {
 		lower := strings.ToLower(bottom[i])
 		if strings.Contains(lower, "thinking") {
-			return true
+			return StateThinking
 		}
 	}
-	return false
-}
 
-// detectToolUse checks for tool execution markers.
-// Claude Code shows tool calls with ⏺ markers and ⎿ continuation lines.
-func detectToolUse(bottom []string) bool {
+	// Check for tool use (⏺ markers, ⎿ continuation)
 	for i := 0; i < min(10, len(bottom)); i++ {
-		if strings.Contains(bottom[i], "⏺") {
-			return true
-		}
-		if strings.Contains(bottom[i], "⎿") {
-			return true
+		if strings.Contains(bottom[i], "⏺") || strings.Contains(bottom[i], "⎿") {
+			return StateToolUse
 		}
 	}
-	return false
+
+	// We know it's busy (from pane title), so default is responding
+	return StateResponding
 }

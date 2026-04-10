@@ -62,15 +62,10 @@ var (
 				Italic(true).
 				Align(lipgloss.Center)
 
-	// Claude state colors
-	idleColor      = lipgloss.Color("245") // light gray
-	thinkingColor  = lipgloss.Color("220") // yellow
-	toolUseColor   = lipgloss.Color("81")  // cyan
-	respondColor   = lipgloss.Color("114") // green
-
 	// Claude state styles
-	IdleStateStyle      = lipgloss.NewStyle().Foreground(idleColor)
-	ThinkingStateStyle  = lipgloss.NewStyle().Foreground(thinkingColor).Bold(true)
-	ToolUseStateStyle   = lipgloss.NewStyle().Foreground(toolUseColor).Bold(true)
-	RespondingStateStyle = lipgloss.NewStyle().Foreground(respondColor)
+	IdleStateStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	BusyStateStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	ThinkingStateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	ToolUseStateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+	RespondingStateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
 )

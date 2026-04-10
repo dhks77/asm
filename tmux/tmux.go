@@ -222,8 +222,6 @@ func KillWorktreeWindow(worktreeName string) error {
 }
 
 // CapturePaneContent captures the visible content of a worktree's pane.
-// If the worktree is currently displayed in the right pane, captures from main.1.
-// Otherwise captures from the worktree's hidden window.
 func CapturePaneContent(worktreeName string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
@@ -236,6 +234,22 @@ func CapturePaneContent(worktreeName string, isDisplayed bool) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// GetPaneTitle reads the tmux pane title for a worktree's pane.
+// Claude Code sets the pane title to indicate its current state.
+func GetPaneTitle(worktreeName string, isDisplayed bool) (string, error) {
+	var target string
+	if isDisplayed {
+		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+	} else {
+		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(worktreeName))
+	}
+	out, err := exec.Command("tmux", "display-message", "-t", target, "-p", "#{pane_title}").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // KillSession kills the entire csm tmux session.
