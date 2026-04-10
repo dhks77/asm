@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -92,6 +93,13 @@ func GetGitStatus(dir string) GitStatus {
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	out, err := cmd.Output()
-	return string(out), err
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return "", fmt.Errorf("%s", msg)
+		}
+		return "", err
+	}
+	return string(out), nil
 }

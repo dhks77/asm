@@ -5,7 +5,7 @@ import (
 )
 
 func RenderStatusBar(width int) string {
-	keys := " j/k: navigate  Enter: open  n: new  r: resume  d: delete  Tab: session  q: quit │ Tab+Tab: back"
+	keys := " j/k: navigate  Enter: open  n: new  r: resume  w: worktree  d: remove  Tab: session  q: quit │ Tab+Tab: back"
 
 	return statusBarStyle.
 		Width(width).

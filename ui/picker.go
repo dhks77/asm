@@ -48,35 +48,39 @@ type sessionExitedMsg struct {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
-	cfg           *config.Config
-	rootPath      string
-	worktrees     []worktree.Worktree
-	gitStatus     map[string]worktree.GitStatus
-	taskNames     map[string]string
-	claudeStates  map[string]claude.State
-	spinnerFrame  int
-	cursor        int
-	currentWT     string // worktree name currently shown in right pane
-	dooray        *integration.DoorayClient
-	resumeDialog  ResumeDialogModel
-	confirmDialog ConfirmDialogModel
-	width         int
-	height        int
-	ready         bool
-	err           string
+	cfg            *config.Config
+	rootPath       string
+	worktrees      []worktree.Worktree
+	gitStatus      map[string]worktree.GitStatus
+	taskNames      map[string]string
+	claudeStates   map[string]claude.State
+	spinnerFrame   int
+	cursor         int
+	currentWT      string // worktree name currently shown in right pane
+	dooray         *integration.DoorayClient
+	resumeDialog   ResumeDialogModel
+	confirmDialog  ConfirmDialogModel
+	worktreeDialog WorktreeDialogModel
+	deleteDialog   DeleteDialogModel
+	width          int
+	height         int
+	ready          bool
+	err            string
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 	dooray := integration.NewDoorayClient(cfg.Dooray, cfg.TaskIDPattern)
 	return PickerModel{
-		cfg:           cfg,
-		rootPath:      rootPath,
-		gitStatus:     make(map[string]worktree.GitStatus),
-		taskNames:     make(map[string]string),
-		claudeStates:  make(map[string]claude.State),
-		dooray:        dooray,
-		resumeDialog:  NewResumeDialogModel(),
-		confirmDialog: NewConfirmDialogModel(),
+		cfg:            cfg,
+		rootPath:       rootPath,
+		gitStatus:      make(map[string]worktree.GitStatus),
+		taskNames:      make(map[string]string),
+		claudeStates:   make(map[string]claude.State),
+		dooray:         dooray,
+		resumeDialog:   NewResumeDialogModel(),
+		confirmDialog:  NewConfirmDialogModel(),
+		worktreeDialog: NewWorktreeDialogModel(),
+		deleteDialog:   NewDeleteDialogModel(),
 	}
 }
 
@@ -135,7 +139,55 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case BranchesLoadedMsg:
+		var cmd tea.Cmd
+		m.worktreeDialog, cmd = m.worktreeDialog.Update(msg)
+		return m, cmd
+
+	case WorktreeCreatedMsg, WorktreeRemovedMsg:
+		return m, m.scanWorktrees()
+
+	case WorktreeCancelledMsg:
+		return m, nil
+
+	case WorktreeErrorMsg:
+		m.err = msg.Err
+		return m, nil
+
+	case DeleteConfirmedMsg:
+		if msg.Action == DeleteConfirm {
+			wt := m.selectedWorktree()
+			if wt == nil {
+				return m, nil
+			}
+			delete(m.claudeStates, wt.Name)
+			winName := csmtmux.WindowName(wt.Name)
+			if csmtmux.WindowExists(winName) {
+				if m.currentWT == wt.Name {
+					csmtmux.SwapBackFromRight(wt.Name)
+					m.currentWT = ""
+				}
+				csmtmux.KillWorktreeWindow(wt.Name)
+			}
+			return m, m.removeWorktree(wt)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.err != "" {
+			m.err = ""
+			return m, nil
+		}
+		if m.deleteDialog.IsVisible() {
+			var cmd tea.Cmd
+			m.deleteDialog, cmd = m.deleteDialog.Update(msg)
+			return m, cmd
+		}
+		if m.worktreeDialog.IsVisible() {
+			var cmd tea.Cmd
+			m.worktreeDialog, cmd = m.worktreeDialog.Update(msg)
+			return m, cmd
+		}
 		if m.confirmDialog.IsVisible() {
 			var cmd tea.Cmd
 			m.confirmDialog, cmd = m.confirmDialog.Update(msg)
@@ -267,12 +319,12 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if wt == nil {
 			return m, nil
 		}
-		delete(m.claudeStates, wt.Name)
-		if m.currentWT == wt.Name {
-			csmtmux.SwapBackFromRight(wt.Name)
-			m.currentWT = ""
-		}
-		csmtmux.KillWorktreeWindow(wt.Name)
+		m.deleteDialog.SetSize(m.width)
+		m.deleteDialog.Show(wt.Name)
+
+	case "w":
+		m.worktreeDialog.SetSize(m.width, m.height)
+		return m, m.worktreeDialog.Show(m.rootPath)
 
 	case "tab":
 		// Focus the right tmux pane
@@ -306,6 +358,23 @@ func (m *PickerModel) resumeSession(wt *worktree.Worktree, sessionID string) tea
 	csmtmux.ResumeInWindow(wt.Name, wt.Path, claudePath, sessionID, m.cfg.ClaudeArgs)
 	m.switchToWorktree(wt)
 	return waitForExitCmd(wt.Name)
+}
+
+type WorktreeRemovedMsg struct{}
+
+func (m *PickerModel) removeWorktree(wt *worktree.Worktree) tea.Cmd {
+	rootPath := m.rootPath
+	wtPath := wt.Path
+	return func() tea.Msg {
+		repoDir, err := worktree.FindGitRepo(rootPath)
+		if err != nil {
+			return WorktreeErrorMsg{Err: err.Error()}
+		}
+		if err := worktree.RemoveWorktree(repoDir, wtPath); err != nil {
+			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree remove failed: %v", err)}
+		}
+		return WorktreeRemovedMsg{}
+	}
 }
 
 // waitForExitCmd returns a tea.Cmd that blocks until claude exits in the worktree.
@@ -353,16 +422,10 @@ func (m PickerModel) View() string {
 
 	list := strings.Join(rows, "\n")
 
-	errMsg := ""
-	if m.err != "" {
-		errMsg = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err)
-		m.err = ""
-	}
-
 	statusBar := RenderStatusBar(m.width)
 
 	contentHeight := m.height - 3
-	content := title + "\n" + list + errMsg
+	content := title + "\n" + list
 
 	lines := strings.Count(content, "\n") + 1
 	for lines < contentHeight {
@@ -372,7 +435,22 @@ func (m PickerModel) View() string {
 
 	view := content + "\n" + statusBar
 
-	if m.confirmDialog.IsVisible() {
+	if m.err != "" {
+		errDialog := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("196")).
+			Padding(1, 2).
+			Width(min(50, m.width-4)).
+			Render(
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("Error") + "\n\n" +
+					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
+					statusBarStyle.Render("Press any key to dismiss"))
+		view = m.overlayCenter(view, errDialog)
+	} else if m.deleteDialog.IsVisible() {
+		view = m.overlayCenter(view, m.deleteDialog.View())
+	} else if m.worktreeDialog.IsVisible() {
+		view = m.overlayCenter(view, m.worktreeDialog.View())
+	} else if m.confirmDialog.IsVisible() {
 		view = m.overlayCenter(view, m.confirmDialog.View())
 	} else if m.resumeDialog.IsVisible() {
 		view = m.overlayCenter(view, m.resumeDialog.View())
