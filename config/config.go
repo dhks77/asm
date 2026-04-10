@@ -8,18 +8,10 @@ import (
 )
 
 type Config struct {
-	DefaultPath        string       `toml:"default_path"`
-	TaskIDPattern      string       `toml:"task_id_pattern"`
-	GitRefreshInterval int          `toml:"git_refresh_interval"`
-	ClaudePath         string       `toml:"claude_path"`
-	ClaudeArgs         []string     `toml:"claude_args"`
-	Dooray             DoorayConfig `toml:"dooray"`
-}
-
-type DoorayConfig struct {
-	Enabled bool   `toml:"enabled"`
-	Token   string `toml:"token"`
-	APIURL  string `toml:"api_url"`
+	DefaultPath        string   `toml:"default_path"`
+	GitRefreshInterval int      `toml:"git_refresh_interval"`
+	ClaudePath         string   `toml:"claude_path"`
+	ClaudeArgs         []string `toml:"claude_args"`
 }
 
 func homeDir() string {
@@ -32,7 +24,6 @@ func homeDir() string {
 
 func DefaultConfig() *Config {
 	return &Config{
-		TaskIDPattern:      `(\d{4,})`,
 		GitRefreshInterval: 5,
 	}
 }

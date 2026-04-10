@@ -12,72 +12,91 @@ import (
 	"github.com/nhn/csm/internal"
 )
 
+var defaultPattern = regexp.MustCompile(`\d+`)
+
 type DoorayClient struct {
-	cfg       config.DoorayConfig
-	cache     *internal.Cache
-	pattern   *regexp.Regexp
-	client    *http.Client
+	settings      config.DooraySettings
+	cache         *internal.Cache
+	customPattern *regexp.Regexp // nil means use default (last number)
+	client        *http.Client
 }
 
-type taskResult struct {
+type postsResult struct {
 	Header struct {
 		IsSuccessful bool `json:"isSuccessful"`
 	} `json:"header"`
-	Result struct {
+	Result []struct {
 		Subject string `json:"subject"`
 	} `json:"result"`
+	TotalCount int `json:"totalCount"`
 }
 
-func NewDoorayClient(cfg config.DoorayConfig, taskIDPattern string) *DoorayClient {
-	if !cfg.Enabled {
+func NewDoorayClient(settings config.DooraySettings) *DoorayClient {
+	if !settings.Enabled() {
 		return nil
 	}
 
-	pattern, err := regexp.Compile(taskIDPattern)
-	if err != nil {
-		return nil
+	var customPattern *regexp.Regexp
+	if settings.TaskNumberPattern != "" {
+		p, err := regexp.Compile(settings.TaskNumberPattern)
+		if err != nil {
+			return nil
+		}
+		customPattern = p
 	}
 
 	return &DoorayClient{
-		cfg:     cfg,
-		cache:   internal.NewCache("dooray-tasks"),
-		pattern: pattern,
+		settings:      settings,
+		cache:         internal.NewCache("dooray-tasks"),
+		customPattern: customPattern,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
 	}
 }
 
-// ExtractTaskID extracts a task ID from a branch/folder name.
-func (c *DoorayClient) ExtractTaskID(name string) string {
+// ExtractTaskNumber extracts a task number from a branch name.
+// If customPattern is set, uses its first capture group.
+// Otherwise, returns the last number found in the branch name.
+func (c *DoorayClient) ExtractTaskNumber(branch string) string {
 	if c == nil {
 		return ""
 	}
-	matches := c.pattern.FindStringSubmatch(name)
-	if len(matches) < 2 {
+
+	if c.customPattern != nil {
+		matches := c.customPattern.FindStringSubmatch(branch)
+		if len(matches) < 2 {
+			return ""
+		}
+		return matches[1]
+	}
+
+	// Default: last number in branch name
+	all := defaultPattern.FindAllString(branch, -1)
+	if len(all) == 0 {
 		return ""
 	}
-	return matches[1]
+	return all[len(all)-1]
 }
 
-// GetTaskName returns the task subject for a given task ID.
-func (c *DoorayClient) GetTaskName(taskID string) (string, error) {
+// GetTaskName fetches the task subject by post number.
+func (c *DoorayClient) GetTaskName(postNumber string) (string, error) {
 	if c == nil {
 		return "", nil
 	}
 
-	// Check cache first
-	if cached, ok := c.cache.Get(taskID); ok {
+	if cached, ok := c.cache.Get(postNumber); ok {
 		return cached, nil
 	}
 
-	// Fetch from API
-	url := fmt.Sprintf("%s/common/v1/tasks/%s", c.cfg.APIURL, taskID)
+	url := fmt.Sprintf("%s/project/v1/projects/%s/posts?postNumber=%s&size=1",
+		c.settings.APIURL(), c.settings.ProjectID, postNumber)
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "dooray-api "+c.cfg.Token)
+	req.Header.Set("Authorization", "dooray-api "+c.settings.Token)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -90,34 +109,33 @@ func (c *DoorayClient) GetTaskName(taskID string) (string, error) {
 		return "", err
 	}
 
-	var result taskResult
+	var result postsResult
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 
-	if !result.Header.IsSuccessful {
-		return "", fmt.Errorf("dooray API error for task %s", taskID)
+	if !result.Header.IsSuccessful || len(result.Result) == 0 {
+		return "", fmt.Errorf("dooray API: no post found for number %s", postNumber)
 	}
 
-	name := result.Result.Subject
-	// Cache for 1 hour
-	c.cache.Set(taskID, name, time.Hour)
+	name := result.Result[0].Subject
+	c.cache.Set(postNumber, name, time.Hour)
 
 	return name, nil
 }
 
-// ResolveTaskName extracts a task ID from name and fetches the task subject.
-func (c *DoorayClient) ResolveTaskName(folderName string) string {
+// ResolveTaskName extracts a task number from a branch name and fetches the task subject.
+func (c *DoorayClient) ResolveTaskName(branch string) string {
 	if c == nil {
 		return ""
 	}
 
-	taskID := c.ExtractTaskID(folderName)
-	if taskID == "" {
+	postNumber := c.ExtractTaskNumber(branch)
+	if postNumber == "" {
 		return ""
 	}
 
-	name, err := c.GetTaskName(taskID)
+	name, err := c.GetTaskName(postNumber)
 	if err != nil {
 		return ""
 	}

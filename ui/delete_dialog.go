@@ -18,41 +18,37 @@ type DeleteConfirmedMsg struct {
 	Action DeleteAction
 }
 
-type DeleteDialogModel struct {
-	visible      bool
-	cursor       int
+// DeleteModel is a standalone tea.Model for the right pane.
+type DeleteModel struct {
 	worktreeName string
+	taskName     string
+	dirty        bool
+	cursor       int
+	Confirmed    bool
 	width        int
+	height       int
 }
 
-func NewDeleteDialogModel() DeleteDialogModel {
-	return DeleteDialogModel{}
-}
-
-func (m *DeleteDialogModel) Show(worktreeName string) {
-	m.visible = true
-	m.cursor = 1 // default to Cancel
-	m.worktreeName = worktreeName
-}
-
-func (m *DeleteDialogModel) Hide() {
-	m.visible = false
-}
-
-func (m *DeleteDialogModel) SetSize(w int) {
-	m.width = w
-}
-
-func (m DeleteDialogModel) IsVisible() bool {
-	return m.visible
-}
-
-func (m DeleteDialogModel) Update(msg tea.Msg) (DeleteDialogModel, tea.Cmd) {
-	if !m.visible {
-		return m, nil
+func NewDeleteModel(worktreeName, taskName string, dirty bool) DeleteModel {
+	return DeleteModel{
+		worktreeName: worktreeName,
+		taskName:     taskName,
+		dirty:        dirty,
+		cursor:       1, // default to Cancel
 	}
+}
 
+func (m DeleteModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m DeleteModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "left", "h":
@@ -64,50 +60,55 @@ func (m DeleteDialogModel) Update(msg tea.Msg) (DeleteDialogModel, tea.Cmd) {
 				m.cursor++
 			}
 		case "enter":
-			action := DeleteCancel
-			if m.cursor == 0 {
-				action = DeleteConfirm
-			}
-			m.Hide()
-			return m, func() tea.Msg {
-				return DeleteConfirmedMsg{Action: action}
-			}
-		case "esc", "q", "n":
-			m.Hide()
-			return m, func() tea.Msg {
-				return DeleteConfirmedMsg{Action: DeleteCancel}
-			}
+			m.Confirmed = m.cursor == 0
+			return m, tea.Quit
+		case "esc", "q", "n", "ctrl+c":
+			m.Confirmed = false
+			return m, tea.Quit
 		case "y":
-			m.Hide()
-			return m, func() tea.Msg {
-				return DeleteConfirmedMsg{Action: DeleteConfirm}
-			}
+			m.Confirmed = true
+			return m, tea.Quit
 		}
 	}
 
 	return m, nil
 }
 
-func (m DeleteDialogModel) View() string {
-	if !m.visible {
-		return ""
-	}
+func (m DeleteModel) View() string {
+	dangerColor := lipgloss.Color("196")
+	warnColor := lipgloss.Color("220")
 
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("196")).
+		Foreground(dangerColor).
+		Padding(1, 2).
 		Render("Remove Worktree")
 
-	question := fmt.Sprintf("\nRemove '%s'?\n", m.worktreeName)
+	var info string
+	if m.taskName != "" {
+		info = lipgloss.NewStyle().Padding(0, 2).Foreground(primaryColor).Render(m.taskName) + "\n"
+	}
+	info += lipgloss.NewStyle().Padding(0, 2).Foreground(whiteColor).Bold(true).Render(m.worktreeName)
+
+	var warning string
+	if m.dirty {
+		warning = "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).Bold(true).
+			Render("⚠ Modified or untracked files exist") + "\n" +
+			lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).
+				Render("  Uncommitted changes will be lost")
+	}
+
+	question := lipgloss.NewStyle().Padding(1, 2).Foreground(dimColor).
+		Render(fmt.Sprintf("Remove worktree '%s'?", m.worktreeName))
 
 	options := []string{"Remove", "Cancel"}
 	var buttons []string
 	for i, opt := range options {
-		style := lipgloss.NewStyle().Padding(0, 2)
+		style := lipgloss.NewStyle().Padding(0, 3)
 		if i == m.cursor {
 			if i == 0 {
 				style = style.
-					Background(lipgloss.Color("196")).
+					Background(dangerColor).
 					Foreground(lipgloss.Color("0")).
 					Bold(true)
 			} else {
@@ -122,15 +123,26 @@ func (m DeleteDialogModel) View() string {
 		buttons = append(buttons, style.Render(opt))
 	}
 
-	buttonRow := lipgloss.JoinHorizontal(lipgloss.Center, buttons...)
+	buttonRow := lipgloss.NewStyle().Padding(0, 2).Render(
+		lipgloss.JoinHorizontal(lipgloss.Center, buttons...),
+	)
 
-	content := title + question + "\n" + buttonRow
+	content := title + "\n" + info + warning + "\n" + question + "\n\n" + buttonRow
 
-	dialogStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
-		Padding(1, 2).
-		Width(min(45, m.width-4))
+	// Fill remaining height
+	lines := lipgloss.Height(content)
+	contentHeight := m.height - 3
+	for lines < contentHeight {
+		content += "\n"
+		lines++
+	}
 
-	return dialogStyle.Render(content)
+	hint := " ←→: select  Enter: confirm  y/n  Esc: cancel"
+	statusBar := statusBarStyle.
+		Width(m.width).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252")).
+		Render(hint)
+
+	return content + "\n" + statusBar
 }

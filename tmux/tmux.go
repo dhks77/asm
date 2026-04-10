@@ -224,6 +224,63 @@ func KillWorktreeWindow(worktreeName string) error {
 	).Run()
 }
 
+// RunInRightPane creates a hidden tmux window running cmd, swaps it into the
+// right pane, and returns the window name used for waiting/cleanup.
+// The exit code is stored in tmux variable @{windowName}-exit.
+func RunInRightPane(windowName, cmd string) error {
+	err := exec.Command("tmux", "new-window", "-d",
+		"-t", SessionName,
+		"-n", windowName,
+	).Run()
+	if err != nil {
+		return err
+	}
+
+	exitVar := fmt.Sprintf("@%s-exit", windowName)
+	exitSignal := fmt.Sprintf("tmux set -t %s %s $? ; tmux wait-for -S %s", SessionName, exitVar, windowName)
+	fullCmd := cmd + " ; " + exitSignal
+
+	if err := exec.Command("tmux", "send-keys",
+		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
+		fullCmd, "Enter",
+	).Run(); err != nil {
+		return err
+	}
+
+	// Swap into right pane
+	return exec.Command("tmux", "swap-pane",
+		"-s", fmt.Sprintf("%s:%s.0", SessionName, windowName),
+		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+	).Run()
+}
+
+// WaitAndCleanupRightPane blocks until the window's process exits,
+// swaps back, kills the window, and focuses left.
+// Returns the exit code of the process (0 = success).
+func WaitAndCleanupRightPane(windowName string) int {
+	exec.Command("tmux", "wait-for", windowName).Run()
+
+	exitCode := 1
+	exitVar := fmt.Sprintf("@%s-exit", windowName)
+	out, err := exec.Command("tmux", "show-option", "-t", SessionName, "-v", exitVar).Output()
+	if err == nil {
+		s := strings.TrimSpace(string(out))
+		if s == "0" {
+			exitCode = 0
+		}
+	}
+
+	exec.Command("tmux", "swap-pane",
+		"-s", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+		"-t", fmt.Sprintf("%s:%s.0", SessionName, windowName),
+	).Run()
+	exec.Command("tmux", "kill-window",
+		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
+	).Run()
+	FocusLeft()
+	return exitCode
+}
+
 // CapturePaneContent captures the visible content of a worktree's pane.
 func CapturePaneContent(worktreeName string, isDisplayed bool) (string, error) {
 	var target string

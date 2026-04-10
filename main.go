@@ -16,6 +16,10 @@ import (
 func main() {
 	pathFlag := flag.String("path", "", "Root directory containing worktrees")
 	pickerMode := flag.Bool("picker", false, "Run in picker mode (inside tmux left pane)")
+	settingsMode := flag.Bool("settings", false, "Run in settings mode (inside tmux right pane)")
+	deleteMode := flag.String("delete", "", "Run delete confirmation (worktree name)")
+	deleteTaskName := flag.String("delete-task", "", "Task name to display in delete confirmation")
+	deleteDirty := flag.Bool("delete-dirty", false, "Worktree has uncommitted changes")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -50,7 +54,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *pickerMode {
+	if *deleteMode != "" {
+		runDelete(*deleteMode, *deleteTaskName, *deleteDirty)
+	} else if *settingsMode {
+		runSettings(rootPath)
+	} else if *pickerMode {
 		runPicker(cfg, rootPath)
 	} else {
 		runOrchestrator(cfg, rootPath)
@@ -108,6 +116,31 @@ func runOrchestrator(cfg *config.Config, rootPath string) {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
+	}
+}
+
+func runDelete(worktreeName, taskName string, dirty bool) {
+	model := ui.NewDeleteModel(worktreeName, taskName, dirty)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	result, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if m, ok := result.(ui.DeleteModel); ok && m.Confirmed {
+		os.Exit(0)
+	}
+	os.Exit(1)
+}
+
+func runSettings(rootPath string) {
+	model := ui.NewSettingsModel(rootPath)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
 

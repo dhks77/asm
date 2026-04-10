@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -41,6 +42,7 @@ type ClaudeStateUpdatedMsg struct {
 }
 
 type spinnerTickMsg time.Time
+type scrollTickMsg time.Time
 
 type sessionExitedMsg struct {
 	WorktreeName string
@@ -56,13 +58,13 @@ type PickerModel struct {
 	taskNames      map[string]string
 	claudeStates   map[string]claude.State
 	spinnerFrame   int
+	scrollTick     int
 	cursor         int
 	currentWT      string // worktree name currently shown in right pane
 	dooray         *integration.DoorayClient
 	resumeDialog   ResumeDialogModel
 	confirmDialog  ConfirmDialogModel
 	worktreeDialog WorktreeDialogModel
-	deleteDialog   DeleteDialogModel
 	focused        bool
 	width          int
 	height         int
@@ -71,7 +73,11 @@ type PickerModel struct {
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
-	dooray := integration.NewDoorayClient(cfg.Dooray, cfg.TaskIDPattern)
+	var dooray *integration.DoorayClient
+	projectSettings, err := config.LoadProjectSettings(rootPath)
+	if err == nil {
+		dooray = integration.NewDoorayClient(projectSettings.Dooray)
+	}
 	return PickerModel{
 		cfg:            cfg,
 		rootPath:       rootPath,
@@ -82,13 +88,12 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 		resumeDialog:   NewResumeDialogModel(),
 		confirmDialog:  NewConfirmDialogModel(),
 		worktreeDialog: NewWorktreeDialogModel(),
-		deleteDialog:   NewDeleteDialogModel(),
 		focused:        true,
 	}
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanWorktrees(), tickCmd(), claudeStateTickCmd(), spinnerTickCmd())
+	return tea.Batch(m.scanWorktrees(), tickCmd(), claudeStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -140,6 +145,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 		return m, spinnerTickCmd()
 
+	case scrollTickMsg:
+		m.scrollTick++
+		return m, scrollTickCmd()
+
 	case sessionExitedMsg:
 		delete(m.claudeStates, msg.WorktreeName)
 		isDisplayed := m.currentWT == msg.WorktreeName
@@ -165,34 +174,31 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.Err
 		return m, nil
 
-	case DeleteConfirmedMsg:
-		if msg.Action == DeleteConfirm {
-			wt := m.selectedWorktree()
-			if wt == nil {
-				return m, nil
-			}
-			delete(m.claudeStates, wt.Name)
-			winName := csmtmux.WindowName(wt.Name)
-			if csmtmux.WindowExists(winName) {
-				if m.currentWT == wt.Name {
-					csmtmux.SwapBackFromRight(wt.Name)
-					m.currentWT = ""
-				}
-				csmtmux.KillWorktreeWindow(wt.Name)
-			}
-			return m, m.removeWorktree(wt)
+	case deleteExitedMsg:
+		if !msg.confirmed {
+			return m, nil
 		}
-		return m, nil
+		var wt *worktree.Worktree
+		for i := range m.worktrees {
+			if m.worktrees[i].Name == msg.worktreeName {
+				wt = &m.worktrees[i]
+				break
+			}
+		}
+		if wt == nil {
+			return m, nil
+		}
+		delete(m.claudeStates, wt.Name)
+		winName := csmtmux.WindowName(wt.Name)
+		if csmtmux.WindowExists(winName) {
+			csmtmux.KillWorktreeWindow(wt.Name)
+		}
+		return m, m.removeWorktree(wt)
 
 	case tea.KeyMsg:
 		if m.err != "" {
 			m.err = ""
 			return m, nil
-		}
-		if m.deleteDialog.IsVisible() {
-			var cmd tea.Cmd
-			m.deleteDialog, cmd = m.deleteDialog.Update(msg)
-			return m, cmd
 		}
 		if m.worktreeDialog.IsVisible() {
 			var cmd tea.Cmd
@@ -238,19 +244,34 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		for _, wt := range msg.Worktrees {
 			cmds = append(cmds, m.fetchGitStatus(wt.Path))
-			if m.dooray != nil {
-				cmds = append(cmds, m.fetchTaskName(wt))
-			}
 		}
 		return m, tea.Batch(cmds...)
 
 	case GitStatusUpdatedMsg:
 		m.gitStatus[msg.Path] = msg.Status
+		if m.dooray != nil && msg.Status.Branch != "" {
+			if _, ok := m.taskNames[msg.Path]; !ok {
+				return m, m.fetchTaskName(msg.Path, msg.Status.Branch)
+			}
+		}
 		return m, nil
 
 	case TaskNameResolvedMsg:
 		if msg.Name != "" {
 			m.taskNames[msg.Path] = msg.Name
+		}
+		return m, nil
+
+	case settingsExitedMsg:
+		m.reloadDoorayClient()
+		if m.dooray != nil {
+			var cmds []tea.Cmd
+			for _, wt := range m.worktrees {
+				if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
+					cmds = append(cmds, m.fetchTaskName(wt.Path, gs.Branch))
+				}
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 	}
@@ -330,12 +351,14 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if wt == nil {
 			return m, nil
 		}
-		m.deleteDialog.SetSize(m.width)
-		m.deleteDialog.Show(wt.Name)
+		return m, m.openDelete(wt)
 
 	case "w":
 		m.worktreeDialog.SetSize(m.width, m.height)
 		return m, m.worktreeDialog.Show(m.rootPath)
+
+	case "s":
+		return m, m.openSettings()
 
 	case "tab":
 		// Focus the right tmux pane
@@ -381,8 +404,11 @@ func (m *PickerModel) removeWorktree(wt *worktree.Worktree) tea.Cmd {
 		if err != nil {
 			return WorktreeErrorMsg{Err: err.Error()}
 		}
-		if err := worktree.RemoveWorktree(repoDir, wtPath); err != nil {
-			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree remove failed: %v", err)}
+		// Try normal remove first, then force if it fails
+		if err := worktree.RemoveWorktree(repoDir, wtPath, false); err != nil {
+			if err2 := worktree.RemoveWorktree(repoDir, wtPath, true); err2 != nil {
+				return WorktreeErrorMsg{Err: fmt.Sprintf("worktree remove failed: %v", err2)}
+			}
 		}
 		return WorktreeRemovedMsg{}
 	}
@@ -394,6 +420,78 @@ func waitForExitCmd(worktreeName string) tea.Cmd {
 		csmtmux.WaitForExit(worktreeName)
 		return sessionExitedMsg{WorktreeName: worktreeName}
 	}
+}
+
+type settingsExitedMsg struct{}
+type deleteExitedMsg struct {
+	worktreeName string
+	confirmed    bool
+}
+
+func (m *PickerModel) swapOutCurrentWT() {
+	if m.currentWT != "" {
+		csmtmux.SwapBackFromRight(m.currentWT)
+		m.currentWT = ""
+	}
+}
+
+func (m *PickerModel) openSettings() tea.Cmd {
+	m.swapOutCurrentWT()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+
+	cmd := fmt.Sprintf("%s --settings --path %s", exe, m.rootPath)
+	csmtmux.RunInRightPane("csm-settings", cmd)
+	csmtmux.FocusRight()
+
+	return func() tea.Msg {
+		csmtmux.WaitAndCleanupRightPane("csm-settings")
+		return settingsExitedMsg{}
+	}
+}
+
+func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
+	m.swapOutCurrentWT()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+
+	taskName := ""
+	if tn, ok := m.taskNames[wt.Path]; ok {
+		taskName = tn
+	}
+
+	dirty := worktree.HasChanges(wt.Path)
+
+	cmd := fmt.Sprintf("%s --delete %s", exe, wt.Name)
+	if taskName != "" {
+		cmd += fmt.Sprintf(" --delete-task '%s'", taskName)
+	}
+	if dirty {
+		cmd += " --delete-dirty"
+	}
+	csmtmux.RunInRightPane("csm-delete", cmd)
+	csmtmux.FocusRight()
+
+	wtName := wt.Name
+	return func() tea.Msg {
+		exitCode := csmtmux.WaitAndCleanupRightPane("csm-delete")
+		return deleteExitedMsg{worktreeName: wtName, confirmed: exitCode == 0}
+	}
+}
+
+func (m *PickerModel) reloadDoorayClient() {
+	projectSettings, err := config.LoadProjectSettings(m.rootPath)
+	if err != nil {
+		return
+	}
+	m.dooray = integration.NewDoorayClient(projectSettings.Dooray)
+	m.taskNames = make(map[string]string)
 }
 
 func (m *PickerModel) switchToWorktree(wt *worktree.Worktree) {
@@ -462,8 +560,6 @@ func (m PickerModel) View() string {
 					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
 					statusBarStyle.Render("Press any key to dismiss"))
 		view = m.overlayCenter(view, errDialog)
-	} else if m.deleteDialog.IsVisible() {
-		view = m.overlayCenter(view, m.deleteDialog.View())
 	} else if m.worktreeDialog.IsVisible() {
 		view = m.overlayCenter(view, m.worktreeDialog.View())
 	} else if m.confirmDialog.IsVisible() {
@@ -483,23 +579,58 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		indicator = activeSessionStyle.String()
 	}
 	if m.currentWT == wt.Name {
-		indicator = lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("▶")
+		indicator = lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("●")
 	}
-
-	cursor := " "
-	nameStyle := normalItemStyle
 	if isSelected {
-		cursor = lipgloss.NewStyle().Foreground(primaryColor).Render("▸")
-		nameStyle = selectedItemStyle
+		indicator = lipgloss.NewStyle().Foreground(primaryColor).Bold(true).Render("●")
 	}
 
-	line1 := fmt.Sprintf("%s%s %s", cursor, indicator, nameStyle.Render(wt.Name))
+	// Line 1: task name or branch or folder name
+	var primaryName string
+	var subLines []string
 
+	taskName, hasTask := m.taskNames[wt.Path]
+	hasTask = hasTask && taskName != ""
+	gs, hasBranch := m.gitStatus[wt.Path]
+
+	primaryStyle := taskNameStyle
+	if isSelected {
+		primaryStyle = lipgloss.NewStyle().Foreground(primaryColor).Bold(true)
+	}
+
+	// Calculate available width for primary name
+	prefixWidth := 2 // indicator(1) + space(1)
+	stateStr := ""
 	if state, ok := m.claudeStates[wt.Name]; ok && hasSession {
-		rendered := renderClaudeState(state, m.spinnerFrame)
-		if rendered != "" {
-			line1 += " " + rendered
+		stateStr = renderClaudeState(state, m.spinnerFrame)
+	}
+	stateWidth := 0
+	if stateStr != "" {
+		stateWidth = lipgloss.Width(stateStr) + 1
+	}
+	maxNameWidth := m.width - prefixWidth - stateWidth
+
+	var rawName string
+	if hasTask {
+		rawName = taskName
+		if hasBranch {
+			subLines = append(subLines, gitStatusStyle.Render(gs.Summary()))
 		}
+		subLines = append(subLines, normalItemStyle.Render(wt.Name))
+	} else if hasBranch {
+		rawName = gs.Summary()
+		subLines = append(subLines, normalItemStyle.Render(wt.Name))
+	} else {
+		rawName = wt.Name
+	}
+
+	displayName := scrollText(rawName, maxNameWidth, m.scrollTick)
+	primaryName = primaryStyle.Render(displayName)
+
+	line1 := fmt.Sprintf("%s %s", indicator, primaryName)
+
+	if stateStr != "" {
+		line1 += " " + stateStr
 	}
 
 	bar := "  "
@@ -507,22 +638,9 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		bar = lipgloss.NewStyle().Foreground(primaryColor).Render("▎") + " "
 	}
 
-	var line2 string
-	if taskName, ok := m.taskNames[wt.Path]; ok && taskName != "" {
-		line2 = fmt.Sprintf("  %s%s", bar, taskNameStyle.Render(taskName))
-	}
-
-	var line3 string
-	if gs, ok := m.gitStatus[wt.Path]; ok {
-		line3 = fmt.Sprintf("  %s%s", bar, gitStatusStyle.Render(gs.Summary()))
-	}
-
 	result := line1
-	if line2 != "" {
-		result += "\n" + line2
-	}
-	if line3 != "" {
-		result += "\n" + line3
+	for _, sub := range subLines {
+		result += "\n" + fmt.Sprintf("  %s%s", bar, sub)
 	}
 
 	return result
@@ -554,11 +672,11 @@ func (m PickerModel) fetchGitStatus(path string) tea.Cmd {
 	}
 }
 
-func (m PickerModel) fetchTaskName(wt worktree.Worktree) tea.Cmd {
+func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
 	dooray := m.dooray
 	return func() tea.Msg {
-		name := dooray.ResolveTaskName(wt.Name)
-		return TaskNameResolvedMsg{Path: wt.Path, Name: name}
+		name := dooray.ResolveTaskName(branch)
+		return TaskNameResolvedMsg{Path: path, Name: name}
 	}
 }
 
@@ -578,6 +696,74 @@ func spinnerTickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 		return spinnerTickMsg(t)
 	})
+}
+
+func scrollTickCmd() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		return scrollTickMsg(t)
+	})
+}
+
+func scrollText(text string, maxWidth int, tick int) string {
+	runes := []rune(text)
+	if maxWidth <= 0 {
+		return text
+	}
+
+	// Check visual width (CJK chars take 2 columns)
+	textWidth := lipgloss.Width(text)
+	if textWidth <= maxWidth {
+		return text
+	}
+
+	// Build a list of rune visual widths
+	runeWidths := make([]int, len(runes))
+	for i, r := range runes {
+		runeWidths[i] = lipgloss.Width(string(r))
+	}
+
+	// Count how many scroll steps are needed
+	// Each step drops one rune from the left
+	maxOffset := 0
+	for off := 1; off <= len(runes); off++ {
+		// Width from runes[off:]
+		w := 0
+		for j := off; j < len(runes); j++ {
+			w += runeWidths[j]
+		}
+		if w <= maxWidth {
+			maxOffset = off
+			break
+		}
+		maxOffset = off
+	}
+
+	if maxOffset == 0 {
+		return text
+	}
+
+	pauseTicks := 4 // ~0.8s pause
+	totalTicks := pauseTicks + maxOffset + pauseTicks
+
+	phase := tick % totalTicks
+
+	var offset int
+	if phase < pauseTicks {
+		offset = 0
+	} else if phase < pauseTicks+maxOffset {
+		offset = phase - pauseTicks
+	} else {
+		offset = maxOffset
+	}
+
+	// Truncate from offset to fit maxWidth
+	w := 0
+	end := offset
+	for end < len(runes) && w+runeWidths[end] <= maxWidth {
+		w += runeWidths[end]
+		end++
+	}
+	return string(runes[offset:end])
 }
 
 func (m PickerModel) fetchClaudeState(worktreeName string) tea.Cmd {

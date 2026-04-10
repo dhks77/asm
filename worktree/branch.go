@@ -94,10 +94,21 @@ func CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch string) 
 	return err
 }
 
-// RemoveWorktree removes a git worktree by path.
-func RemoveWorktree(repoDir, targetPath string) error {
-	_, err := runGit(repoDir, "worktree", "remove", targetPath)
+// RemoveWorktree removes a git worktree by path, using --force if needed.
+func RemoveWorktree(repoDir, targetPath string, force bool) error {
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, targetPath)
+	_, err := runGit(repoDir, args...)
 	return err
+}
+
+// HasChanges returns true if the worktree has modified or untracked files.
+func HasChanges(dir string) bool {
+	gs := GetGitStatus(dir)
+	return gs.Staged+gs.Unstaged+gs.Untracked > 0
 }
 
 // BranchToFolderName converts a branch name to a suitable folder name.
