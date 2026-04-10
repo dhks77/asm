@@ -113,7 +113,7 @@ func runOrchestrator(cfg *config.Config, rootPath string) {
 
 func runPicker(cfg *config.Config, rootPath string) {
 	model := ui.NewPickerModel(cfg, rootPath)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

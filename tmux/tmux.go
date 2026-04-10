@@ -76,6 +76,9 @@ func CreateSession(pickerCmd string) error {
 	// Timeout for key table (400ms) — if no second Tab, just return to root
 	exec.Command("tmux", "set-option", "-t", SessionName, "repeat-time", "400").Run()
 
+	// Enable focus events so Bubble Tea can detect pane focus/blur
+	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()
+
 	return nil
 }
 

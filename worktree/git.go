@@ -8,23 +8,28 @@ import (
 )
 
 type GitStatus struct {
-	Branch     string
-	Ahead      int
-	Behind     int
-	Staged     int
-	Unstaged   int
-	Untracked  int
+	Branch    string
+	HasRemote bool
+	Ahead     int
+	Behind    int
+	Staged    int
+	Unstaged  int
+	Untracked int
 }
 
 func (s GitStatus) Summary() string {
 	var parts []string
 	parts = append(parts, s.Branch)
 
-	if s.Ahead > 0 {
-		parts = append(parts, "↑"+strconv.Itoa(s.Ahead))
-	}
-	if s.Behind > 0 {
-		parts = append(parts, "↓"+strconv.Itoa(s.Behind))
+	if !s.HasRemote {
+		parts = append(parts, "⊘")
+	} else {
+		if s.Ahead > 0 {
+			parts = append(parts, "↑"+strconv.Itoa(s.Ahead))
+		}
+		if s.Behind > 0 {
+			parts = append(parts, "↓"+strconv.Itoa(s.Behind))
+		}
 	}
 
 	changes := s.Staged + s.Unstaged + s.Untracked
@@ -56,9 +61,10 @@ func GetGitStatus(dir string) GitStatus {
 	}
 	status.Branch = strings.TrimSpace(out)
 
-	// Ahead/behind
+	// Ahead/behind (fails if no upstream → HasRemote = false)
 	out, err = runGit(dir, "rev-list", "--left-right", "--count", status.Branch+"...@{upstream}")
 	if err == nil {
+		status.HasRemote = true
 		parts := strings.Fields(strings.TrimSpace(out))
 		if len(parts) == 2 {
 			status.Ahead, _ = strconv.Atoi(parts[0])

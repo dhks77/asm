@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -62,6 +63,7 @@ type PickerModel struct {
 	confirmDialog  ConfirmDialogModel
 	worktreeDialog WorktreeDialogModel
 	deleteDialog   DeleteDialogModel
+	focused        bool
 	width          int
 	height         int
 	ready          bool
@@ -81,6 +83,7 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 		confirmDialog:  NewConfirmDialogModel(),
 		worktreeDialog: NewWorktreeDialogModel(),
 		deleteDialog:   NewDeleteDialogModel(),
+		focused:        true,
 	}
 }
 
@@ -94,6 +97,14 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
+		return m, nil
+
+	case tea.FocusMsg:
+		m.focused = true
+		return m, nil
+
+	case tea.BlurMsg:
+		m.focused = false
 		return m, nil
 
 	case tickMsg:
@@ -264,11 +275,11 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		csmtmux.KillSession()
 		return m, tea.Quit
 
-	case "up", "k":
+	case "up":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-	case "down", "j":
+	case "down":
 		if m.cursor < len(m.worktrees)-1 {
 			m.cursor++
 		}
@@ -406,7 +417,12 @@ func (m PickerModel) View() string {
 		return "Loading..."
 	}
 
-	title := headerStyle.Render("CSM")
+	var title string
+	if m.focused {
+		title = headerStyle.Render(filepath.Base(m.rootPath))
+	} else {
+		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
+	}
 
 	var rows []string
 	activeWindows := csmtmux.ListWorktreeWindows()
@@ -422,7 +438,7 @@ func (m PickerModel) View() string {
 
 	list := strings.Join(rows, "\n")
 
-	statusBar := RenderStatusBar(m.width)
+	statusBar := RenderStatusBar(m.width, m.focused)
 
 	contentHeight := m.height - 3
 	content := title + "\n" + list
@@ -470,12 +486,14 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		indicator = lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("▶")
 	}
 
+	cursor := " "
 	nameStyle := normalItemStyle
 	if isSelected {
+		cursor = lipgloss.NewStyle().Foreground(primaryColor).Render("▸")
 		nameStyle = selectedItemStyle
 	}
 
-	line1 := fmt.Sprintf(" %s %s", indicator, nameStyle.Render(wt.Name))
+	line1 := fmt.Sprintf("%s%s %s", cursor, indicator, nameStyle.Render(wt.Name))
 
 	if state, ok := m.claudeStates[wt.Name]; ok && hasSession {
 		rendered := renderClaudeState(state, m.spinnerFrame)
@@ -484,14 +502,19 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		}
 	}
 
+	bar := "  "
+	if isSelected {
+		bar = lipgloss.NewStyle().Foreground(primaryColor).Render("▎") + " "
+	}
+
 	var line2 string
 	if taskName, ok := m.taskNames[wt.Path]; ok && taskName != "" {
-		line2 = fmt.Sprintf("     %s", taskNameStyle.Render(taskName))
+		line2 = fmt.Sprintf("  %s%s", bar, taskNameStyle.Render(taskName))
 	}
 
 	var line3 string
 	if gs, ok := m.gitStatus[wt.Path]; ok {
-		line3 = fmt.Sprintf("     %s", gitStatusStyle.Render(gs.Summary()))
+		line3 = fmt.Sprintf("  %s%s", bar, gitStatusStyle.Render(gs.Summary()))
 	}
 
 	result := line1
