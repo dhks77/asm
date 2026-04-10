@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -60,7 +61,8 @@ type PickerModel struct {
 	spinnerFrame   int
 	scrollTick     int
 	cursor         int
-	currentWT      string // worktree name currently shown in right pane
+	currentWT      string // worktree name whose Claude session is shown in right pane
+	currentTerm    string // worktree name whose terminal is shown in right pane
 	dooray         *integration.DoorayClient
 	resumeDialog   ResumeDialogModel
 	confirmDialog  ConfirmDialogModel
@@ -155,7 +157,14 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		csmtmux.CleanupExitedWindow(msg.WorktreeName, isDisplayed)
 		if isDisplayed {
 			m.currentWT = ""
-			csmtmux.FocusLeft()
+			// Show terminal for this worktree if it exists
+			termWin := csmtmux.TerminalWindowName(msg.WorktreeName)
+			if csmtmux.WindowExists(termWin) {
+				csmtmux.SwapTermToRight(msg.WorktreeName)
+				m.currentTerm = msg.WorktreeName
+			} else {
+				csmtmux.FocusLeft()
+			}
 		}
 		return m, nil
 
@@ -192,6 +201,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		winName := csmtmux.WindowName(wt.Name)
 		if csmtmux.WindowExists(winName) {
 			csmtmux.KillWorktreeWindow(wt.Name)
+		}
+		termWinName := csmtmux.TerminalWindowName(wt.Name)
+		if csmtmux.WindowExists(termWinName) {
+			csmtmux.KillTerminalWindow(wt.Name)
 		}
 		return m, m.removeWorktree(wt)
 
@@ -259,6 +272,25 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TaskNameResolvedMsg:
 		if msg.Name != "" {
 			m.taskNames[msg.Path] = msg.Name
+		}
+		return m, nil
+
+	case terminalExitedMsg:
+		isDisplayed := m.currentTerm == msg.worktreeName
+		if isDisplayed {
+			csmtmux.SwapTermBackFromRight(msg.worktreeName)
+			m.currentTerm = ""
+		}
+		csmtmux.KillTerminalWindow(msg.worktreeName)
+		if isDisplayed {
+			// Show Claude session for this worktree if it exists
+			winName := csmtmux.WindowName(msg.worktreeName)
+			if csmtmux.WindowExists(winName) {
+				csmtmux.SwapToRight(msg.worktreeName)
+				m.currentWT = msg.worktreeName
+			} else {
+				csmtmux.FocusLeft()
+			}
 		}
 		return m, nil
 
@@ -357,12 +389,22 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.worktreeDialog.SetSize(m.width, m.height)
 		return m, m.worktreeDialog.Show(m.rootPath)
 
+	case "t":
+		wt := m.selectedWorktree()
+		if wt == nil {
+			return m, nil
+		}
+		return m, m.switchToTerminal(wt)
+
+	case "f12":
+		return m, m.toggleTerminal()
+
 	case "s":
 		return m, m.openSettings()
 
 	case "tab":
 		// Focus the right tmux pane
-		if m.currentWT != "" {
+		if m.currentWT != "" || m.currentTerm != "" {
 			csmtmux.FocusRight()
 		}
 	}
@@ -423,20 +465,27 @@ func waitForExitCmd(worktreeName string) tea.Cmd {
 }
 
 type settingsExitedMsg struct{}
+type terminalExitedMsg struct {
+	worktreeName string
+}
 type deleteExitedMsg struct {
 	worktreeName string
 	confirmed    bool
 }
 
-func (m *PickerModel) swapOutCurrentWT() {
+func (m *PickerModel) swapOutRightPane() {
 	if m.currentWT != "" {
 		csmtmux.SwapBackFromRight(m.currentWT)
 		m.currentWT = ""
 	}
+	if m.currentTerm != "" {
+		csmtmux.SwapTermBackFromRight(m.currentTerm)
+		m.currentTerm = ""
+	}
 }
 
 func (m *PickerModel) openSettings() tea.Cmd {
-	m.swapOutCurrentWT()
+	m.swapOutRightPane()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -454,7 +503,7 @@ func (m *PickerModel) openSettings() tea.Cmd {
 }
 
 func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
-	m.swapOutCurrentWT()
+	m.swapOutRightPane()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -485,6 +534,78 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 	}
 }
 
+func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
+	// Already showing this terminal
+	if m.currentTerm == wt.Name {
+		csmtmux.FocusRight()
+		return nil
+	}
+
+	// Swap out whatever is in the right pane
+	m.swapOutRightPane()
+
+	// Create terminal if needed
+	var cmd tea.Cmd
+	termWin := csmtmux.TerminalWindowName(wt.Name)
+	if !csmtmux.WindowExists(termWin) {
+		csmtmux.CreateTerminalWindow(wt.Name, wt.Path)
+		cmd = waitForTermExitCmd(wt.Name)
+	}
+
+	csmtmux.SwapTermToRight(wt.Name)
+	m.currentTerm = wt.Name
+	csmtmux.FocusRight()
+	return cmd
+}
+
+func (m *PickerModel) toggleTerminal() tea.Cmd {
+	if m.currentWT != "" {
+		// Claude is displayed → switch to terminal
+		wtName := m.currentWT
+		var wtPath string
+		for _, wt := range m.worktrees {
+			if wt.Name == wtName {
+				wtPath = wt.Path
+				break
+			}
+		}
+		if wtPath == "" {
+			return nil
+		}
+		csmtmux.SwapBackFromRight(wtName)
+		m.currentWT = ""
+
+		var cmd tea.Cmd
+		termWin := csmtmux.TerminalWindowName(wtName)
+		if !csmtmux.WindowExists(termWin) {
+			csmtmux.CreateTerminalWindow(wtName, wtPath)
+			cmd = waitForTermExitCmd(wtName)
+		}
+		csmtmux.SwapTermToRight(wtName)
+		m.currentTerm = wtName
+		return cmd
+	} else if m.currentTerm != "" {
+		// Terminal is displayed → switch to Claude (if exists)
+		wtName := m.currentTerm
+		csmtmux.SwapTermBackFromRight(wtName)
+		m.currentTerm = ""
+
+		winName := csmtmux.WindowName(wtName)
+		if csmtmux.WindowExists(winName) {
+			csmtmux.SwapToRight(wtName)
+			m.currentWT = wtName
+		}
+	}
+	return nil
+}
+
+func waitForTermExitCmd(worktreeName string) tea.Cmd {
+	return func() tea.Msg {
+		exec.Command("tmux", "wait-for", csmtmux.TermExitSignalName(worktreeName)).Run()
+		return terminalExitedMsg{worktreeName: worktreeName}
+	}
+}
+
 func (m *PickerModel) reloadDoorayClient() {
 	projectSettings, err := config.LoadProjectSettings(m.rootPath)
 	if err != nil {
@@ -495,8 +616,16 @@ func (m *PickerModel) reloadDoorayClient() {
 }
 
 func (m *PickerModel) switchToWorktree(wt *worktree.Worktree) {
-	if m.currentWT != "" && m.currentWT != wt.Name {
+	if m.currentWT == wt.Name {
+		csmtmux.FocusRight()
+		return
+	}
+	if m.currentWT != "" {
 		csmtmux.SwapBackFromRight(m.currentWT)
+	}
+	if m.currentTerm != "" {
+		csmtmux.SwapTermBackFromRight(m.currentTerm)
+		m.currentTerm = ""
 	}
 	csmtmux.SwapToRight(wt.Name)
 	m.currentWT = wt.Name
@@ -600,15 +729,7 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 
 	// Calculate available width for primary name
 	prefixWidth := 2 // indicator(1) + space(1)
-	stateStr := ""
-	if state, ok := m.claudeStates[wt.Name]; ok && hasSession {
-		stateStr = renderClaudeState(state, m.spinnerFrame)
-	}
-	stateWidth := 0
-	if stateStr != "" {
-		stateWidth = lipgloss.Width(stateStr) + 1
-	}
-	maxNameWidth := m.width - prefixWidth - stateWidth
+	maxNameWidth := m.width - prefixWidth
 
 	var rawName string
 	if hasTask {
@@ -624,14 +745,23 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		rawName = wt.Name
 	}
 
+	// State as sub-line (prepend to subLines)
+	var stateLine string
+	if hasSession {
+		if state, ok := m.claudeStates[wt.Name]; ok {
+			stateLine = renderClaudeState(state, m.spinnerFrame)
+		}
+	} else {
+		stateLine = ClosedStateStyle.Render("closed")
+	}
+	if stateLine != "" {
+		subLines = append([]string{stateLine}, subLines...)
+	}
+
 	displayName := scrollText(rawName, maxNameWidth, m.scrollTick)
 	primaryName = primaryStyle.Render(displayName)
 
 	line1 := fmt.Sprintf("%s %s", indicator, primaryName)
-
-	if stateStr != "" {
-		line1 += " " + stateStr
-	}
 
 	bar := "  "
 	if isSelected {

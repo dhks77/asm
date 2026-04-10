@@ -63,8 +63,9 @@ var (
 				Align(lipgloss.Center)
 
 	// Claude state styles
-	IdleStateStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	BusyStateStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	ClosedStateStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	IdleStateStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	BusyStateStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	ThinkingStateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	ToolUseStateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	RespondingStateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))

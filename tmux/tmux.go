@@ -73,6 +73,14 @@ func CreateSession(pickerCmd string) error {
 		"select-pane", "-t", target,
 	).Run()
 
+	// Ctrl+t in right pane → toggle terminal/claude (sends F12 to picker)
+	// Key is intercepted by tmux, never reaches the pane — no unwanted input
+	exec.Command("tmux", "bind-key", "-T", "root", "C-t",
+		"if-shell", "-F", "#{==:#{pane_index},1}",
+		fmt.Sprintf("send-keys -t %s F12", target),
+		"",
+	).Run()
+
 	// Timeout for key table (400ms) — if no second Tab, just return to root
 	exec.Command("tmux", "set-option", "-t", SessionName, "repeat-time", "400").Run()
 
@@ -315,6 +323,70 @@ func GetPaneTitle(worktreeName string, isDisplayed bool) (string, error) {
 // KillSession kills the entire csm tmux session.
 func KillSession() error {
 	return exec.Command("tmux", "kill-session", "-t", SessionName).Run()
+}
+
+// TerminalWindowName returns the tmux window name for a worktree's terminal.
+func TerminalWindowName(worktreeName string) string {
+	return "term-" + worktreeName
+}
+
+// TermExitSignalName returns the tmux wait-for signal name for a terminal.
+func TermExitSignalName(worktreeName string) string {
+	return "csm-term-exit-" + worktreeName
+}
+
+// CreateTerminalWindow creates a hidden tmux window with a shell at the worktree path.
+// When the shell exits, sends a wait-for signal for cleanup.
+func CreateTerminalWindow(worktreeName, worktreePath string) error {
+	winName := TerminalWindowName(worktreeName)
+
+	err := exec.Command("tmux", "new-window", "-d",
+		"-t", SessionName,
+		"-n", winName,
+		"-c", worktreePath,
+	).Run()
+	if err != nil {
+		return err
+	}
+
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "zsh"
+	}
+
+	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(worktreeName))
+	fullCmd := shell + " ; " + exitSignal
+
+	return exec.Command("tmux", "send-keys",
+		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
+		fullCmd, "Enter",
+	).Run()
+}
+
+// SwapTermToRight swaps a terminal window's pane into the main window's right pane.
+func SwapTermToRight(worktreeName string) error {
+	winName := TerminalWindowName(worktreeName)
+	return exec.Command("tmux", "swap-pane",
+		"-s", fmt.Sprintf("%s:%s.0", SessionName, winName),
+		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+	).Run()
+}
+
+// SwapTermBackFromRight swaps the right pane back to the terminal's hidden window.
+func SwapTermBackFromRight(worktreeName string) error {
+	winName := TerminalWindowName(worktreeName)
+	return exec.Command("tmux", "swap-pane",
+		"-s", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+		"-t", fmt.Sprintf("%s:%s.0", SessionName, winName),
+	).Run()
+}
+
+// KillTerminalWindow kills a terminal's tmux window.
+func KillTerminalWindow(worktreeName string) error {
+	winName := TerminalWindowName(worktreeName)
+	return exec.Command("tmux", "kill-window",
+		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
+	).Run()
 }
 
 // ListWorktreeWindows returns worktree names (without "wt-" prefix) of all active worktree windows.
