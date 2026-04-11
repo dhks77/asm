@@ -703,15 +703,24 @@ func (m PickerModel) View() string {
 func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool) string {
 	isSelected := index == m.cursor
 
+	dimmed := !m.focused && !isSelected
+
 	indicator := inactiveSessionStyle.String()
 	if hasSession {
 		indicator = activeSessionStyle.String()
 	}
-	if m.currentWT == wt.Name {
+	if m.currentWT == wt.Name || m.currentTerm == wt.Name {
 		indicator = lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("●")
 	}
 	if isSelected {
 		indicator = lipgloss.NewStyle().Foreground(primaryColor).Bold(true).Render("●")
+	}
+	if dimmed {
+		if hasSession || m.currentWT == wt.Name || m.currentTerm == wt.Name {
+			indicator = lipgloss.NewStyle().Foreground(dimColor).Render("●")
+		} else {
+			indicator = lipgloss.NewStyle().Foreground(dimColor).Render("○")
+		}
 	}
 
 	// Line 1: task name or branch or folder name
@@ -725,6 +734,9 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	primaryStyle := taskNameStyle
 	if isSelected {
 		primaryStyle = lipgloss.NewStyle().Foreground(primaryColor).Bold(true)
+	}
+	if dimmed {
+		primaryStyle = lipgloss.NewStyle().Foreground(dimColor)
 	}
 
 	// Calculate available width for primary name
