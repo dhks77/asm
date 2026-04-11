@@ -18,8 +18,8 @@ import (
 )
 
 // Messages
-type WorktreesScannedMsg struct {
-	Worktrees []worktree.Worktree
+type DirectoriesScannedMsg struct {
+	Directories []worktree.Worktree
 }
 
 type GitStatusUpdatedMsg struct {
@@ -45,7 +45,7 @@ type spinnerTickMsg time.Time
 type scrollTickMsg time.Time
 
 type sessionExitedMsg struct {
-	WorktreeName string
+	DirName string
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -53,7 +53,7 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 type PickerModel struct {
 	cfg            *config.Config
 	rootPath       string
-	worktrees      []worktree.Worktree
+	directories    []worktree.Worktree
 	gitStatus      map[string]worktree.GitStatus
 	taskNames      map[string]string
 	claudeStates   map[string]claude.State
@@ -61,15 +61,15 @@ type PickerModel struct {
 	scrollTick     int
 	cursor         int
 	viewTop        int    // first visible item index for scrolling
-	currentWT      string // worktree name whose Claude session is shown in right pane
-	currentTerm    string // worktree name whose terminal is shown in right pane
+	workingDir     string // directory shown in working panel (Claude session)
+	termDir        string // directory shown in working panel (terminal)
 	dooray         *integration.DoorayClient
-	worktreeDialog WorktreeDialogModel
 	focused        bool
 	width          int
 	height         int
 	ready          bool
 	err            string
+	searchQuery    string
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
@@ -85,13 +85,45 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 		taskNames:      make(map[string]string),
 		claudeStates:   make(map[string]claude.State),
 		dooray:         dooray,
-		worktreeDialog: NewWorktreeDialogModel(),
 		focused:        true,
 	}
 }
 
+// filteredDirectories returns indices into m.directories matching the current search query.
+func (m *PickerModel) filteredDirectories() []int {
+	if m.searchQuery == "" {
+		indices := make([]int, len(m.directories))
+		for i := range m.directories {
+			indices[i] = i
+		}
+		return indices
+	}
+
+	query := strings.ToLower(m.searchQuery)
+	var indices []int
+	for i, wt := range m.directories {
+		if strings.Contains(strings.ToLower(wt.Name), query) {
+			indices = append(indices, i)
+			continue
+		}
+		if taskName, ok := m.taskNames[wt.Path]; ok && taskName != "" {
+			if strings.Contains(strings.ToLower(taskName), query) {
+				indices = append(indices, i)
+				continue
+			}
+		}
+		if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
+			if strings.Contains(strings.ToLower(gs.Branch), query) {
+				indices = append(indices, i)
+				continue
+			}
+		}
+	}
+	return indices
+}
+
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanWorktrees(), tickCmd(), claudeStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
+	return tea.Batch(m.scanDirectories(), tickCmd(), claudeStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -112,7 +144,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		var cmds []tea.Cmd
-		for _, wt := range m.worktrees {
+		for _, wt := range m.directories {
 			cmds = append(cmds, m.fetchGitStatus(wt.Path))
 		}
 		cmds = append(cmds, tickCmd())
@@ -120,12 +152,12 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case claudeStateTickMsg:
 		var cmds []tea.Cmd
-		activeWindows := csmtmux.ListWorktreeWindows()
+		activeWindows := csmtmux.ListDirectoryWindows()
 		activeSet := make(map[string]bool)
 		for _, name := range activeWindows {
 			activeSet[name] = true
 		}
-		for _, wt := range m.worktrees {
+		for _, wt := range m.directories {
 			if activeSet[wt.Name] {
 				cmds = append(cmds, m.fetchClaudeState(wt.Name))
 			}
@@ -148,32 +180,30 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scrollTickCmd()
 
 	case sessionExitedMsg:
-		delete(m.claudeStates, msg.WorktreeName)
-		isDisplayed := m.currentWT == msg.WorktreeName
-		csmtmux.CleanupExitedWindow(msg.WorktreeName, isDisplayed)
+		delete(m.claudeStates, msg.DirName)
+		isDisplayed := m.workingDir == msg.DirName
+		csmtmux.CleanupExitedWindow(msg.DirName, isDisplayed)
 		if isDisplayed {
-			m.currentWT = ""
-			// Show terminal for this worktree if it exists
-			termWin := csmtmux.TerminalWindowName(msg.WorktreeName)
+			m.workingDir = ""
+			// Show terminal for this directory if it exists
+			termWin := csmtmux.TerminalWindowName(msg.DirName)
 			if csmtmux.WindowExists(termWin) {
-				csmtmux.SwapTermToRight(msg.WorktreeName)
-				m.currentTerm = msg.WorktreeName
+				csmtmux.SwapTermToWorkingPanel(msg.DirName)
+				m.termDir = msg.DirName
 			} else {
-				csmtmux.FocusLeft()
+				csmtmux.FocusPickingPanel()
 			}
 		}
 		return m, nil
 
-	case BranchesLoadedMsg:
-		var cmd tea.Cmd
-		m.worktreeDialog, cmd = m.worktreeDialog.Update(msg)
-		return m, cmd
-
-	case WorktreeCreatedMsg, WorktreeRemovedMsg:
-		return m, m.scanWorktrees()
-
-	case WorktreeCancelledMsg:
+	case worktreeExitedMsg:
+		if msg.created {
+			return m, m.scanDirectories()
+		}
 		return m, nil
+
+	case DirectoryRemovedMsg:
+		return m, m.scanDirectories()
 
 	case WorktreeErrorMsg:
 		m.err = msg.Err
@@ -184,9 +214,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		var wt *worktree.Worktree
-		for i := range m.worktrees {
-			if m.worktrees[i].Name == msg.worktreeName {
-				wt = &m.worktrees[i]
+		for i := range m.directories {
+			if m.directories[i].Name == msg.dirName {
+				wt = &m.directories[i]
 				break
 			}
 		}
@@ -196,30 +226,30 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.claudeStates, wt.Name)
 		winName := csmtmux.WindowName(wt.Name)
 		if csmtmux.WindowExists(winName) {
-			csmtmux.KillWorktreeWindow(wt.Name)
+			csmtmux.KillDirectoryWindow(wt.Name)
 		}
 		termWinName := csmtmux.TerminalWindowName(wt.Name)
 		if csmtmux.WindowExists(termWinName) {
 			csmtmux.KillTerminalWindow(wt.Name)
 		}
-		return m, m.removeWorktree(wt)
+		return m, m.removeDirectory(wt)
 
 	case tea.KeyMsg:
 		if m.err != "" {
 			m.err = ""
 			return m, nil
 		}
-		if m.worktreeDialog.IsVisible() {
-			var cmd tea.Cmd
-			m.worktreeDialog, cmd = m.worktreeDialog.Update(msg)
-			return m, cmd
-		}
 		return m.handleKey(msg)
 
-	case WorktreesScannedMsg:
-		m.worktrees = msg.Worktrees
+	case DirectoriesScannedMsg:
+		m.directories = msg.Directories
+		filtered := m.filteredDirectories()
+		if m.cursor >= len(filtered) {
+			m.cursor = max(0, len(filtered)-1)
+		}
+		m.viewTop = 0
 		var cmds []tea.Cmd
-		for _, wt := range msg.Worktrees {
+		for _, wt := range msg.Directories {
 			cmds = append(cmds, m.fetchGitStatus(wt.Path))
 		}
 		return m, tea.Batch(cmds...)
@@ -240,20 +270,20 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case terminalExitedMsg:
-		isDisplayed := m.currentTerm == msg.worktreeName
+		isDisplayed := m.termDir == msg.dirName
 		if isDisplayed {
-			csmtmux.SwapTermBackFromRight(msg.worktreeName)
-			m.currentTerm = ""
+			csmtmux.SwapTermBackFromWorkingPanel(msg.dirName)
+			m.termDir = ""
 		}
-		csmtmux.KillTerminalWindow(msg.worktreeName)
+		csmtmux.KillTerminalWindow(msg.dirName)
 		if isDisplayed {
-			// Show Claude session for this worktree if it exists
-			winName := csmtmux.WindowName(msg.worktreeName)
+			// Show Claude session for this directory if it exists
+			winName := csmtmux.WindowName(msg.dirName)
 			if csmtmux.WindowExists(winName) {
-				csmtmux.SwapToRight(msg.worktreeName)
-				m.currentWT = msg.worktreeName
+				csmtmux.SwapToWorkingPanel(msg.dirName)
+				m.workingDir = msg.dirName
 			} else {
-				csmtmux.FocusLeft()
+				csmtmux.FocusPickingPanel()
 			}
 		}
 		return m, nil
@@ -262,7 +292,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reloadDoorayClient()
 		if m.dooray != nil {
 			var cmds []tea.Cmd
-			for _, wt := range m.worktrees {
+			for _, wt := range m.directories {
 				if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
 					cmds = append(cmds, m.fetchTaskName(wt.Path, gs.Branch))
 				}
@@ -277,12 +307,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	filtered := m.filteredDirectories()
 
 	switch key {
 	case "ctrl+c":
-		csmtmux.KillSession()
-		return m, tea.Quit
-	case "q":
 		csmtmux.KillSession()
 		return m, tea.Quit
 
@@ -294,72 +322,38 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "down":
-		if m.cursor < len(m.worktrees)-1 {
+		if m.cursor < len(filtered)-1 {
 			m.cursor++
 			m.adjustViewTop()
 		}
 
 	case "enter":
-		wt := m.selectedWorktree()
+		wt := m.selectedDirectory()
 		if wt == nil {
 			return m, nil
 		}
 		winName := csmtmux.WindowName(wt.Name)
 		if csmtmux.WindowExists(winName) {
-			m.switchToWorktree(wt)
+			m.showInWorkingPanel(wt)
 		} else {
 			return m, m.startSession(wt)
 		}
 
-	case "n":
-		wt := m.selectedWorktree()
-		if wt == nil {
-			return m, nil
-		}
-		delete(m.claudeStates, wt.Name)
-		winName := csmtmux.WindowName(wt.Name)
-		if csmtmux.WindowExists(winName) {
-			if m.currentWT == wt.Name {
-				csmtmux.SwapBackFromRight(wt.Name)
-				m.currentWT = ""
-			}
-			csmtmux.KillWorktreeWindow(wt.Name)
-		}
-		return m, m.startSession(wt)
-
-	case "d":
-		wt := m.selectedWorktree()
-		if wt == nil {
-			return m, nil
-		}
-		return m, m.openDelete(wt)
-
-	case "w":
-		m.worktreeDialog.SetSize(m.width, m.height)
-		return m, m.worktreeDialog.Show(m.rootPath)
-
-	case "t":
-		wt := m.selectedWorktree()
-		if wt == nil {
-			return m, nil
-		}
-		return m, m.switchToTerminal(wt)
-
 	case "f12": // Ctrl+t: toggle terminal
-		if m.currentWT != "" || m.currentTerm != "" {
+		if m.workingDir != "" || m.termDir != "" {
 			return m, m.toggleTerminal()
 		}
-		wt := m.selectedWorktree()
+		wt := m.selectedDirectory()
 		if wt == nil {
 			return m, nil
 		}
 		return m, m.switchToTerminal(wt)
 
-	case "f11": // Ctrl+g from left pane: focus right or start Claude
-		if m.currentWT != "" || m.currentTerm != "" {
-			csmtmux.FocusRight()
+	case "f11": // Ctrl+g: focus working panel or start Claude
+		if m.workingDir != "" || m.termDir != "" {
+			csmtmux.FocusWorkingPanel()
 		} else {
-			wt := m.selectedWorktree()
+			wt := m.selectedDirectory()
 			if wt == nil {
 				return m, nil
 			}
@@ -367,18 +361,18 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "f10": // Ctrl+n: new Claude session
-		wt := m.contextWorktree()
+		wt := m.contextDirectory()
 		if wt == nil {
 			return m, nil
 		}
 		delete(m.claudeStates, wt.Name)
 		winName := csmtmux.WindowName(wt.Name)
 		if csmtmux.WindowExists(winName) {
-			if m.currentWT == wt.Name {
-				csmtmux.SwapBackFromRight(wt.Name)
-				m.currentWT = ""
+			if m.workingDir == wt.Name {
+				csmtmux.SwapBackFromWorkingPanel(wt.Name)
+				m.workingDir = ""
 			}
-			csmtmux.KillWorktreeWindow(wt.Name)
+			csmtmux.KillDirectoryWindow(wt.Name)
 		}
 		return m, m.startSession(wt)
 
@@ -390,23 +384,43 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "f7": // Ctrl+w: create worktree
-		m.worktreeDialog.SetSize(m.width, m.height)
-		return m, m.worktreeDialog.Show(m.rootPath)
+		dir := m.selectedDirectory()
+		if dir == nil {
+			return m, nil
+		}
+		return m, m.openWorktreeDialog(dir)
 
-	case "f6": // Ctrl+d: delete active worktree
-		wt := m.contextWorktree()
+	case "f6": // Ctrl+d: delete active directory
+		wt := m.contextDirectory()
 		if wt == nil {
 			return m, nil
 		}
 		return m, m.openDelete(wt)
 
-	case "s":
-		return m, m.openSettings()
+	case "backspace":
+		if len(m.searchQuery) > 0 {
+			runes := []rune(m.searchQuery)
+			m.searchQuery = string(runes[:len(runes)-1])
+			m.cursor = 0
+			m.viewTop = 0
+		}
 
-	case "tab":
-		// Focus the right tmux pane
-		if m.currentWT != "" || m.currentTerm != "" {
-			csmtmux.FocusRight()
+	case "esc":
+		if m.searchQuery != "" {
+			m.searchQuery = ""
+			m.cursor = 0
+			m.viewTop = 0
+		}
+
+	default:
+		if msg.Type == tea.KeyRunes {
+			m.searchQuery += string(msg.Runes)
+			m.cursor = 0
+			m.viewTop = 0
+		} else if msg.Type == tea.KeySpace {
+			m.searchQuery += " "
+			m.cursor = 0
+			m.viewTop = 0
 		}
 	}
 
@@ -415,61 +429,65 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *PickerModel) startSession(wt *worktree.Worktree) tea.Cmd {
 	claudePath := m.cfg.ResolveClaudePath()
-	csmtmux.CreateWorktreeWindow(wt.Name, wt.Path, claudePath, m.cfg.ClaudeArgs)
-	m.switchToWorktree(wt)
+	csmtmux.CreateDirectoryWindow(wt.Name, wt.Path, claudePath, m.cfg.ClaudeArgs)
+	m.showInWorkingPanel(wt)
 	return waitForExitCmd(wt.Name)
 }
 
-type WorktreeRemovedMsg struct{}
+type DirectoryRemovedMsg struct{}
 
-func (m *PickerModel) removeWorktree(wt *worktree.Worktree) tea.Cmd {
-	rootPath := m.rootPath
-	wtPath := wt.Path
+func (m *PickerModel) removeDirectory(dir *worktree.Worktree) tea.Cmd {
+	dirPath := dir.Path
 	return func() tea.Msg {
-		repoDir, err := worktree.FindGitRepo(rootPath)
-		if err != nil {
-			return WorktreeErrorMsg{Err: err.Error()}
-		}
-		// Try normal remove first, then force if it fails
-		if err := worktree.RemoveWorktree(repoDir, wtPath, false); err != nil {
-			if err2 := worktree.RemoveWorktree(repoDir, wtPath, true); err2 != nil {
-				return WorktreeErrorMsg{Err: fmt.Sprintf("worktree remove failed: %v", err2)}
+		if worktree.IsWorktree(dirPath) {
+			mainRepo, err := worktree.FindMainRepo(dirPath)
+			if err == nil {
+				if err := worktree.RemoveWorktree(mainRepo, dirPath, false); err != nil {
+					worktree.RemoveWorktree(mainRepo, dirPath, true)
+				}
+				return DirectoryRemovedMsg{}
 			}
 		}
-		return WorktreeRemovedMsg{}
+		if err := os.RemoveAll(dirPath); err != nil {
+			return WorktreeErrorMsg{Err: fmt.Sprintf("remove failed: %v", err)}
+		}
+		return DirectoryRemovedMsg{}
 	}
 }
 
-// waitForExitCmd returns a tea.Cmd that blocks until claude exits in the worktree.
-func waitForExitCmd(worktreeName string) tea.Cmd {
+// waitForExitCmd returns a tea.Cmd that blocks until claude exits in the directory.
+func waitForExitCmd(dirName string) tea.Cmd {
 	return func() tea.Msg {
-		csmtmux.WaitForExit(worktreeName)
-		return sessionExitedMsg{WorktreeName: worktreeName}
+		csmtmux.WaitForExit(dirName)
+		return sessionExitedMsg{DirName: dirName}
 	}
 }
 
 type settingsExitedMsg struct{}
+type worktreeExitedMsg struct {
+	created bool
+}
 type terminalExitedMsg struct {
-	worktreeName string
+	dirName string
 }
 type deleteExitedMsg struct {
-	worktreeName string
-	confirmed    bool
+	dirName   string
+	confirmed bool
 }
 
-func (m *PickerModel) swapOutRightPane() {
-	if m.currentWT != "" {
-		csmtmux.SwapBackFromRight(m.currentWT)
-		m.currentWT = ""
+func (m *PickerModel) swapOutWorkingPanel() {
+	if m.workingDir != "" {
+		csmtmux.SwapBackFromWorkingPanel(m.workingDir)
+		m.workingDir = ""
 	}
-	if m.currentTerm != "" {
-		csmtmux.SwapTermBackFromRight(m.currentTerm)
-		m.currentTerm = ""
+	if m.termDir != "" {
+		csmtmux.SwapTermBackFromWorkingPanel(m.termDir)
+		m.termDir = ""
 	}
 }
 
 func (m *PickerModel) openSettings() tea.Cmd {
-	m.swapOutRightPane()
+	m.swapOutWorkingPanel()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -477,17 +495,35 @@ func (m *PickerModel) openSettings() tea.Cmd {
 	}
 
 	cmd := fmt.Sprintf("%s --settings --path %s", exe, m.rootPath)
-	csmtmux.RunInRightPane("csm-settings", cmd)
-	csmtmux.FocusRight()
+	csmtmux.RunInWorkingPanel("csm-settings", cmd)
+	csmtmux.FocusWorkingPanel()
 
 	return func() tea.Msg {
-		csmtmux.WaitAndCleanupRightPane("csm-settings")
+		csmtmux.WaitAndCleanupWorkingPanel("csm-settings")
 		return settingsExitedMsg{}
 	}
 }
 
+func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
+	m.swapOutWorkingPanel()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+
+	cmd := fmt.Sprintf("%s --worktree-create --path %s --worktree-dir %s", exe, m.rootPath, dir.Path)
+	csmtmux.RunInWorkingPanel("csm-worktree", cmd)
+	csmtmux.FocusWorkingPanel()
+
+	return func() tea.Msg {
+		exitCode := csmtmux.WaitAndCleanupWorkingPanel("csm-worktree")
+		return worktreeExitedMsg{created: exitCode == 0}
+	}
+}
+
 func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
-	m.swapOutRightPane()
+	m.swapOutWorkingPanel()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -500,6 +536,7 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 	}
 
 	dirty := worktree.HasChanges(wt.Path)
+	isWt := worktree.IsWorktree(wt.Path)
 
 	cmd := fmt.Sprintf("%s --delete %s", exe, wt.Name)
 	if taskName != "" {
@@ -508,25 +545,28 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 	if dirty {
 		cmd += " --delete-dirty"
 	}
-	csmtmux.RunInRightPane("csm-delete", cmd)
-	csmtmux.FocusRight()
+	if isWt {
+		cmd += " --delete-worktree"
+	}
+	csmtmux.RunInWorkingPanel("csm-delete", cmd)
+	csmtmux.FocusWorkingPanel()
 
 	wtName := wt.Name
 	return func() tea.Msg {
-		exitCode := csmtmux.WaitAndCleanupRightPane("csm-delete")
-		return deleteExitedMsg{worktreeName: wtName, confirmed: exitCode == 0}
+		exitCode := csmtmux.WaitAndCleanupWorkingPanel("csm-delete")
+		return deleteExitedMsg{dirName: wtName, confirmed: exitCode == 0}
 	}
 }
 
 func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	// Already showing this terminal
-	if m.currentTerm == wt.Name {
-		csmtmux.FocusRight()
+	if m.termDir == wt.Name {
+		csmtmux.FocusWorkingPanel()
 		return nil
 	}
 
-	// Swap out whatever is in the right pane
-	m.swapOutRightPane()
+	// Swap out whatever is in the working panel
+	m.swapOutWorkingPanel()
 
 	// Create terminal if needed
 	var cmd tea.Cmd
@@ -536,18 +576,18 @@ func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 		cmd = waitForTermExitCmd(wt.Name)
 	}
 
-	csmtmux.SwapTermToRight(wt.Name)
-	m.currentTerm = wt.Name
-	csmtmux.FocusRight()
+	csmtmux.SwapTermToWorkingPanel(wt.Name)
+	m.termDir = wt.Name
+	csmtmux.FocusWorkingPanel()
 	return cmd
 }
 
 func (m *PickerModel) toggleTerminal() tea.Cmd {
-	if m.currentWT != "" {
+	if m.workingDir != "" {
 		// Claude is displayed → switch to terminal
-		wtName := m.currentWT
+		wtName := m.workingDir
 		var wtPath string
-		for _, wt := range m.worktrees {
+		for _, wt := range m.directories {
 			if wt.Name == wtName {
 				wtPath = wt.Path
 				break
@@ -556,8 +596,8 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		if wtPath == "" {
 			return nil
 		}
-		csmtmux.SwapBackFromRight(wtName)
-		m.currentWT = ""
+		csmtmux.SwapBackFromWorkingPanel(wtName)
+		m.workingDir = ""
 
 		var cmd tea.Cmd
 		termWin := csmtmux.TerminalWindowName(wtName)
@@ -565,30 +605,30 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 			csmtmux.CreateTerminalWindow(wtName, wtPath)
 			cmd = waitForTermExitCmd(wtName)
 		}
-		csmtmux.SwapTermToRight(wtName)
-		m.currentTerm = wtName
-		csmtmux.FocusRight()
+		csmtmux.SwapTermToWorkingPanel(wtName)
+		m.termDir = wtName
+		csmtmux.FocusWorkingPanel()
 		return cmd
-	} else if m.currentTerm != "" {
+	} else if m.termDir != "" {
 		// Terminal is displayed → switch to Claude (if exists)
-		wtName := m.currentTerm
-		csmtmux.SwapTermBackFromRight(wtName)
-		m.currentTerm = ""
+		wtName := m.termDir
+		csmtmux.SwapTermBackFromWorkingPanel(wtName)
+		m.termDir = ""
 
 		winName := csmtmux.WindowName(wtName)
 		if csmtmux.WindowExists(winName) {
-			csmtmux.SwapToRight(wtName)
-			m.currentWT = wtName
-			csmtmux.FocusRight()
+			csmtmux.SwapToWorkingPanel(wtName)
+			m.workingDir = wtName
+			csmtmux.FocusWorkingPanel()
 		}
 	}
 	return nil
 }
 
-func waitForTermExitCmd(worktreeName string) tea.Cmd {
+func waitForTermExitCmd(dirName string) tea.Cmd {
 	return func() tea.Msg {
-		exec.Command("tmux", "wait-for", csmtmux.TermExitSignalName(worktreeName)).Run()
-		return terminalExitedMsg{worktreeName: worktreeName}
+		exec.Command("tmux", "wait-for", csmtmux.TermExitSignalName(dirName)).Run()
+		return terminalExitedMsg{dirName: dirName}
 	}
 }
 
@@ -601,21 +641,36 @@ func (m *PickerModel) reloadDoorayClient() {
 	m.taskNames = make(map[string]string)
 }
 
-func (m *PickerModel) switchToWorktree(wt *worktree.Worktree) {
-	if m.currentWT == wt.Name {
-		csmtmux.FocusRight()
+func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
+	if m.workingDir == wt.Name {
+		csmtmux.FocusWorkingPanel()
 		return
 	}
-	if m.currentWT != "" {
-		csmtmux.SwapBackFromRight(m.currentWT)
+	if m.workingDir != "" {
+		csmtmux.SwapBackFromWorkingPanel(m.workingDir)
 	}
-	if m.currentTerm != "" {
-		csmtmux.SwapTermBackFromRight(m.currentTerm)
-		m.currentTerm = ""
+	if m.termDir != "" {
+		csmtmux.SwapTermBackFromWorkingPanel(m.termDir)
+		m.termDir = ""
 	}
-	csmtmux.SwapToRight(wt.Name)
-	m.currentWT = wt.Name
-	csmtmux.FocusRight()
+	csmtmux.SwapToWorkingPanel(wt.Name)
+	m.workingDir = wt.Name
+	csmtmux.FocusWorkingPanel()
+}
+
+func (m *PickerModel) itemHeight(wi int) int {
+	h := 1
+	_, hasTask := m.taskNames[m.directories[wi].Path]
+	hasTask = hasTask && m.taskNames[m.directories[wi].Path] != ""
+	_, hasBranch := m.gitStatus[m.directories[wi].Path]
+	if hasTask {
+		h += 3
+	} else if hasBranch {
+		h += 2
+	} else {
+		h += 1
+	}
+	return h
 }
 
 // adjustViewTop scrolls the viewport down so the cursor item is fully visible.
@@ -623,70 +678,50 @@ func (m *PickerModel) adjustViewTop() {
 	if m.height == 0 {
 		return
 	}
+	filtered := m.filteredDirectories()
 	maxListLines := m.height - 4
+	if m.searchQuery != "" {
+		maxListLines-- // search bar takes one line
+	}
 	if maxListLines < 1 {
 		maxListLines = 1
 	}
 
 	// Count lines from viewTop to cursor (inclusive)
 	linesUsed := 0
-	for i := m.viewTop; i <= m.cursor && i < len(m.worktrees); i++ {
-		// Estimate line count: title(1) + subLines
-		itemLines := 1 // title line
-		_, hasTask := m.taskNames[m.worktrees[i].Path]
-		hasTask = hasTask && m.taskNames[m.worktrees[i].Path] != ""
-		_, hasBranch := m.gitStatus[m.worktrees[i].Path]
-		if hasTask {
-			itemLines += 3 // state + folder + branch
-		} else if hasBranch {
-			itemLines += 2 // state + branch
-		} else {
-			itemLines += 1 // state
-		}
-		linesUsed += itemLines
+	for fi := m.viewTop; fi <= m.cursor && fi < len(filtered); fi++ {
+		linesUsed += m.itemHeight(filtered[fi])
 	}
 
 	for linesUsed > maxListLines && m.viewTop < m.cursor {
-		// Remove top item's lines
-		old := m.viewTop
-		oldLines := 1
-		_, hasTask := m.taskNames[m.worktrees[old].Path]
-		hasTask = hasTask && m.taskNames[m.worktrees[old].Path] != ""
-		_, hasBranch := m.gitStatus[m.worktrees[old].Path]
-		if hasTask {
-			oldLines += 3
-		} else if hasBranch {
-			oldLines += 2
-		} else {
-			oldLines += 1
-		}
-		linesUsed -= oldLines
+		linesUsed -= m.itemHeight(filtered[m.viewTop])
 		m.viewTop++
 	}
 }
 
-func (m *PickerModel) selectedWorktree() *worktree.Worktree {
-	if len(m.worktrees) == 0 || m.cursor >= len(m.worktrees) {
+func (m *PickerModel) selectedDirectory() *worktree.Worktree {
+	filtered := m.filteredDirectories()
+	if len(filtered) == 0 || m.cursor >= len(filtered) {
 		return nil
 	}
-	return &m.worktrees[m.cursor]
+	return &m.directories[filtered[m.cursor]]
 }
 
-// contextWorktree returns the worktree currently displayed in right pane,
+// contextDirectory returns the directory currently displayed in working panel,
 // falling back to the cursor selection.
-func (m *PickerModel) contextWorktree() *worktree.Worktree {
-	wtName := m.currentWT
+func (m *PickerModel) contextDirectory() *worktree.Worktree {
+	wtName := m.workingDir
 	if wtName == "" {
-		wtName = m.currentTerm
+		wtName = m.termDir
 	}
 	if wtName != "" {
-		for i := range m.worktrees {
-			if m.worktrees[i].Name == wtName {
-				return &m.worktrees[i]
+		for i := range m.directories {
+			if m.directories[i].Name == wtName {
+				return &m.directories[i]
 			}
 		}
 	}
-	return m.selectedWorktree()
+	return m.selectedDirectory()
 }
 
 func (m PickerModel) View() string {
@@ -701,25 +736,31 @@ func (m PickerModel) View() string {
 		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
 	}
 
-	activeWindows := csmtmux.ListWorktreeWindows()
+	activeWindows := csmtmux.ListDirectoryWindows()
 	activeSet := make(map[string]bool)
 	for _, name := range activeWindows {
 		activeSet[name] = true
 	}
 
-	// Render all items and count lines per item
+	filtered := m.filteredDirectories()
+
+	// Render all filtered items and count lines per item
 	type renderedItem struct {
 		text      string
 		lineCount int
 	}
-	items := make([]renderedItem, len(m.worktrees))
-	for i, wt := range m.worktrees {
-		text := m.renderItem(i, wt, activeSet[wt.Name])
-		items[i] = renderedItem{text: text, lineCount: strings.Count(text, "\n") + 1}
+	items := make([]renderedItem, len(filtered))
+	for fi, wi := range filtered {
+		wt := m.directories[wi]
+		text := m.renderItem(fi, wt, activeSet[wt.Name])
+		items[fi] = renderedItem{text: text, lineCount: strings.Count(text, "\n") + 1}
 	}
 
 	// Available lines for the list (height - title - status bar - margin)
 	maxListLines := m.height - 4
+	if m.searchQuery != "" {
+		maxListLines-- // search bar takes one line
+	}
 	if maxListLines < 1 {
 		maxListLines = 1
 	}
@@ -735,9 +776,13 @@ func (m PickerModel) View() string {
 		usedLines += items[i].lineCount
 	}
 
-	// Build view: title (fixed) + list + padding + status bar
+	// Build view: title (fixed) + search bar + list + padding + status bar
 	var viewLines []string
 	viewLines = append(viewLines, title)
+	if m.searchQuery != "" {
+		searchLine := lipgloss.NewStyle().Foreground(primaryColor).Padding(0, 1).Render("/ " + m.searchQuery)
+		viewLines = append(viewLines, searchLine)
+	}
 	for _, row := range visibleRows {
 		viewLines = append(viewLines, strings.Split(row, "\n")...)
 	}
@@ -763,8 +808,6 @@ func (m PickerModel) View() string {
 					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
 					statusBarStyle.Render("Press any key to dismiss"))
 		view = m.overlayCenter(view, errDialog)
-	} else if m.worktreeDialog.IsVisible() {
-		view = m.overlayCenter(view, m.worktreeDialog.View())
 	}
 
 	return view
@@ -779,14 +822,14 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	if hasSession {
 		indicator = activeSessionStyle.String()
 	}
-	if m.currentWT == wt.Name || m.currentTerm == wt.Name {
+	if m.workingDir == wt.Name || m.termDir == wt.Name {
 		indicator = lipgloss.NewStyle().Foreground(activeColor).Bold(true).Render("●")
 	}
 	if isSelected {
 		indicator = lipgloss.NewStyle().Foreground(primaryColor).Bold(true).Render("●")
 	}
 	if dimmed {
-		if hasSession || m.currentWT == wt.Name || m.currentTerm == wt.Name {
+		if hasSession || m.workingDir == wt.Name || m.termDir == wt.Name {
 			indicator = lipgloss.NewStyle().Foreground(dimColor).Render("●")
 		} else {
 			indicator = lipgloss.NewStyle().Foreground(dimColor).Render("○")
@@ -870,10 +913,10 @@ func (m PickerModel) overlayCenter(base, overlay string) string {
 
 // Commands
 
-func (m PickerModel) scanWorktrees() tea.Cmd {
+func (m PickerModel) scanDirectories() tea.Cmd {
 	return func() tea.Msg {
 		wts, _ := worktree.Scan(m.rootPath)
-		return WorktreesScannedMsg{Worktrees: wts}
+		return DirectoriesScannedMsg{Directories: wts}
 	}
 }
 
@@ -978,19 +1021,19 @@ func scrollText(text string, maxWidth int, tick int) string {
 	return string(runes[offset:end])
 }
 
-func (m PickerModel) fetchClaudeState(worktreeName string) tea.Cmd {
-	currentWT := m.currentWT
+func (m PickerModel) fetchClaudeState(dirName string) tea.Cmd {
+	currentWT := m.workingDir
 	return func() tea.Msg {
-		isDisplayed := currentWT == worktreeName
-		title, err := csmtmux.GetPaneTitle(worktreeName, isDisplayed)
+		isDisplayed := currentWT == dirName
+		title, err := csmtmux.GetPaneTitle(dirName, isDisplayed)
 		if err != nil {
-			return ClaudeStateUpdatedMsg{Name: worktreeName, State: claude.StateUnknown}
+			return ClaudeStateUpdatedMsg{Name: dirName, State: claude.StateUnknown}
 		}
 		state := claude.DetectStateFromTitle(title)
 
 		// If busy, refine with pane content for detail (thinking/tool/responding)
 		if state == claude.StateBusy {
-			content, err := csmtmux.CapturePaneContent(worktreeName, isDisplayed)
+			content, err := csmtmux.CapturePaneContent(dirName, isDisplayed)
 			if err == nil {
 				detail := claude.DetectBusyDetail(content)
 				if detail != claude.StateBusy {
@@ -999,7 +1042,7 @@ func (m PickerModel) fetchClaudeState(worktreeName string) tea.Cmd {
 			}
 		}
 
-		return ClaudeStateUpdatedMsg{Name: worktreeName, State: state}
+		return ClaudeStateUpdatedMsg{Name: dirName, State: state}
 	}
 }
 

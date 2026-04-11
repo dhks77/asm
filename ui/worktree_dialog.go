@@ -23,6 +23,7 @@ const (
 type BranchesLoadedMsg struct {
 	Branches []worktree.Branch
 	RepoDir  string
+	RepoName string
 	Err      error
 }
 
@@ -52,7 +53,9 @@ type WorktreeDialogModel struct {
 	baseBranch    string
 
 	rootPath string
+	dirPath  string
 	repoDir  string
+	repoName string
 	width    int
 	height   int
 	err      string
@@ -64,7 +67,7 @@ func NewWorktreeDialogModel() WorktreeDialogModel {
 	}
 }
 
-func (m *WorktreeDialogModel) Show(rootPath string) tea.Cmd {
+func (m *WorktreeDialogModel) Show(rootPath, dirPath string) tea.Cmd {
 	m.visible = true
 	m.mode = wtModeSelectBranch
 	m.filter = ""
@@ -73,20 +76,18 @@ func (m *WorktreeDialogModel) Show(rootPath string) tea.Cmd {
 	m.newBranchName = ""
 	m.baseBranch = ""
 	m.rootPath = rootPath
+	m.dirPath = dirPath
 	m.err = ""
 	m.branches = nil
 	m.filtered = nil
 
 	return func() tea.Msg {
-		repoDir, err := worktree.FindGitRepo(rootPath)
+		branches, err := worktree.ListBranches(dirPath)
 		if err != nil {
 			return BranchesLoadedMsg{Err: err}
 		}
-		branches, err := worktree.ListBranches(repoDir)
-		if err != nil {
-			return BranchesLoadedMsg{Err: err}
-		}
-		return BranchesLoadedMsg{Branches: branches, RepoDir: repoDir}
+		repoName := worktree.RepoName(dirPath)
+		return BranchesLoadedMsg{Branches: branches, RepoDir: dirPath, RepoName: repoName}
 	}
 }
 
@@ -96,14 +97,11 @@ func (m *WorktreeDialogModel) Hide() {
 	m.filtered = nil
 }
 
-func (m WorktreeDialogModel) IsVisible() bool {
-	return m.visible
-}
-
 func (m *WorktreeDialogModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.maxVisible = min(10, h-10)
+	// title(1) + repo(1) + blank(1) + filter(1) + blank(1) + status_bar(1) + margin(2) = 8
+	m.maxVisible = h - 8
 	if m.maxVisible < 3 {
 		m.maxVisible = 3
 	}
@@ -150,6 +148,7 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 		}
 		m.branches = msg.Branches
 		m.repoDir = msg.RepoDir
+		m.repoName = msg.RepoName
 		m.applyFilter()
 		return m, nil
 
@@ -205,7 +204,7 @@ func (m WorktreeDialogModel) handleSelectBranchKey(msg tea.KeyMsg) (WorktreeDial
 		m.Hide()
 		return m, createWorktreeFromBranchCmd(repoDir, rootPath, selected.Name)
 
-	case "ctrl+n":
+	case "tab":
 		m.mode = wtModeSelectBase
 		m.filter = ""
 		m.cursor = 0
@@ -349,6 +348,84 @@ func createWorktreeNewBranchCmd(repoDir, rootPath, newBranch, baseBranch string)
 	}
 }
 
+// WorktreeRunnerModel wraps WorktreeDialogModel for standalone use in the working panel.
+type WorktreeRunnerModel struct {
+	dialog  WorktreeDialogModel
+	initCmd tea.Cmd
+	Created bool
+	err     string
+	width   int
+	height  int
+}
+
+func NewWorktreeRunnerModel(rootPath, dirPath string) WorktreeRunnerModel {
+	d := NewWorktreeDialogModel()
+	cmd := d.Show(rootPath, dirPath)
+	return WorktreeRunnerModel{dialog: d, initCmd: cmd}
+}
+
+func (m WorktreeRunnerModel) Init() tea.Cmd {
+	return m.initCmd
+}
+
+func (m WorktreeRunnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.dialog.SetSize(msg.Width, msg.Height)
+		return m, nil
+	case WorktreeCreatedMsg:
+		m.Created = true
+		return m, tea.Quit
+	case WorktreeCancelledMsg:
+		return m, tea.Quit
+	case WorktreeErrorMsg:
+		m.err = msg.Err
+		return m, nil
+	case tea.KeyMsg:
+		if m.err != "" {
+			return m, tea.Quit
+		}
+	}
+	var cmd tea.Cmd
+	m.dialog, cmd = m.dialog.Update(msg)
+	return m, cmd
+}
+
+func (m WorktreeRunnerModel) View() string {
+	if m.err != "" {
+		title := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("196")).
+			Padding(1, 2).
+			Render("Error")
+
+		body := lipgloss.NewStyle().
+			Padding(0, 2).
+			Foreground(lipgloss.Color("255")).
+			Render(m.err)
+
+		hint := statusBarStyle.Render("Press any key to dismiss")
+
+		content := title + "\n\n" + body + "\n\n" + hint
+		lines := lipgloss.Height(content)
+		for lines < m.height-3 {
+			content += "\n"
+			lines++
+		}
+
+		statusBar := statusBarStyle.
+			Width(m.width).
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252")).
+			Render(" Press any key to close")
+
+		return content + "\n" + statusBar
+	}
+	return m.dialog.View()
+}
+
 // View
 
 func (m WorktreeDialogModel) View() string {
@@ -364,18 +441,56 @@ func (m WorktreeDialogModel) View() string {
 	return m.viewSelectBranch()
 }
 
-func (m WorktreeDialogModel) viewSelectBranch() string {
-	title := lipgloss.NewStyle().
+func (m WorktreeDialogModel) repoLine() string {
+	name := m.repoName
+	if name == "" {
+		name = filepath.Base(m.dirPath)
+	}
+	return lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).Render("repo: ") +
+		lipgloss.NewStyle().Foreground(secondaryColor).Render(name)
+}
+
+func (m WorktreeDialogModel) renderFullScreen(title, subtitle, filterLine string, rows []string, hint string) string {
+	titleStr := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(primaryColor).
-		Render("Create Worktree")
+		Padding(1, 2).
+		Render(title)
 
-	filterLine := lipgloss.NewStyle().
-		Foreground(dimColor).
-		Render("> ") + m.filter + lipgloss.NewStyle().
-		Foreground(primaryColor).
-		Render("▎")
+	repo := m.repoLine()
 
+	content := titleStr + "\n" + repo
+	if subtitle != "" {
+		content += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).Render(subtitle)
+	}
+
+	filterStr := lipgloss.NewStyle().Padding(0, 2).Render(
+		lipgloss.NewStyle().Foreground(dimColor).Render("/ ") + filterLine +
+			lipgloss.NewStyle().Foreground(primaryColor).Render("▎"),
+	)
+
+	content += "\n\n" + filterStr + "\n\n"
+	for _, row := range rows {
+		content += "  " + row + "\n"
+	}
+
+	lines := lipgloss.Height(content)
+	contentHeight := m.height - 3
+	for lines < contentHeight {
+		content += "\n"
+		lines++
+	}
+
+	statusBar := statusBarStyle.
+		Width(m.width).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252")).
+		Render(" " + hint)
+
+	return content + "\n" + statusBar
+}
+
+func (m WorktreeDialogModel) viewSelectBranch() string {
 	var rows []string
 	if m.err != "" {
 		rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err))
@@ -385,7 +500,7 @@ func (m WorktreeDialogModel) viewSelectBranch() string {
 		rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("No matching branches"))
 	} else {
 		if m.scrollOffset > 0 {
-			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("  ↑ more"))
+			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("↑ more"))
 		}
 
 		end := min(m.scrollOffset+m.maxVisible, len(m.filtered))
@@ -410,46 +525,21 @@ func (m WorktreeDialogModel) viewSelectBranch() string {
 		}
 
 		if end < len(m.filtered) {
-			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("  ↓ more"))
+			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("↓ more"))
 		}
 	}
 
-	hint := statusBarStyle.Render("↑↓: navigate  Enter: checkout  Ctrl+n: new branch  Esc: cancel")
-
-	content := title + "\n\n" + filterLine + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint
-
-	dialogWidth := min(60, m.width-4)
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
-
-	dialogStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(primaryColor).
-		Padding(1, 2).
-		Width(dialogWidth)
-
-	return dialogStyle.Render(content)
+	return m.renderFullScreen("Create Worktree", "", m.filter, rows,
+		"↑↓: navigate  Enter: checkout  Tab: new branch  Esc: cancel")
 }
 
 func (m WorktreeDialogModel) viewSelectBase() string {
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		Render("Select Base Branch")
-
-	filterLine := lipgloss.NewStyle().
-		Foreground(dimColor).
-		Render("> ") + m.filter + lipgloss.NewStyle().
-		Foreground(primaryColor).
-		Render("▎")
-
 	var rows []string
 	if len(m.filtered) == 0 {
 		rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("No matching branches"))
 	} else {
 		if m.scrollOffset > 0 {
-			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("  ↑ more"))
+			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("↑ more"))
 		}
 
 		end := min(m.scrollOffset+m.maxVisible, len(m.filtered))
@@ -469,61 +559,50 @@ func (m WorktreeDialogModel) viewSelectBase() string {
 		}
 
 		if end < len(m.filtered) {
-			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("  ↓ more"))
+			rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("↓ more"))
 		}
 	}
 
-	hint := statusBarStyle.Render("↑↓: navigate  Enter: select base  Esc: back")
-
-	content := title + "\n\n" + filterLine + "\n\n" + strings.Join(rows, "\n") + "\n\n" + hint
-
-	dialogWidth := min(60, m.width-4)
-	if dialogWidth < 30 {
-		dialogWidth = 30
-	}
-
-	dialogStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(primaryColor).
-		Padding(1, 2).
-		Width(dialogWidth)
-
-	return dialogStyle.Render(content)
+	return m.renderFullScreen("New Branch",
+		"Select a base branch to create a new branch from",
+		m.filter, rows,
+		"↑↓: navigate  Enter: select base  Esc: back")
 }
 
 func (m WorktreeDialogModel) viewNewBranch() string {
-	title := lipgloss.NewStyle().
+	titleStr := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(primaryColor).
+		Padding(1, 2).
 		Render("New Branch")
 
-	baseLine := lipgloss.NewStyle().
-		Foreground(dimColor).
-		Render("Base: ") + lipgloss.NewStyle().
-		Foreground(whiteColor).
-		Render(m.baseBranch)
+	repo := m.repoLine()
 
-	nameLabel := lipgloss.NewStyle().
-		Foreground(dimColor).
-		Render("Name: ")
-	nameInput := m.newBranchName + lipgloss.NewStyle().
-		Foreground(primaryColor).
-		Render("▎")
+	baseLine := lipgloss.NewStyle().Padding(0, 2).Render(
+		lipgloss.NewStyle().Foreground(dimColor).Render("Base: ") +
+			lipgloss.NewStyle().Foreground(whiteColor).Render(m.baseBranch),
+	)
 
-	hint := statusBarStyle.Render("Enter: create  Esc: back")
+	nameInput := lipgloss.NewStyle().Padding(0, 2).Render(
+		lipgloss.NewStyle().Foreground(dimColor).Render("Name: ") +
+			m.newBranchName +
+			lipgloss.NewStyle().Foreground(primaryColor).Render("▎"),
+	)
 
-	content := title + "\n\n" + baseLine + "\n\n" + nameLabel + nameInput + "\n\n" + hint
+	content := titleStr + "\n" + repo + "\n\n" + baseLine + "\n\n" + nameInput
 
-	dialogWidth := min(60, m.width-4)
-	if dialogWidth < 30 {
-		dialogWidth = 30
+	lines := lipgloss.Height(content)
+	contentHeight := m.height - 3
+	for lines < contentHeight {
+		content += "\n"
+		lines++
 	}
 
-	dialogStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(primaryColor).
-		Padding(1, 2).
-		Width(dialogWidth)
+	statusBar := statusBarStyle.
+		Width(m.width).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252")).
+		Render(" Enter: create  Esc: back")
 
-	return dialogStyle.Render(content)
+	return content + "\n" + statusBar
 }

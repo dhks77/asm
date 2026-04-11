@@ -8,7 +8,7 @@ import (
 	"github.com/nhn/csm/config"
 )
 
-// SettingsSavedMsg is sent to the picker when settings are saved via right pane.
+// SettingsSavedMsg is sent to the picker when settings are saved via working panel.
 type SettingsSavedMsg struct{}
 type SettingsCancelledMsg struct{}
 
@@ -27,7 +27,7 @@ var fieldLabels = [fieldCount]string{
 	"Task Number Pattern",
 }
 
-// SettingsModel is a standalone tea.Model for the right pane.
+// SettingsModel is a standalone tea.Model for the working panel.
 type SettingsModel struct {
 	cursor   int
 	fields   [fieldCount]string

@@ -7,34 +7,25 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-type DeleteAction int
-
-const (
-	DeleteConfirm DeleteAction = iota
-	DeleteCancel
-)
-
-type DeleteConfirmedMsg struct {
-	Action DeleteAction
-}
-
-// DeleteModel is a standalone tea.Model for the right pane.
+// DeleteModel is a standalone tea.Model for the working panel.
 type DeleteModel struct {
-	worktreeName string
-	taskName     string
-	dirty        bool
-	cursor       int
-	Confirmed    bool
-	width        int
-	height       int
+	dirName    string
+	taskName   string
+	dirty      bool
+	isWorktree bool
+	cursor     int
+	Confirmed  bool
+	width      int
+	height     int
 }
 
-func NewDeleteModel(worktreeName, taskName string, dirty bool) DeleteModel {
+func NewDeleteModel(dirName, taskName string, dirty, isWorktree bool) DeleteModel {
 	return DeleteModel{
-		worktreeName: worktreeName,
-		taskName:     taskName,
-		dirty:        dirty,
-		cursor:       1, // default to Cancel
+		dirName:    dirName,
+		taskName:   taskName,
+		dirty:      dirty,
+		isWorktree: isWorktree,
+		cursor:     1, // default to Cancel
 	}
 }
 
@@ -82,24 +73,28 @@ func (m DeleteModel) View() string {
 		Bold(true).
 		Foreground(dangerColor).
 		Padding(1, 2).
-		Render("Remove Worktree")
+		Render("Remove Directory")
 
 	var info string
 	if m.taskName != "" {
 		info = lipgloss.NewStyle().Padding(0, 2).Foreground(primaryColor).Render(m.taskName) + "\n"
 	}
-	info += lipgloss.NewStyle().Padding(0, 2).Foreground(whiteColor).Bold(true).Render(m.worktreeName)
+	info += lipgloss.NewStyle().Padding(0, 2).Foreground(whiteColor).Bold(true).Render(m.dirName)
 
 	var warning string
 	if m.dirty {
-		warning = "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).Bold(true).
+		warning += "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).Bold(true).
 			Render("⚠ Modified or untracked files exist") + "\n" +
 			lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).
 				Render("  Uncommitted changes will be lost")
 	}
+	if m.isWorktree {
+		warning += "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
+			Render("Git worktree will also be removed")
+	}
 
 	question := lipgloss.NewStyle().Padding(1, 2).Foreground(dimColor).
-		Render(fmt.Sprintf("Remove worktree '%s'?", m.worktreeName))
+		Render(fmt.Sprintf("Remove directory '%s'?", m.dirName))
 
 	options := []string{"Remove", "Cancel"}
 	var buttons []string

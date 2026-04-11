@@ -11,6 +11,17 @@ type Worktree struct {
 	Path string
 }
 
+// IsWorktree returns true if the directory is a git worktree
+// (has a .git file pointing to the main repo, rather than a .git directory).
+func IsWorktree(dir string) bool {
+	gitPath := filepath.Join(dir, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
 // Scan returns all subdirectories under root that contain a .git file or directory
 // (git worktrees have a .git file pointing to the main repo).
 func Scan(root string) ([]Worktree, error) {

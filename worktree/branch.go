@@ -1,8 +1,6 @@
 package worktree
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -13,23 +11,38 @@ type Branch struct {
 	HasWorktree bool
 }
 
-// FindGitRepo finds any git repository under the root path that can be used for git operations.
-func FindGitRepo(root string) (string, error) {
-	entries, err := os.ReadDir(root)
+// RepoName returns the repository name from the remote origin URL.
+// Falls back to the main repo directory name if no remote is configured.
+func RepoName(dir string) string {
+	out, err := runGit(dir, "remote", "get-url", "origin")
+	if err == nil {
+		url := strings.TrimSpace(out)
+		url = strings.TrimSuffix(url, ".git")
+		if i := strings.LastIndex(url, "/"); i >= 0 {
+			return url[i+1:]
+		}
+		if i := strings.LastIndex(url, ":"); i >= 0 {
+			return url[i+1:]
+		}
+	}
+	mainRepo, err := FindMainRepo(dir)
+	if err == nil {
+		return filepath.Base(mainRepo)
+	}
+	return ""
+}
+
+// FindMainRepo returns the main repository directory for a git directory (worktree or main repo).
+func FindMainRepo(dir string) (string, error) {
+	out, err := runGit(dir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name()[0] == '.' {
-			continue
-		}
-		dirPath := filepath.Join(root, entry.Name())
-		gitPath := filepath.Join(dirPath, ".git")
-		if _, err := os.Stat(gitPath); err == nil {
-			return dirPath, nil
-		}
+	gitCommon := strings.TrimSpace(out)
+	if !filepath.IsAbs(gitCommon) {
+		gitCommon = filepath.Join(dir, gitCommon)
 	}
-	return "", fmt.Errorf("no git repository found under %s", root)
+	return filepath.Dir(filepath.Clean(gitCommon)), nil
 }
 
 // ListBranches lists all branches (local + remote) from a git repo.
@@ -40,6 +53,10 @@ func ListBranches(repoDir string) ([]Branch, error) {
 	}
 
 	wtBranches := listWorktreeBranches(repoDir)
+	// Mark remote counterparts of worktree branches too
+	for branch := range wtBranches {
+		wtBranches["origin/"+branch] = true
+	}
 
 	var branches []Branch
 	seen := make(map[string]bool)

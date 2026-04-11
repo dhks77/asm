@@ -37,8 +37,8 @@ func WindowExists(windowName string) bool {
 	return false
 }
 
-func WindowName(worktreeName string) string {
-	return "wt-" + worktreeName
+func WindowName(dirName string) string {
+	return "wt-" + dirName
 }
 
 // CreateSession creates a new tmux session and sets up pane-switching key bindings.
@@ -60,8 +60,8 @@ func CreateSession(pickerCmd string) error {
 	).Run()
 
 	// Ctrl+g: toggle pane focus
-	//   right pane → focus left (direct)
-	//   left pane → focus right or start Claude (picker handles via F11)
+	//   working panel → focus picking panel (direct)
+	//   picking panel → focus working panel or start Claude (picker handles via F11)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-g",
 		"if-shell", "-F", "#{==:#{pane_index},1}",
 		fmt.Sprintf("select-pane -t %s", target),
@@ -88,13 +88,23 @@ func CreateSession(pickerCmd string) error {
 		"send-keys", "-t", target, "F7",
 	).Run()
 
-	// Ctrl+d: delete worktree (sends F6 to picker from either pane)
+	// Ctrl+d: delete directory (sends F6 to picker from either pane)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-d",
 		"send-keys", "-t", target, "F6",
 	).Run()
 
 	// Enable focus events so Bubble Tea can detect pane focus/blur
 	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()
+
+	// Enable mouse support for scrollback in working panel
+	exec.Command("tmux", "set-option", "-t", SessionName, "mouse", "on").Run()
+
+	// Scroll up enters copy mode with -e (auto-exit when scrolled back to bottom)
+	exec.Command("tmux", "bind-key", "-T", "root", "WheelUpPane",
+		"if-shell", "-F", "-t=", "#{mouse_any_flag}",
+		"send-keys -M",
+		"if-shell -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e'",
+	).Run()
 
 	return nil
 }
@@ -107,8 +117,8 @@ func SendPickerCommand(pickerCmd string) error {
 	).Run()
 }
 
-// SplitRight creates the right pane with a placeholder that stays alive.
-func SplitRight(percentage int) error {
+// SplitWorkingPanel creates the working panel with a placeholder that stays alive.
+func SplitWorkingPanel(percentage int) error {
 	return exec.Command("tmux", "split-window", "-h", "-d",
 		"-l", fmt.Sprintf("%d%%", percentage),
 		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
@@ -116,15 +126,15 @@ func SplitRight(percentage int) error {
 	).Run()
 }
 
-// FocusLeft focuses the left pane (picker).
-func FocusLeft() error {
+// FocusPickingPanel focuses the picking panel (picker).
+func FocusPickingPanel() error {
 	return exec.Command("tmux", "select-pane",
 		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
 	).Run()
 }
 
-// FocusRight focuses the right pane (session).
-func FocusRight() error {
+// FocusWorkingPanel focuses the working panel (session).
+func FocusWorkingPanel() error {
 	return exec.Command("tmux", "select-pane",
 		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
 	).Run()
@@ -139,16 +149,16 @@ func Attach() error {
 	return cmd.Run()
 }
 
-// CreateWorktreeWindow creates a hidden tmux window with a shell,
+// CreateDirectoryWindow creates a hidden tmux window with a shell,
 // then sends the claude command via send-keys so aliases are available.
 // When claude exits, marks the window with @claude-exited for detection.
-func CreateWorktreeWindow(worktreeName, worktreePath, claudePath string, claudeArgs []string) error {
-	winName := WindowName(worktreeName)
+func CreateDirectoryWindow(dirName, dirPath, claudePath string, claudeArgs []string) error {
+	winName := WindowName(dirName)
 
 	err := exec.Command("tmux", "new-window", "-d",
 		"-t", SessionName,
 		"-n", winName,
-		"-c", worktreePath,
+		"-c", dirPath,
 	).Run()
 	if err != nil {
 		return err
@@ -160,7 +170,7 @@ func CreateWorktreeWindow(worktreeName, worktreePath, claudePath string, claudeA
 	}
 
 	// After claude exits: signal via wait-for (instant event detection)
-	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(worktreeName))
+	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(dirName))
 	fullCmd := claudeCmd + " ; " + exitSignal
 
 	return exec.Command("tmux", "send-keys",
@@ -169,82 +179,61 @@ func CreateWorktreeWindow(worktreeName, worktreePath, claudePath string, claudeA
 	).Run()
 }
 
-// ResumeInWindow creates a hidden tmux window resuming a claude session.
-func ResumeInWindow(worktreeName, worktreePath, claudePath, sessionID string, claudeArgs []string) error {
-	winName := WindowName(worktreeName)
-
-	err := exec.Command("tmux", "new-window", "-d",
-		"-t", SessionName,
-		"-n", winName,
-		"-c", worktreePath,
-	).Run()
-	if err != nil {
-		return err
-	}
-
-	claudeCmd := claudePath + " --resume " + sessionID
-	for _, a := range claudeArgs {
-		claudeCmd += " " + a
-	}
-
-	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(worktreeName))
-	fullCmd := claudeCmd + " ; " + exitSignal
-
-	return exec.Command("tmux", "send-keys",
-		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
-		fullCmd, "Enter",
-	).Run()
+// ExitSignalName returns the tmux wait-for signal name for a directory.
+func ExitSignalName(dirName string) string {
+	return "csm-exit-" + dirName
 }
 
-// ExitSignalName returns the tmux wait-for signal name for a worktree.
-func ExitSignalName(worktreeName string) string {
-	return "csm-exit-" + worktreeName
+// WaitForExit blocks until claude exits in the given directory window.
+// Returns the directory name when the signal fires.
+func WaitForExit(dirName string) error {
+	return exec.Command("tmux", "wait-for", ExitSignalName(dirName)).Run()
 }
 
-// WaitForExit blocks until claude exits in the given worktree window.
-// Returns the worktree name when the signal fires.
-func WaitForExit(worktreeName string) error {
-	return exec.Command("tmux", "wait-for", ExitSignalName(worktreeName)).Run()
-}
-
-// CleanupExitedWindow handles cleanup when claude exits in a worktree.
-func CleanupExitedWindow(worktreeName string, isCurrentlyDisplayed bool) {
+// CleanupExitedWindow handles cleanup when claude exits in a directory.
+func CleanupExitedWindow(dirName string, isCurrentlyDisplayed bool) {
 	if isCurrentlyDisplayed {
-		SwapBackFromRight(worktreeName)
+		SwapBackFromWorkingPanel(dirName)
 	}
-	KillWorktreeWindow(worktreeName)
+	KillDirectoryWindow(dirName)
 }
 
-// SwapToRight swaps a worktree's window pane into the main window's right pane.
-func SwapToRight(worktreeName string) error {
-	winName := WindowName(worktreeName)
+func swapPaneToWorking(winName string) error {
 	return exec.Command("tmux", "swap-pane",
 		"-s", fmt.Sprintf("%s:%s.0", SessionName, winName),
 		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
 	).Run()
 }
 
-// SwapBackFromRight swaps the current right pane back to its worktree window.
-func SwapBackFromRight(worktreeName string) error {
-	winName := WindowName(worktreeName)
+func swapPaneFromWorking(winName string) error {
 	return exec.Command("tmux", "swap-pane",
 		"-s", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
 		"-t", fmt.Sprintf("%s:%s.0", SessionName, winName),
 	).Run()
 }
 
-// KillWorktreeWindow kills a worktree's tmux window.
-func KillWorktreeWindow(worktreeName string) error {
-	winName := WindowName(worktreeName)
+// SwapToWorkingPanel swaps a directory's window pane into the main window's working panel.
+func SwapToWorkingPanel(dirName string) error {
+	return swapPaneToWorking(WindowName(dirName))
+}
+
+// SwapBackFromWorkingPanel swaps the current working panel back to its directory window.
+func SwapBackFromWorkingPanel(dirName string) error {
+	return swapPaneFromWorking(WindowName(dirName))
+}
+
+// KillDirectoryWindow kills a directory's tmux window.
+func KillDirectoryWindow(dirName string) error {
+	winName := WindowName(dirName)
 	return exec.Command("tmux", "kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 	).Run()
 }
 
-// RunInRightPane creates a hidden tmux window running cmd, swaps it into the
-// right pane, and returns the window name used for waiting/cleanup.
+// RunInWorkingPanel creates a hidden tmux window running cmd, swaps it into the
+// working panel, and returns the window name used for waiting/cleanup.
 // The exit code is stored in tmux variable @{windowName}-exit.
-func RunInRightPane(windowName, cmd string) error {
+func RunInWorkingPanel(windowName, cmd string) error {
 	err := exec.Command("tmux", "new-window", "-d",
 		"-t", SessionName,
 		"-n", windowName,
@@ -264,17 +253,17 @@ func RunInRightPane(windowName, cmd string) error {
 		return err
 	}
 
-	// Swap into right pane
+	// Swap into working panel
 	return exec.Command("tmux", "swap-pane",
 		"-s", fmt.Sprintf("%s:%s.0", SessionName, windowName),
 		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
 	).Run()
 }
 
-// WaitAndCleanupRightPane blocks until the window's process exits,
-// swaps back, kills the window, and focuses left.
+// WaitAndCleanupWorkingPanel blocks until the window's process exits,
+// swaps back, kills the window, and focuses picking panel.
 // Returns the exit code of the process (0 = success).
-func WaitAndCleanupRightPane(windowName string) int {
+func WaitAndCleanupWorkingPanel(windowName string) int {
 	exec.Command("tmux", "wait-for", windowName).Run()
 
 	exitCode := 1
@@ -294,17 +283,17 @@ func WaitAndCleanupRightPane(windowName string) int {
 	exec.Command("tmux", "kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
 	).Run()
-	FocusLeft()
+	FocusPickingPanel()
 	return exitCode
 }
 
-// CapturePaneContent captures the visible content of a worktree's pane.
-func CapturePaneContent(worktreeName string, isDisplayed bool) (string, error) {
+// CapturePaneContent captures the visible content of a directory's pane.
+func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
 		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
 	} else {
-		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(worktreeName))
+		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
 	}
 	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
 	if err != nil {
@@ -313,14 +302,14 @@ func CapturePaneContent(worktreeName string, isDisplayed bool) (string, error) {
 	return string(out), nil
 }
 
-// GetPaneTitle reads the tmux pane title for a worktree's pane.
+// GetPaneTitle reads the tmux pane title for a directory's pane.
 // Claude Code sets the pane title to indicate its current state.
-func GetPaneTitle(worktreeName string, isDisplayed bool) (string, error) {
+func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
 		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
 	} else {
-		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(worktreeName))
+		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
 	}
 	out, err := exec.Command("tmux", "display-message", "-t", target, "-p", "#{pane_title}").Output()
 	if err != nil {
@@ -334,25 +323,25 @@ func KillSession() error {
 	return exec.Command("tmux", "kill-session", "-t", SessionName).Run()
 }
 
-// TerminalWindowName returns the tmux window name for a worktree's terminal.
-func TerminalWindowName(worktreeName string) string {
-	return "term-" + worktreeName
+// TerminalWindowName returns the tmux window name for a directory's terminal.
+func TerminalWindowName(dirName string) string {
+	return "term-" + dirName
 }
 
 // TermExitSignalName returns the tmux wait-for signal name for a terminal.
-func TermExitSignalName(worktreeName string) string {
-	return "csm-term-exit-" + worktreeName
+func TermExitSignalName(dirName string) string {
+	return "csm-term-exit-" + dirName
 }
 
-// CreateTerminalWindow creates a hidden tmux window with a shell at the worktree path.
+// CreateTerminalWindow creates a hidden tmux window with a shell at the directory path.
 // When the shell exits, sends a wait-for signal for cleanup.
-func CreateTerminalWindow(worktreeName, worktreePath string) error {
-	winName := TerminalWindowName(worktreeName)
+func CreateTerminalWindow(dirName, dirPath string) error {
+	winName := TerminalWindowName(dirName)
 
 	err := exec.Command("tmux", "new-window", "-d",
 		"-t", SessionName,
 		"-n", winName,
-		"-c", worktreePath,
+		"-c", dirPath,
 	).Run()
 	if err != nil {
 		return err
@@ -363,7 +352,7 @@ func CreateTerminalWindow(worktreeName, worktreePath string) error {
 		shell = "zsh"
 	}
 
-	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(worktreeName))
+	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(dirName))
 	fullCmd := shell + " ; " + exitSignal
 
 	return exec.Command("tmux", "send-keys",
@@ -372,34 +361,26 @@ func CreateTerminalWindow(worktreeName, worktreePath string) error {
 	).Run()
 }
 
-// SwapTermToRight swaps a terminal window's pane into the main window's right pane.
-func SwapTermToRight(worktreeName string) error {
-	winName := TerminalWindowName(worktreeName)
-	return exec.Command("tmux", "swap-pane",
-		"-s", fmt.Sprintf("%s:%s.0", SessionName, winName),
-		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-	).Run()
+// SwapTermToWorkingPanel swaps a terminal window's pane into the main window's working panel.
+func SwapTermToWorkingPanel(dirName string) error {
+	return swapPaneToWorking(TerminalWindowName(dirName))
 }
 
-// SwapTermBackFromRight swaps the right pane back to the terminal's hidden window.
-func SwapTermBackFromRight(worktreeName string) error {
-	winName := TerminalWindowName(worktreeName)
-	return exec.Command("tmux", "swap-pane",
-		"-s", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-		"-t", fmt.Sprintf("%s:%s.0", SessionName, winName),
-	).Run()
+// SwapTermBackFromWorkingPanel swaps the working panel back to the terminal's hidden window.
+func SwapTermBackFromWorkingPanel(dirName string) error {
+	return swapPaneFromWorking(TerminalWindowName(dirName))
 }
 
 // KillTerminalWindow kills a terminal's tmux window.
-func KillTerminalWindow(worktreeName string) error {
-	winName := TerminalWindowName(worktreeName)
+func KillTerminalWindow(dirName string) error {
+	winName := TerminalWindowName(dirName)
 	return exec.Command("tmux", "kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 	).Run()
 }
 
-// ListWorktreeWindows returns worktree names (without "wt-" prefix) of all active worktree windows.
-func ListWorktreeWindows() []string {
+// ListDirectoryWindows returns directory names (without "wt-" prefix) of all active directory windows.
+func ListDirectoryWindows() []string {
 	out, err := exec.Command("tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
 	if err != nil {
 		return nil

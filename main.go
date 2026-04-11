@@ -14,12 +14,15 @@ import (
 )
 
 func main() {
-	pathFlag := flag.String("path", "", "Root directory containing worktrees")
-	pickerMode := flag.Bool("picker", false, "Run in picker mode (inside tmux left pane)")
-	settingsMode := flag.Bool("settings", false, "Run in settings mode (inside tmux right pane)")
-	deleteMode := flag.String("delete", "", "Run delete confirmation (worktree name)")
+	pathFlag := flag.String("path", "", "Root directory containing directories")
+	pickerMode := flag.Bool("picker", false, "Run in picker mode (inside tmux picking panel)")
+	settingsMode := flag.Bool("settings", false, "Run in settings mode (inside tmux working panel)")
+	deleteMode := flag.String("delete", "", "Run delete confirmation (directory name)")
 	deleteTaskName := flag.String("delete-task", "", "Task name to display in delete confirmation")
-	deleteDirty := flag.Bool("delete-dirty", false, "Worktree has uncommitted changes")
+	deleteDirty := flag.Bool("delete-dirty", false, "Directory has uncommitted changes")
+	deleteWorktree := flag.Bool("delete-worktree", false, "Directory is a git worktree")
+	worktreeCreate := flag.Bool("worktree-create", false, "Run worktree creation dialog")
+	worktreeDir := flag.String("worktree-dir", "", "Directory path for worktree operations")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -55,7 +58,9 @@ func main() {
 	}
 
 	if *deleteMode != "" {
-		runDelete(*deleteMode, *deleteTaskName, *deleteDirty)
+		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
+	} else if *worktreeCreate {
+		runWorktreeCreate(rootPath, *worktreeDir)
 	} else if *settingsMode {
 		runSettings(rootPath)
 	} else if *pickerMode {
@@ -102,14 +107,14 @@ func runOrchestrator(cfg *config.Config, rootPath string) {
 		os.Exit(1)
 	}
 
-	// Create the right pane (placeholder - 'cat' keeps it alive)
-	if err := csmtmux.SplitRight(70); err != nil {
+	// Create the working panel (placeholder - 'cat' keeps it alive)
+	if err := csmtmux.SplitWorkingPanel(70); err != nil {
 		fmt.Fprintf(os.Stderr, "Error splitting pane: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Focus the left pane (picker)
-	csmtmux.FocusLeft()
+	// Focus the picking panel
+	csmtmux.FocusPickingPanel()
 
 	// Attach to the session (blocks until session ends)
 	if err := csmtmux.Attach(); err != nil {
@@ -119,8 +124,8 @@ func runOrchestrator(cfg *config.Config, rootPath string) {
 	}
 }
 
-func runDelete(worktreeName, taskName string, dirty bool) {
-	model := ui.NewDeleteModel(worktreeName, taskName, dirty)
+func runDelete(dirName, taskName string, dirty, isWorktree bool) {
+	model := ui.NewDeleteModel(dirName, taskName, dirty, isWorktree)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	result, err := p.Run()
@@ -129,6 +134,21 @@ func runDelete(worktreeName, taskName string, dirty bool) {
 		os.Exit(1)
 	}
 	if m, ok := result.(ui.DeleteModel); ok && m.Confirmed {
+		os.Exit(0)
+	}
+	os.Exit(1)
+}
+
+func runWorktreeCreate(rootPath, dirPath string) {
+	model := ui.NewWorktreeRunnerModel(rootPath, dirPath)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	result, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if m, ok := result.(ui.WorktreeRunnerModel); ok && m.Created {
 		os.Exit(0)
 	}
 	os.Exit(1)
