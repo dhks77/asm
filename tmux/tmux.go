@@ -41,7 +41,7 @@ func WindowName(worktreeName string) string {
 	return "wt-" + worktreeName
 }
 
-// CreateSession creates a new tmux session and sets up double-Tab pane switching.
+// CreateSession creates a new tmux session and sets up pane-switching key bindings.
 func CreateSession(pickerCmd string) error {
 	err := exec.Command("tmux", "new-session", "-d",
 		"-s", SessionName,
@@ -54,35 +54,44 @@ func CreateSession(pickerCmd string) error {
 
 	target := fmt.Sprintf("%s:%s.0", SessionName, MainWindow)
 
-	// Double-Tab to switch to picker:
-	//
-	// In the RIGHT pane (claude): Tab sends Tab normally + enters csm-tab table
-	// In the LEFT pane (picker): Tab sends Tab normally (picker handles it via Bubble Tea)
-	//
-	// If second Tab comes within 400ms → focus picker
-	// If not → timeout, back to root (first Tab was already sent, no loss)
-
-	exec.Command("tmux", "bind-key", "-T", "root", "Tab",
-		"if-shell", "-F", "#{==:#{pane_index},1}",
-		"send-keys Tab ; switch-client -T csm-tab",
-		"send-keys Tab",
-	).Run()
-
-	// Second Tab in csm-tab table → focus picker pane
-	exec.Command("tmux", "bind-key", "-T", "csm-tab", "Tab",
-		"select-pane", "-t", target,
-	).Run()
-
-	// Ctrl+t in right pane → toggle terminal/claude (sends F12 to picker)
-	// Key is intercepted by tmux, never reaches the pane — no unwanted input
+	// Ctrl+t: toggle terminal/claude (sends F12 to picker from either pane)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-t",
-		"if-shell", "-F", "#{==:#{pane_index},1}",
-		fmt.Sprintf("send-keys -t %s F12", target),
-		"",
+		"send-keys", "-t", target, "F12",
 	).Run()
 
-	// Timeout for key table (400ms) — if no second Tab, just return to root
-	exec.Command("tmux", "set-option", "-t", SessionName, "repeat-time", "400").Run()
+	// Ctrl+g: toggle pane focus
+	//   right pane → focus left (direct)
+	//   left pane → focus right or start Claude (picker handles via F11)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-g",
+		"if-shell", "-F", "#{==:#{pane_index},1}",
+		fmt.Sprintf("select-pane -t %s", target),
+		fmt.Sprintf("send-keys -t %s F11", target),
+	).Run()
+
+	// Ctrl+n: new Claude session (sends F10 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-n",
+		"send-keys", "-t", target, "F10",
+	).Run()
+
+	// Ctrl+s: settings (sends F9 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-s",
+		"send-keys", "-t", target, "F9",
+	).Run()
+
+	// Ctrl+q: quit (sends F8 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-q",
+		"send-keys", "-t", target, "F8",
+	).Run()
+
+	// Ctrl+w: create worktree (sends F7 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-w",
+		"send-keys", "-t", target, "F7",
+	).Run()
+
+	// Ctrl+d: delete worktree (sends F6 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-d",
+		"send-keys", "-t", target, "F6",
+	).Run()
 
 	// Enable focus events so Bubble Tea can detect pane focus/blur
 	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()

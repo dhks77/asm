@@ -13,7 +13,6 @@ import (
 	"github.com/nhn/csm/claude"
 	"github.com/nhn/csm/config"
 	"github.com/nhn/csm/integration"
-	"github.com/nhn/csm/session"
 	csmtmux "github.com/nhn/csm/tmux"
 	"github.com/nhn/csm/worktree"
 )
@@ -61,11 +60,10 @@ type PickerModel struct {
 	spinnerFrame   int
 	scrollTick     int
 	cursor         int
+	viewTop        int    // first visible item index for scrolling
 	currentWT      string // worktree name whose Claude session is shown in right pane
 	currentTerm    string // worktree name whose terminal is shown in right pane
 	dooray         *integration.DoorayClient
-	resumeDialog   ResumeDialogModel
-	confirmDialog  ConfirmDialogModel
 	worktreeDialog WorktreeDialogModel
 	focused        bool
 	width          int
@@ -87,8 +85,6 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 		taskNames:      make(map[string]string),
 		claudeStates:   make(map[string]claude.State),
 		dooray:         dooray,
-		resumeDialog:   NewResumeDialogModel(),
-		confirmDialog:  NewConfirmDialogModel(),
 		worktreeDialog: NewWorktreeDialogModel(),
 		focused:        true,
 	}
@@ -218,39 +214,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.worktreeDialog, cmd = m.worktreeDialog.Update(msg)
 			return m, cmd
 		}
-		if m.confirmDialog.IsVisible() {
-			var cmd tea.Cmd
-			m.confirmDialog, cmd = m.confirmDialog.Update(msg)
-			return m, cmd
-		}
-		if m.resumeDialog.IsVisible() {
-			var cmd tea.Cmd
-			m.resumeDialog, cmd = m.resumeDialog.Update(msg)
-			return m, cmd
-		}
 		return m.handleKey(msg)
-
-	case ResumeSelectedMsg:
-		wt := m.selectedWorktree()
-		if wt != nil {
-			return m, m.resumeSession(wt, msg.SessionID)
-		}
-		return m, nil
-
-	case ResumeCancelledMsg:
-		return m, nil
-
-	case QuitConfirmedMsg:
-		switch msg.Action {
-		case QuitKeep:
-			csmtmux.KillSession()
-			return m, tea.Quit
-		case QuitTerminate:
-			csmtmux.KillSession()
-			return m, tea.Quit
-		case QuitCancel:
-			return m, nil
-		}
 
 	case WorktreesScannedMsg:
 		m.worktrees = msg.Worktrees
@@ -319,22 +283,20 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		csmtmux.KillSession()
 		return m, tea.Quit
 	case "q":
-		activeWindows := csmtmux.ListWorktreeWindows()
-		if len(activeWindows) > 0 {
-			m.confirmDialog.SetSize(m.width)
-			m.confirmDialog.Show(len(activeWindows))
-			return m, nil
-		}
 		csmtmux.KillSession()
 		return m, tea.Quit
 
 	case "up":
 		if m.cursor > 0 {
 			m.cursor--
+			if m.cursor < m.viewTop {
+				m.viewTop = m.cursor
+			}
 		}
 	case "down":
 		if m.cursor < len(m.worktrees)-1 {
 			m.cursor++
+			m.adjustViewTop()
 		}
 
 	case "enter":
@@ -365,19 +327,6 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.startSession(wt)
 
-	case "r":
-		wt := m.selectedWorktree()
-		if wt == nil {
-			return m, nil
-		}
-		sessions, err := session.FindSessions(wt.Path)
-		if err != nil || len(sessions) == 0 {
-			m.err = "No previous sessions found"
-			return m, nil
-		}
-		m.resumeDialog.SetSize(m.width, m.height)
-		m.resumeDialog.Show(sessions)
-
 	case "d":
 		wt := m.selectedWorktree()
 		if wt == nil {
@@ -396,8 +345,60 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.switchToTerminal(wt)
 
-	case "f12":
-		return m, m.toggleTerminal()
+	case "f12": // Ctrl+t: toggle terminal
+		if m.currentWT != "" || m.currentTerm != "" {
+			return m, m.toggleTerminal()
+		}
+		wt := m.selectedWorktree()
+		if wt == nil {
+			return m, nil
+		}
+		return m, m.switchToTerminal(wt)
+
+	case "f11": // Ctrl+g from left pane: focus right or start Claude
+		if m.currentWT != "" || m.currentTerm != "" {
+			csmtmux.FocusRight()
+		} else {
+			wt := m.selectedWorktree()
+			if wt == nil {
+				return m, nil
+			}
+			return m, m.startSession(wt)
+		}
+
+	case "f10": // Ctrl+n: new Claude session
+		wt := m.contextWorktree()
+		if wt == nil {
+			return m, nil
+		}
+		delete(m.claudeStates, wt.Name)
+		winName := csmtmux.WindowName(wt.Name)
+		if csmtmux.WindowExists(winName) {
+			if m.currentWT == wt.Name {
+				csmtmux.SwapBackFromRight(wt.Name)
+				m.currentWT = ""
+			}
+			csmtmux.KillWorktreeWindow(wt.Name)
+		}
+		return m, m.startSession(wt)
+
+	case "f9": // Ctrl+s: settings
+		return m, m.openSettings()
+
+	case "f8": // Ctrl+q: quit
+		csmtmux.KillSession()
+		return m, tea.Quit
+
+	case "f7": // Ctrl+w: create worktree
+		m.worktreeDialog.SetSize(m.width, m.height)
+		return m, m.worktreeDialog.Show(m.rootPath)
+
+	case "f6": // Ctrl+d: delete active worktree
+		wt := m.contextWorktree()
+		if wt == nil {
+			return m, nil
+		}
+		return m, m.openDelete(wt)
 
 	case "s":
 		return m, m.openSettings()
@@ -415,23 +416,6 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *PickerModel) startSession(wt *worktree.Worktree) tea.Cmd {
 	claudePath := m.cfg.ResolveClaudePath()
 	csmtmux.CreateWorktreeWindow(wt.Name, wt.Path, claudePath, m.cfg.ClaudeArgs)
-	m.switchToWorktree(wt)
-	return waitForExitCmd(wt.Name)
-}
-
-func (m *PickerModel) resumeSession(wt *worktree.Worktree, sessionID string) tea.Cmd {
-	claudePath := m.cfg.ResolveClaudePath()
-
-	winName := csmtmux.WindowName(wt.Name)
-	if csmtmux.WindowExists(winName) {
-		if m.currentWT == wt.Name {
-			csmtmux.SwapBackFromRight(wt.Name)
-			m.currentWT = ""
-		}
-		csmtmux.KillWorktreeWindow(wt.Name)
-	}
-
-	csmtmux.ResumeInWindow(wt.Name, wt.Path, claudePath, sessionID, m.cfg.ClaudeArgs)
 	m.switchToWorktree(wt)
 	return waitForExitCmd(wt.Name)
 }
@@ -583,6 +567,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		}
 		csmtmux.SwapTermToRight(wtName)
 		m.currentTerm = wtName
+		csmtmux.FocusRight()
 		return cmd
 	} else if m.currentTerm != "" {
 		// Terminal is displayed → switch to Claude (if exists)
@@ -594,6 +579,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		if csmtmux.WindowExists(winName) {
 			csmtmux.SwapToRight(wtName)
 			m.currentWT = wtName
+			csmtmux.FocusRight()
 		}
 	}
 	return nil
@@ -632,11 +618,75 @@ func (m *PickerModel) switchToWorktree(wt *worktree.Worktree) {
 	csmtmux.FocusRight()
 }
 
+// adjustViewTop scrolls the viewport down so the cursor item is fully visible.
+func (m *PickerModel) adjustViewTop() {
+	if m.height == 0 {
+		return
+	}
+	maxListLines := m.height - 4
+	if maxListLines < 1 {
+		maxListLines = 1
+	}
+
+	// Count lines from viewTop to cursor (inclusive)
+	linesUsed := 0
+	for i := m.viewTop; i <= m.cursor && i < len(m.worktrees); i++ {
+		// Estimate line count: title(1) + subLines
+		itemLines := 1 // title line
+		_, hasTask := m.taskNames[m.worktrees[i].Path]
+		hasTask = hasTask && m.taskNames[m.worktrees[i].Path] != ""
+		_, hasBranch := m.gitStatus[m.worktrees[i].Path]
+		if hasTask {
+			itemLines += 3 // state + folder + branch
+		} else if hasBranch {
+			itemLines += 2 // state + branch
+		} else {
+			itemLines += 1 // state
+		}
+		linesUsed += itemLines
+	}
+
+	for linesUsed > maxListLines && m.viewTop < m.cursor {
+		// Remove top item's lines
+		old := m.viewTop
+		oldLines := 1
+		_, hasTask := m.taskNames[m.worktrees[old].Path]
+		hasTask = hasTask && m.taskNames[m.worktrees[old].Path] != ""
+		_, hasBranch := m.gitStatus[m.worktrees[old].Path]
+		if hasTask {
+			oldLines += 3
+		} else if hasBranch {
+			oldLines += 2
+		} else {
+			oldLines += 1
+		}
+		linesUsed -= oldLines
+		m.viewTop++
+	}
+}
+
 func (m *PickerModel) selectedWorktree() *worktree.Worktree {
 	if len(m.worktrees) == 0 || m.cursor >= len(m.worktrees) {
 		return nil
 	}
 	return &m.worktrees[m.cursor]
+}
+
+// contextWorktree returns the worktree currently displayed in right pane,
+// falling back to the cursor selection.
+func (m *PickerModel) contextWorktree() *worktree.Worktree {
+	wtName := m.currentWT
+	if wtName == "" {
+		wtName = m.currentTerm
+	}
+	if wtName != "" {
+		for i := range m.worktrees {
+			if m.worktrees[i].Name == wtName {
+				return &m.worktrees[i]
+			}
+		}
+	}
+	return m.selectedWorktree()
 }
 
 func (m PickerModel) View() string {
@@ -651,32 +701,56 @@ func (m PickerModel) View() string {
 		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
 	}
 
-	var rows []string
 	activeWindows := csmtmux.ListWorktreeWindows()
 	activeSet := make(map[string]bool)
 	for _, name := range activeWindows {
 		activeSet[name] = true
 	}
 
+	// Render all items and count lines per item
+	type renderedItem struct {
+		text      string
+		lineCount int
+	}
+	items := make([]renderedItem, len(m.worktrees))
 	for i, wt := range m.worktrees {
-		row := m.renderItem(i, wt, activeSet[wt.Name])
-		rows = append(rows, row)
+		text := m.renderItem(i, wt, activeSet[wt.Name])
+		items[i] = renderedItem{text: text, lineCount: strings.Count(text, "\n") + 1}
 	}
 
-	list := strings.Join(rows, "\n")
+	// Available lines for the list (height - title - status bar - margin)
+	maxListLines := m.height - 4
+	if maxListLines < 1 {
+		maxListLines = 1
+	}
 
+	// Build visible list with viewport scrolling
+	var visibleRows []string
+	usedLines := 0
+	for i := m.viewTop; i < len(items); i++ {
+		if usedLines+items[i].lineCount > maxListLines {
+			break
+		}
+		visibleRows = append(visibleRows, items[i].text)
+		usedLines += items[i].lineCount
+	}
+
+	// Build view: title (fixed) + list + padding + status bar
+	var viewLines []string
+	viewLines = append(viewLines, title)
+	for _, row := range visibleRows {
+		viewLines = append(viewLines, strings.Split(row, "\n")...)
+	}
+	targetLines := m.height - 3
 	statusBar := RenderStatusBar(m.width, m.focused)
-
-	contentHeight := m.height - 3
-	content := title + "\n" + list
-
-	lines := strings.Count(content, "\n") + 1
-	for lines < contentHeight {
-		content += "\n"
-		lines++
+	for len(viewLines) < targetLines {
+		viewLines = append(viewLines, "")
 	}
-
-	view := content + "\n" + statusBar
+	if len(viewLines) > targetLines {
+		viewLines = viewLines[:targetLines]
+	}
+	viewLines = append(viewLines, statusBar)
+	view := strings.Join(viewLines, "\n")
 
 	if m.err != "" {
 		errDialog := lipgloss.NewStyle().
@@ -691,10 +765,6 @@ func (m PickerModel) View() string {
 		view = m.overlayCenter(view, errDialog)
 	} else if m.worktreeDialog.IsVisible() {
 		view = m.overlayCenter(view, m.worktreeDialog.View())
-	} else if m.confirmDialog.IsVisible() {
-		view = m.overlayCenter(view, m.confirmDialog.View())
-	} else if m.resumeDialog.IsVisible() {
-		view = m.overlayCenter(view, m.resumeDialog.View())
 	}
 
 	return view
@@ -746,13 +816,13 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	var rawName string
 	if hasTask {
 		rawName = taskName
+		subLines = append(subLines, normalItemStyle.Render(wt.Name))
 		if hasBranch {
 			subLines = append(subLines, gitStatusStyle.Render(gs.Summary()))
 		}
-		subLines = append(subLines, normalItemStyle.Render(wt.Name))
 	} else if hasBranch {
-		rawName = gs.Summary()
-		subLines = append(subLines, normalItemStyle.Render(wt.Name))
+		rawName = wt.Name
+		subLines = append(subLines, gitStatusStyle.Render(gs.Summary()))
 	} else {
 		rawName = wt.Name
 	}

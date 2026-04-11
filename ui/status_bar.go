@@ -5,7 +5,7 @@ import (
 )
 
 func RenderStatusBar(width int, focused bool) string {
-	keys := " n: new  r: resume  w: worktree  d: remove  t: term  s: settings  Tab: session  q: quit"
+	keys := " ^g: focus  ^t: term  ^n: new  ^s: settings  ^w: worktree  ^d: remove  ^q: quit"
 
 	bg := lipgloss.Color("236")
 	fg := lipgloss.Color("252")
