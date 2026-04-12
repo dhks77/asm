@@ -103,8 +103,8 @@ func CreateSession(pickerCmd string) error {
 		"send-keys", "-t", target, "F4",
 	).Run()
 
-	// Ctrl+o: open task URL (sends F3 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-o",
+	// Ctrl+k: open task URL (sends F3 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-k",
 		"send-keys", "-t", target, "F3",
 	).Run()
 

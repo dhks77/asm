@@ -37,7 +37,7 @@ asm --path ~/worktrees
 | `Ctrl+G` | picker <-> 세션 전환 |
 | `Ctrl+T` | 터미널 <-> AI 토글 |
 | `Ctrl+N` | 새 세션 (기존 kill) |
-| `Ctrl+O` | Task URL 브라우저 열기 |
+| `Ctrl+K` | Task URL 브라우저 열기 |
 | `Ctrl+P` | AI 프로바이더 선택 |
 | `Ctrl+S` | 설정 |
 | `Ctrl+W` | Worktree 생성 |
