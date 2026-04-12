@@ -10,12 +10,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/nhn/csm/claude"
-	"github.com/nhn/csm/config"
-	"github.com/nhn/csm/integration"
-	"github.com/nhn/csm/notification"
-	csmtmux "github.com/nhn/csm/tmux"
-	"github.com/nhn/csm/worktree"
+	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/integration"
+	"github.com/nhn/asm/notification"
+	"github.com/nhn/asm/provider"
+	asmtmux "github.com/nhn/asm/tmux"
+	"github.com/nhn/asm/worktree"
 )
 
 // Messages
@@ -35,11 +35,11 @@ type TaskNameResolvedMsg struct {
 
 type tickMsg time.Time
 
-type claudeStateTickMsg time.Time
+type providerStateTickMsg time.Time
 
-type ClaudeStateUpdatedMsg struct {
+type ProviderStateUpdatedMsg struct {
 	Name  string
-	State claude.State
+	State provider.State
 }
 
 type spinnerTickMsg time.Time
@@ -65,15 +65,17 @@ type PickerModel struct {
 	directories    []worktree.Worktree
 	gitStatus      map[string]worktree.GitStatus
 	taskNames      map[string]string
-	claudeStates      map[string]claude.State
-	prevClaudeStates  map[string]claude.State
-	sessionStartTimes map[string]time.Time
-	flashItems        map[string]time.Time
-	spinnerFrame      int
+	providerStates     map[string]provider.State
+	prevProviderStates map[string]provider.State
+	worktreeProviders  map[string]string // worktree name -> provider name
+	registry           *provider.Registry
+	sessionStartTimes  map[string]time.Time
+	flashItems         map[string]time.Time
+	spinnerFrame       int
 	scrollTick     int
 	cursor         int
 	viewTop        int    // first visible item index for scrolling
-	workingDir     string // directory shown in working panel (Claude session)
+	workingDir     string // directory shown in working panel (AI session)
 	termDir        string // directory shown in working panel (terminal)
 	dooray         *integration.DoorayClient
 	focused        bool
@@ -82,11 +84,12 @@ type PickerModel struct {
 	ready          bool
 	err            string
 	searchQuery    string
-	selectedItems  map[string]bool
-	batchConfirm   BatchConfirmModel
+	selectedItems    map[string]bool
+	batchConfirm     BatchConfirmModel
+	providerDialog   ProviderDialogModel
 }
 
-func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
+func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry) PickerModel {
 	var dooray *integration.DoorayClient
 	projectSettings, err := config.LoadProjectSettings(rootPath)
 	if err == nil {
@@ -97,12 +100,15 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 		rootPath:       rootPath,
 		gitStatus:      make(map[string]worktree.GitStatus),
 		taskNames:      make(map[string]string),
-		claudeStates:      make(map[string]claude.State),
-		prevClaudeStates:  make(map[string]claude.State),
-		sessionStartTimes: make(map[string]time.Time),
-		flashItems:        make(map[string]time.Time),
+		providerStates:     make(map[string]provider.State),
+		prevProviderStates: make(map[string]provider.State),
+		worktreeProviders:  make(map[string]string),
+		registry:           registry,
+		sessionStartTimes:  make(map[string]time.Time),
+		flashItems:         make(map[string]time.Time),
 		selectedItems:  make(map[string]bool),
-		batchConfirm:   NewBatchConfirmModel(),
+		batchConfirm:     NewBatchConfirmModel(),
+		providerDialog:   NewProviderDialogModel(),
 		dooray:            dooray,
 		focused:        true,
 	}
@@ -142,10 +148,22 @@ func (m *PickerModel) filteredDirectories() []int {
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanDirectories(), tickCmd(), claudeStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
+	return tea.Batch(m.scanDirectories(), tickCmd(), providerStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Delegate to provider dialog when visible
+	if m.providerDialog.IsVisible() {
+		switch msg.(type) {
+		case tea.WindowSizeMsg:
+			// fall through
+		default:
+			var cmd tea.Cmd
+			m.providerDialog, cmd = m.providerDialog.Update(msg)
+			return m, cmd
+		}
+	}
+
 	// Delegate to batch confirm dialog when visible
 	if m.batchConfirm.IsVisible() {
 		switch msg.(type) {
@@ -163,6 +181,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.batchConfirm.SetSize(msg.Width)
+		m.providerDialog.SetSize(msg.Width)
 		m.ready = true
 		return m, nil
 
@@ -182,9 +201,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tickCmd())
 		return m, tea.Batch(cmds...)
 
-	case claudeStateTickMsg:
+	case providerStateTickMsg:
 		var cmds []tea.Cmd
-		activeWindows := csmtmux.ListDirectoryWindows()
+		activeWindows := asmtmux.ListDirectoryWindows()
 		activeSet := make(map[string]bool)
 		for _, name := range activeWindows {
 			activeSet[name] = true
@@ -194,19 +213,28 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if _, tracked := m.sessionStartTimes[wt.Name]; !tracked {
 					m.sessionStartTimes[wt.Name] = time.Now()
 				}
-				cmds = append(cmds, m.fetchClaudeState(wt.Name))
+				// Recover provider info from tmux if not tracked
+				if _, known := m.worktreeProviders[wt.Name]; !known {
+					stored := asmtmux.GetWindowOption(wt.Name, "asm-provider")
+					if stored != "" {
+						m.worktreeProviders[wt.Name] = stored
+					} else {
+						m.worktreeProviders[wt.Name] = m.registry.Default().Name()
+					}
+				}
+				cmds = append(cmds, m.fetchProviderState(wt.Name))
 			}
 		}
-		cmds = append(cmds, claudeStateTickCmd())
+		cmds = append(cmds, providerStateTickCmd())
 		return m, tea.Batch(cmds...)
 
-	case ClaudeStateUpdatedMsg:
-		if msg.State != claude.StateUnknown {
-			prevState := m.prevClaudeStates[msg.Name]
-			m.claudeStates[msg.Name] = msg.State
-			m.prevClaudeStates[msg.Name] = msg.State
+	case ProviderStateUpdatedMsg:
+		if msg.State != provider.StateUnknown {
+			prevState := m.prevProviderStates[msg.Name]
+			m.providerStates[msg.Name] = msg.State
+			m.prevProviderStates[msg.Name] = msg.State
 
-			if prevState.IsBusy() && msg.State == claude.StateIdle {
+			if prevState.IsBusy() && msg.State == provider.StateIdle {
 				now := time.Now()
 				m.flashItems[msg.Name] = now
 				var cmds []tea.Cmd
@@ -236,21 +264,22 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scrollTickCmd()
 
 	case sessionExitedMsg:
-		delete(m.claudeStates, msg.DirName)
-		delete(m.prevClaudeStates, msg.DirName)
+		delete(m.providerStates, msg.DirName)
+		delete(m.prevProviderStates, msg.DirName)
+		delete(m.worktreeProviders, msg.DirName)
 		delete(m.sessionStartTimes, msg.DirName)
 		delete(m.flashItems, msg.DirName)
 		isDisplayed := m.workingDir == msg.DirName
-		csmtmux.CleanupExitedWindow(msg.DirName, isDisplayed)
+		asmtmux.CleanupExitedWindow(msg.DirName, isDisplayed)
 		if isDisplayed {
 			m.workingDir = ""
 			// Show terminal for this directory if it exists
-			termWin := csmtmux.TerminalWindowName(msg.DirName)
-			if csmtmux.WindowExists(termWin) {
-				csmtmux.SwapTermToWorkingPanel(msg.DirName)
+			termWin := asmtmux.TerminalWindowName(msg.DirName)
+			if asmtmux.WindowExists(termWin) {
+				asmtmux.SwapTermToWorkingPanel(msg.DirName)
 				m.termDir = msg.DirName
 			} else {
-				csmtmux.FocusPickingPanel()
+				asmtmux.FocusPickingPanel()
 			}
 		}
 		return m, nil
@@ -282,15 +311,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if wt == nil {
 			return m, nil
 		}
-		delete(m.claudeStates, wt.Name)
+		delete(m.providerStates, wt.Name)
+		delete(m.worktreeProviders, wt.Name)
 		delete(m.sessionStartTimes, wt.Name)
-		winName := csmtmux.WindowName(wt.Name)
-		if csmtmux.WindowExists(winName) {
-			csmtmux.KillDirectoryWindow(wt.Name)
+		winName := asmtmux.WindowName(wt.Name)
+		if asmtmux.WindowExists(winName) {
+			asmtmux.KillDirectoryWindow(wt.Name)
 		}
-		termWinName := csmtmux.TerminalWindowName(wt.Name)
-		if csmtmux.WindowExists(termWinName) {
-			csmtmux.KillTerminalWindow(wt.Name)
+		termWinName := asmtmux.TerminalWindowName(wt.Name)
+		if asmtmux.WindowExists(termWinName) {
+			asmtmux.KillTerminalWindow(wt.Name)
 		}
 		return m, m.removeDirectory(wt)
 
@@ -305,6 +335,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case BatchCancelledMsg:
+		return m, nil
+
+	case ProviderSelectedMsg:
+		wt := m.contextDirectory()
+		if wt != nil {
+			return m, m.startSession(wt, msg.ProviderName)
+		}
+		return m, nil
+
+	case ProviderCancelledMsg:
 		return m, nil
 
 	case batchKillCompletedMsg:
@@ -361,18 +401,18 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case terminalExitedMsg:
 		isDisplayed := m.termDir == msg.dirName
 		if isDisplayed {
-			csmtmux.SwapTermBackFromWorkingPanel(msg.dirName)
+			asmtmux.SwapTermBackFromWorkingPanel(msg.dirName)
 			m.termDir = ""
 		}
-		csmtmux.KillTerminalWindow(msg.dirName)
+		asmtmux.KillTerminalWindow(msg.dirName)
 		if isDisplayed {
-			// Show Claude session for this directory if it exists
-			winName := csmtmux.WindowName(msg.dirName)
-			if csmtmux.WindowExists(winName) {
-				csmtmux.SwapToWorkingPanel(msg.dirName)
+			// Show AI session for this directory if it exists
+			winName := asmtmux.WindowName(msg.dirName)
+			if asmtmux.WindowExists(winName) {
+				asmtmux.SwapToWorkingPanel(msg.dirName)
 				m.workingDir = msg.dirName
 			} else {
-				csmtmux.FocusPickingPanel()
+				asmtmux.FocusPickingPanel()
 			}
 		}
 		return m, nil
@@ -400,7 +440,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "ctrl+c":
-		csmtmux.KillSession()
+		asmtmux.KillSession()
 		return m, tea.Quit
 
 	case "up":
@@ -421,11 +461,11 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if wt == nil {
 			return m, nil
 		}
-		winName := csmtmux.WindowName(wt.Name)
-		if csmtmux.WindowExists(winName) {
+		winName := asmtmux.WindowName(wt.Name)
+		if asmtmux.WindowExists(winName) {
 			m.showInWorkingPanel(wt)
 		} else {
-			return m, m.startSession(wt)
+			return m, m.startSession(wt, m.registry.Default().Name())
 		}
 
 	case "f12": // Ctrl+t: toggle terminal
@@ -438,39 +478,46 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.switchToTerminal(wt)
 
-	case "f11": // Ctrl+g: focus working panel or start Claude
+	case "f11": // Ctrl+g: focus working panel or start AI session
 		if m.workingDir != "" || m.termDir != "" {
-			csmtmux.FocusWorkingPanel()
+			asmtmux.FocusWorkingPanel()
 		} else {
 			wt := m.selectedDirectory()
 			if wt == nil {
 				return m, nil
 			}
-			return m, m.startSession(wt)
+			return m, m.startSession(wt, m.registry.Default().Name())
 		}
 
-	case "f10": // Ctrl+n: new Claude session
+	case "f10": // Ctrl+n: new AI session
 		wt := m.contextDirectory()
 		if wt == nil {
 			return m, nil
 		}
-		delete(m.claudeStates, wt.Name)
+		// Restart with the same provider, or default if none
+		providerName := m.worktreeProviders[wt.Name]
+		if providerName == "" {
+			providerName = m.registry.Default().Name()
+		}
+		delete(m.providerStates, wt.Name)
+		delete(m.prevProviderStates, wt.Name)
+		delete(m.worktreeProviders, wt.Name)
 		delete(m.sessionStartTimes, wt.Name)
-		winName := csmtmux.WindowName(wt.Name)
-		if csmtmux.WindowExists(winName) {
+		winName := asmtmux.WindowName(wt.Name)
+		if asmtmux.WindowExists(winName) {
 			if m.workingDir == wt.Name {
-				csmtmux.SwapBackFromWorkingPanel(wt.Name)
+				asmtmux.SwapBackFromWorkingPanel(wt.Name)
 				m.workingDir = ""
 			}
-			csmtmux.KillDirectoryWindow(wt.Name)
+			asmtmux.KillDirectoryWindow(wt.Name)
 		}
-		return m, m.startSession(wt)
+		return m, m.startSession(wt, providerName)
 
 	case "f9": // Ctrl+s: settings
 		return m, m.openSettings()
 
 	case "f8": // Ctrl+q: quit
-		csmtmux.KillSession()
+		asmtmux.KillSession()
 		return m, tea.Quit
 
 	case "f7": // Ctrl+w: create worktree
@@ -486,6 +533,11 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.openDelete(wt)
+
+	case "f4": // Ctrl+p: select AI provider
+		if m.registry.Count() > 1 {
+			m.providerDialog.Show(m.registry.Names())
+		}
 
 	case "f5": // Ctrl+x: toggle selection
 		wt := m.selectedDirectory()
@@ -538,9 +590,14 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *PickerModel) startSession(wt *worktree.Worktree) tea.Cmd {
-	claudePath := m.cfg.ResolveClaudePath()
-	csmtmux.CreateDirectoryWindow(wt.Name, wt.Path, claudePath, m.cfg.ClaudeArgs)
+func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string) tea.Cmd {
+	p := m.registry.Get(providerName)
+	if p == nil {
+		p = m.registry.Default()
+	}
+	asmtmux.CreateDirectoryWindow(wt.Name, wt.Path, p.Command(), p.Args())
+	asmtmux.SetWindowOption(wt.Name, "asm-provider", p.Name())
+	m.worktreeProviders[wt.Name] = p.Name()
 	m.sessionStartTimes[wt.Name] = time.Now()
 	m.showInWorkingPanel(wt)
 	return waitForExitCmd(wt.Name)
@@ -585,9 +642,9 @@ func (m *PickerModel) batchKillSessions(names []string) tea.Cmd {
 	return func() tea.Msg {
 		count := 0
 		for _, name := range names {
-			winName := csmtmux.WindowName(name)
-			if csmtmux.WindowExists(winName) {
-				csmtmux.KillDirectoryWindow(name)
+			winName := asmtmux.WindowName(name)
+			if asmtmux.WindowExists(winName) {
+				asmtmux.KillDirectoryWindow(name)
 				count++
 			}
 		}
@@ -598,27 +655,28 @@ func (m *PickerModel) batchKillSessions(names []string) tea.Cmd {
 func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
 	// Kill active sessions and collect worktrees to remove
 	for _, name := range names {
-		delete(m.claudeStates, name)
-		delete(m.prevClaudeStates, name)
+		delete(m.providerStates, name)
+		delete(m.prevProviderStates, name)
+		delete(m.worktreeProviders, name)
 		delete(m.sessionStartTimes, name)
 		delete(m.flashItems, name)
 
-		winName := csmtmux.WindowName(name)
-		if csmtmux.WindowExists(winName) {
+		winName := asmtmux.WindowName(name)
+		if asmtmux.WindowExists(winName) {
 			if m.workingDir == name {
-				csmtmux.SwapBackFromWorkingPanel(name)
+				asmtmux.SwapBackFromWorkingPanel(name)
 				m.workingDir = ""
 			}
-			csmtmux.KillDirectoryWindow(name)
+			asmtmux.KillDirectoryWindow(name)
 		}
 
-		termWinName := csmtmux.TerminalWindowName(name)
-		if csmtmux.WindowExists(termWinName) {
+		termWinName := asmtmux.TerminalWindowName(name)
+		if asmtmux.WindowExists(termWinName) {
 			if m.termDir == name {
-				csmtmux.SwapTermBackFromWorkingPanel(name)
+				asmtmux.SwapTermBackFromWorkingPanel(name)
 				m.termDir = ""
 			}
-			csmtmux.KillTerminalWindow(name)
+			asmtmux.KillTerminalWindow(name)
 		}
 	}
 
@@ -674,10 +732,10 @@ func (m *PickerModel) removeDirectory(dir *worktree.Worktree) tea.Cmd {
 	}
 }
 
-// waitForExitCmd returns a tea.Cmd that blocks until claude exits in the directory.
+// waitForExitCmd returns a tea.Cmd that blocks until the AI process exits in the directory.
 func waitForExitCmd(dirName string) tea.Cmd {
 	return func() tea.Msg {
-		csmtmux.WaitForExit(dirName)
+		asmtmux.WaitForExit(dirName)
 		return sessionExitedMsg{DirName: dirName}
 	}
 }
@@ -696,11 +754,11 @@ type deleteExitedMsg struct {
 
 func (m *PickerModel) swapOutWorkingPanel() {
 	if m.workingDir != "" {
-		csmtmux.SwapBackFromWorkingPanel(m.workingDir)
+		asmtmux.SwapBackFromWorkingPanel(m.workingDir)
 		m.workingDir = ""
 	}
 	if m.termDir != "" {
-		csmtmux.SwapTermBackFromWorkingPanel(m.termDir)
+		asmtmux.SwapTermBackFromWorkingPanel(m.termDir)
 		m.termDir = ""
 	}
 }
@@ -714,11 +772,11 @@ func (m *PickerModel) openSettings() tea.Cmd {
 	}
 
 	cmd := fmt.Sprintf("%s --settings --path %s", exe, m.rootPath)
-	csmtmux.RunInWorkingPanel("csm-settings", cmd)
-	csmtmux.FocusWorkingPanel()
+	asmtmux.RunInWorkingPanel("asm-settings", cmd)
+	asmtmux.FocusWorkingPanel()
 
 	return func() tea.Msg {
-		csmtmux.WaitAndCleanupWorkingPanel("csm-settings")
+		asmtmux.WaitAndCleanupWorkingPanel("asm-settings")
 		return settingsExitedMsg{}
 	}
 }
@@ -732,11 +790,11 @@ func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
 	}
 
 	cmd := fmt.Sprintf("%s --worktree-create --path %s --worktree-dir %s", exe, m.rootPath, dir.Path)
-	csmtmux.RunInWorkingPanel("csm-worktree", cmd)
-	csmtmux.FocusWorkingPanel()
+	asmtmux.RunInWorkingPanel("asm-worktree", cmd)
+	asmtmux.FocusWorkingPanel()
 
 	return func() tea.Msg {
-		exitCode := csmtmux.WaitAndCleanupWorkingPanel("csm-worktree")
+		exitCode := asmtmux.WaitAndCleanupWorkingPanel("asm-worktree")
 		return worktreeExitedMsg{created: exitCode == 0}
 	}
 }
@@ -767,12 +825,12 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 	if isWt {
 		cmd += " --delete-worktree"
 	}
-	csmtmux.RunInWorkingPanel("csm-delete", cmd)
-	csmtmux.FocusWorkingPanel()
+	asmtmux.RunInWorkingPanel("asm-delete", cmd)
+	asmtmux.FocusWorkingPanel()
 
 	wtName := wt.Name
 	return func() tea.Msg {
-		exitCode := csmtmux.WaitAndCleanupWorkingPanel("csm-delete")
+		exitCode := asmtmux.WaitAndCleanupWorkingPanel("asm-delete")
 		return deleteExitedMsg{dirName: wtName, confirmed: exitCode == 0}
 	}
 }
@@ -780,7 +838,7 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	// Already showing this terminal
 	if m.termDir == wt.Name {
-		csmtmux.FocusWorkingPanel()
+		asmtmux.FocusWorkingPanel()
 		return nil
 	}
 
@@ -789,21 +847,21 @@ func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 
 	// Create terminal if needed
 	var cmd tea.Cmd
-	termWin := csmtmux.TerminalWindowName(wt.Name)
-	if !csmtmux.WindowExists(termWin) {
-		csmtmux.CreateTerminalWindow(wt.Name, wt.Path)
+	termWin := asmtmux.TerminalWindowName(wt.Name)
+	if !asmtmux.WindowExists(termWin) {
+		asmtmux.CreateTerminalWindow(wt.Name, wt.Path)
 		cmd = waitForTermExitCmd(wt.Name)
 	}
 
-	csmtmux.SwapTermToWorkingPanel(wt.Name)
+	asmtmux.SwapTermToWorkingPanel(wt.Name)
 	m.termDir = wt.Name
-	csmtmux.FocusWorkingPanel()
+	asmtmux.FocusWorkingPanel()
 	return cmd
 }
 
 func (m *PickerModel) toggleTerminal() tea.Cmd {
 	if m.workingDir != "" {
-		// Claude is displayed → switch to terminal
+		// AI session is displayed → switch to terminal
 		wtName := m.workingDir
 		var wtPath string
 		for _, wt := range m.directories {
@@ -815,30 +873,30 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		if wtPath == "" {
 			return nil
 		}
-		csmtmux.SwapBackFromWorkingPanel(wtName)
+		asmtmux.SwapBackFromWorkingPanel(wtName)
 		m.workingDir = ""
 
 		var cmd tea.Cmd
-		termWin := csmtmux.TerminalWindowName(wtName)
-		if !csmtmux.WindowExists(termWin) {
-			csmtmux.CreateTerminalWindow(wtName, wtPath)
+		termWin := asmtmux.TerminalWindowName(wtName)
+		if !asmtmux.WindowExists(termWin) {
+			asmtmux.CreateTerminalWindow(wtName, wtPath)
 			cmd = waitForTermExitCmd(wtName)
 		}
-		csmtmux.SwapTermToWorkingPanel(wtName)
+		asmtmux.SwapTermToWorkingPanel(wtName)
 		m.termDir = wtName
-		csmtmux.FocusWorkingPanel()
+		asmtmux.FocusWorkingPanel()
 		return cmd
 	} else if m.termDir != "" {
-		// Terminal is displayed → switch to Claude (if exists)
+		// Terminal is displayed → switch to AI session (if exists)
 		wtName := m.termDir
-		csmtmux.SwapTermBackFromWorkingPanel(wtName)
+		asmtmux.SwapTermBackFromWorkingPanel(wtName)
 		m.termDir = ""
 
-		winName := csmtmux.WindowName(wtName)
-		if csmtmux.WindowExists(winName) {
-			csmtmux.SwapToWorkingPanel(wtName)
+		winName := asmtmux.WindowName(wtName)
+		if asmtmux.WindowExists(winName) {
+			asmtmux.SwapToWorkingPanel(wtName)
 			m.workingDir = wtName
-			csmtmux.FocusWorkingPanel()
+			asmtmux.FocusWorkingPanel()
 		}
 	}
 	return nil
@@ -846,7 +904,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 
 func waitForTermExitCmd(dirName string) tea.Cmd {
 	return func() tea.Msg {
-		exec.Command("tmux", "wait-for", csmtmux.TermExitSignalName(dirName)).Run()
+		exec.Command("tmux", "wait-for", asmtmux.TermExitSignalName(dirName)).Run()
 		return terminalExitedMsg{dirName: dirName}
 	}
 }
@@ -862,19 +920,19 @@ func (m *PickerModel) reloadDoorayClient() {
 
 func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 	if m.workingDir == wt.Name {
-		csmtmux.FocusWorkingPanel()
+		asmtmux.FocusWorkingPanel()
 		return
 	}
 	if m.workingDir != "" {
-		csmtmux.SwapBackFromWorkingPanel(m.workingDir)
+		asmtmux.SwapBackFromWorkingPanel(m.workingDir)
 	}
 	if m.termDir != "" {
-		csmtmux.SwapTermBackFromWorkingPanel(m.termDir)
+		asmtmux.SwapTermBackFromWorkingPanel(m.termDir)
 		m.termDir = ""
 	}
-	csmtmux.SwapToWorkingPanel(wt.Name)
+	asmtmux.SwapToWorkingPanel(wt.Name)
 	m.workingDir = wt.Name
-	csmtmux.FocusWorkingPanel()
+	asmtmux.FocusWorkingPanel()
 }
 
 func (m *PickerModel) itemHeight(wi int) int {
@@ -955,7 +1013,7 @@ func (m PickerModel) View() string {
 		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
 	}
 
-	activeWindows := csmtmux.ListDirectoryWindows()
+	activeWindows := asmtmux.ListDirectoryWindows()
 	activeSet := make(map[string]bool)
 	for _, name := range activeWindows {
 		activeSet[name] = true
@@ -1031,6 +1089,10 @@ func (m PickerModel) View() string {
 
 	if m.batchConfirm.IsVisible() {
 		view = m.overlayCenter(view, m.batchConfirm.View())
+	}
+
+	if m.providerDialog.IsVisible() {
+		view = m.overlayCenter(view, m.providerDialog.View())
 	}
 
 	return view
@@ -1111,13 +1173,9 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	var stateLine string
 	if hasSession {
 		if _, flashing := m.flashItems[wt.Name]; flashing {
-			if m.spinnerFrame%4 < 2 {
-				stateLine = CompletionFlashStyle.Render("✓ done!")
-			} else {
-				stateLine = IdleStateStyle.Render("idle")
-			}
-		} else if state, ok := m.claudeStates[wt.Name]; ok {
-			stateLine = renderClaudeState(state, m.spinnerFrame)
+			stateLine = CompletionFlashStyle.Render("✓ done!")
+		} else if state, ok := m.providerStates[wt.Name]; ok {
+			stateLine = m.renderProviderState(state, wt.Name, m.spinnerFrame)
 		}
 		if startTime, ok := m.sessionStartTimes[wt.Name]; ok {
 			elapsed := formatElapsed(time.Since(startTime))
@@ -1199,7 +1257,7 @@ func flashExpireCmd(dirName string, startedAt time.Time, after time.Duration) te
 
 func notifyCompletionCmd(dirName string) tea.Cmd {
 	return func() tea.Msg {
-		notification.Send("CSM", dirName+" session is idle")
+		notification.Send("ASM", dirName+" session is idle")
 		return nil
 	}
 }
@@ -1210,9 +1268,9 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func claudeStateTickCmd() tea.Cmd {
+func providerStateTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		return claudeStateTickMsg(t)
+		return providerStateTickMsg(t)
 	})
 }
 
@@ -1305,33 +1363,32 @@ func scrollText(text string, maxWidth int, tick int) string {
 	return string(runes[offset:end])
 }
 
-func (m PickerModel) fetchClaudeState(dirName string) tea.Cmd {
+func (m PickerModel) fetchProviderState(dirName string) tea.Cmd {
 	currentWT := m.workingDir
+	providerName := m.worktreeProviders[dirName]
+	p := m.registry.Get(providerName)
+	if p == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		isDisplayed := currentWT == dirName
-		title, err := csmtmux.GetPaneTitle(dirName, isDisplayed)
+		title, err := asmtmux.GetPaneTitle(dirName, isDisplayed)
 		if err != nil {
-			return ClaudeStateUpdatedMsg{Name: dirName, State: claude.StateUnknown}
-		}
-		state := claude.DetectStateFromTitle(title)
-
-		// If busy, refine with pane content for detail (thinking/tool/responding)
-		if state == claude.StateBusy {
-			content, err := csmtmux.CapturePaneContent(dirName, isDisplayed)
-			if err == nil {
-				detail := claude.DetectBusyDetail(content)
-				if detail != claude.StateBusy {
-					state = detail
-				}
-			}
+			return ProviderStateUpdatedMsg{Name: dirName, State: provider.StateUnknown}
 		}
 
-		return ClaudeStateUpdatedMsg{Name: dirName, State: state}
+		var content string
+		if p.NeedsContent(title) {
+			content, _ = asmtmux.CapturePaneContent(dirName, isDisplayed)
+		}
+
+		state := p.DetectState(title, content)
+		return ProviderStateUpdatedMsg{Name: dirName, State: state}
 	}
 }
 
-func renderClaudeState(state claude.State, frame int) string {
-	if state == claude.StateIdle {
+func (m PickerModel) renderProviderState(state provider.State, dirName string, frame int) string {
+	if state == provider.StateIdle {
 		return IdleStateStyle.Render(state.Label())
 	}
 	if !state.IsBusy() {
@@ -1341,15 +1398,25 @@ func renderClaudeState(state claude.State, frame int) string {
 	spinner := spinnerFrames[frame%len(spinnerFrames)]
 	var style lipgloss.Style
 	switch state {
-	case claude.StateThinking:
+	case provider.StateThinking:
 		style = ThinkingStateStyle
-	case claude.StateToolUse:
+	case provider.StateToolUse:
 		style = ToolUseStateStyle
-	case claude.StateResponding:
+	case provider.StateResponding:
 		style = RespondingStateStyle
 	default:
 		style = BusyStateStyle
 	}
-	return style.Render(spinner + " " + state.Label())
+
+	label := state.Label()
+	// Show provider name when multiple providers are active
+	if m.registry.Count() > 1 {
+		if pName := m.worktreeProviders[dirName]; pName != "" {
+			if p := m.registry.Get(pName); p != nil {
+				label = p.DisplayName() + " " + label
+			}
+		}
+	}
+	return style.Render(spinner + " " + label)
 }
 

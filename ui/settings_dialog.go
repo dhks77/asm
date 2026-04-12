@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/nhn/csm/config"
+	"github.com/nhn/asm/config"
 )
 
 // SettingsSavedMsg is sent to the picker when settings are saved via working panel.

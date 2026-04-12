@@ -43,7 +43,7 @@ $xml = @"
 $xdoc = New-Object Windows.Data.Xml.Dom.XmlDocument
 $xdoc.LoadXml($xml)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xdoc)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("CSM").Show($toast)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("ASM").Show($toast)
 `
 	exec.Command("powershell", "-NoProfile", "-Command", script).Run() //nolint:errcheck
 }

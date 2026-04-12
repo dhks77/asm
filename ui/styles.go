@@ -62,7 +62,7 @@ var (
 				Italic(true).
 				Align(lipgloss.Center)
 
-	// Claude state styles
+	// Provider state styles
 	ClosedStateStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	IdleStateStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	BusyStateStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)

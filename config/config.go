@@ -7,12 +7,18 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// ProviderConfig holds command/args overrides for built-in providers.
+type ProviderConfig struct {
+	Command string   `toml:"command"`
+	Args    []string `toml:"args"`
+}
+
 type Config struct {
-	DefaultPath          string   `toml:"default_path"`
-	GitRefreshInterval   int      `toml:"git_refresh_interval"`
-	ClaudePath           string   `toml:"claude_path"`
-	ClaudeArgs           []string `toml:"claude_args"`
-	DesktopNotifications *bool    `toml:"desktop_notifications"`
+	DefaultPath          string                    `toml:"default_path"`
+	GitRefreshInterval   int                       `toml:"git_refresh_interval"`
+	DesktopNotifications *bool                     `toml:"desktop_notifications"`
+	DefaultProvider      string                    `toml:"default_provider"`
+	Providers            map[string]ProviderConfig `toml:"providers"`
 }
 
 func homeDir() string {
@@ -30,7 +36,15 @@ func DefaultConfig() *Config {
 }
 
 func configPath() string {
-	return filepath.Join(homeDir(), ".config", "csm", "config.toml")
+	asmPath := filepath.Join(homeDir(), ".config", "asm", "config.toml")
+	if _, err := os.Stat(asmPath); err == nil {
+		return asmPath
+	}
+	csmPath := filepath.Join(homeDir(), ".config", "csm", "config.toml")
+	if _, err := os.Stat(csmPath); err == nil {
+		return csmPath
+	}
+	return asmPath
 }
 
 func Load() (*Config, error) {
@@ -48,6 +62,11 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// PluginDir returns the directory for provider plugins.
+func PluginDir() string {
+	return filepath.Join(homeDir(), ".config", "asm", "plugins")
+}
+
 func (c *Config) IsDesktopNotificationsEnabled() bool {
 	if c.DesktopNotifications == nil {
 		return true // default: enabled
@@ -55,9 +74,3 @@ func (c *Config) IsDesktopNotificationsEnabled() bool {
 	return *c.DesktopNotifications
 }
 
-func (c *Config) ResolveClaudePath() string {
-	if c.ClaudePath != "" {
-		return c.ClaudePath
-	}
-	return "claude"
-}

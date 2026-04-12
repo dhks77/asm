@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/nhn/csm/worktree"
+	"github.com/nhn/asm/worktree"
 )
 
 type worktreeDialogMode int

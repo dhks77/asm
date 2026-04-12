@@ -27,7 +27,11 @@ func (d DooraySettings) APIURL() string {
 }
 
 func LoadProjectSettings(rootPath string) (*ProjectSettings, error) {
-	path := filepath.Join(rootPath, ".csm", "settings.json")
+	// Try .asm/ first, fall back to .csm/
+	path := filepath.Join(rootPath, ".asm", "settings.json")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		path = filepath.Join(rootPath, ".csm", "settings.json")
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -46,7 +50,7 @@ func LoadProjectSettings(rootPath string) (*ProjectSettings, error) {
 }
 
 func SaveProjectSettings(rootPath string, settings *ProjectSettings) error {
-	dir := filepath.Join(rootPath, ".csm")
+	dir := filepath.Join(rootPath, ".asm")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}

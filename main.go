@@ -8,9 +8,10 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/nhn/csm/config"
-	csmtmux "github.com/nhn/csm/tmux"
-	"github.com/nhn/csm/ui"
+	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/provider"
+	asmtmux "github.com/nhn/asm/tmux"
+	"github.com/nhn/asm/ui"
 )
 
 func main() {
@@ -57,6 +58,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	registry := buildRegistry(cfg)
+
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
 	} else if *worktreeCreate {
@@ -64,27 +67,65 @@ func main() {
 	} else if *settingsMode {
 		runSettings(rootPath)
 	} else if *pickerMode {
-		runPicker(cfg, rootPath)
+		runPicker(cfg, rootPath, registry)
 	} else {
-		runOrchestrator(cfg, rootPath)
+		runOrchestrator(cfg, rootPath, registry)
 	}
 }
 
-func runOrchestrator(cfg *config.Config, rootPath string) {
-	if !csmtmux.IsAvailable() {
+func buildRegistry(cfg *config.Config) *provider.Registry {
+	reg := provider.NewRegistry()
+
+	// Built-in providers with optional config overrides
+	overrides := make(map[string]provider.BuiltinOverride)
+	for name, pc := range cfg.Providers {
+		overrides[name] = provider.BuiltinOverride{Command: pc.Command, Args: pc.Args}
+	}
+	for _, p := range provider.Builtins(overrides) {
+		reg.Register(p)
+	}
+
+	// Load plugins from ~/.config/asm/plugins/
+	pluginDir := config.PluginDir()
+	if entries, err := os.ReadDir(pluginDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			pluginPath := filepath.Join(pluginDir, entry.Name())
+			p, err := provider.LoadPlugin(pluginPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to load plugin %q: %v\n", entry.Name(), err)
+				continue
+			}
+			reg.Register(p)
+		}
+	}
+
+	defaultName := cfg.DefaultProvider
+	if defaultName == "" {
+		defaultName = provider.DefaultProviderName
+	}
+	reg.SetDefault(defaultName)
+
+	return reg
+}
+
+func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry) {
+	if !asmtmux.IsAvailable() {
 		fmt.Fprintln(os.Stderr, "Error: tmux is required. Install it with: brew install tmux")
 		os.Exit(1)
 	}
 
-	// If already inside the csm tmux session, run picker directly
-	if csmtmux.IsInsideTmux() && csmtmux.SessionExists() {
-		runPicker(cfg, rootPath)
+	// If already inside the asm tmux session, run picker directly
+	if asmtmux.IsInsideTmux() && asmtmux.SessionExists() {
+		runPicker(cfg, rootPath, registry)
 		return
 	}
 
 	// Kill existing session if any
-	if csmtmux.SessionExists() {
-		csmtmux.KillSession()
+	if asmtmux.SessionExists() {
+		asmtmux.KillSession()
 	}
 
 	// Get current executable path for picker command
@@ -96,28 +137,28 @@ func runOrchestrator(cfg *config.Config, rootPath string) {
 
 	// Create tmux session (starts with default shell)
 	pickerCmd := fmt.Sprintf("%s --picker --path %s", exe, rootPath)
-	if err := csmtmux.CreateSession(pickerCmd); err != nil {
+	if err := asmtmux.CreateSession(pickerCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating tmux session: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Send the picker command to the main pane
-	if err := csmtmux.SendPickerCommand(pickerCmd); err != nil {
+	if err := asmtmux.SendPickerCommand(pickerCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "Error sending picker command: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Create the working panel (placeholder - 'cat' keeps it alive)
-	if err := csmtmux.SplitWorkingPanel(70); err != nil {
+	if err := asmtmux.SplitWorkingPanel(70); err != nil {
 		fmt.Fprintf(os.Stderr, "Error splitting pane: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Focus the picking panel
-	csmtmux.FocusPickingPanel()
+	asmtmux.FocusPickingPanel()
 
 	// Attach to the session (blocks until session ends)
-	if err := csmtmux.Attach(); err != nil {
+	if err := asmtmux.Attach(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
@@ -164,8 +205,8 @@ func runSettings(rootPath string) {
 	}
 }
 
-func runPicker(cfg *config.Config, rootPath string) {
-	model := ui.NewPickerModel(cfg, rootPath)
+func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry) {
+	model := ui.NewPickerModel(cfg, rootPath, registry)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {

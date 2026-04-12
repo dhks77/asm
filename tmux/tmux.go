@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const SessionName = "csm"
+const SessionName = "asm"
 const MainWindow = "main"
 
 func IsAvailable() bool {
@@ -54,21 +54,21 @@ func CreateSession(pickerCmd string) error {
 
 	target := fmt.Sprintf("%s:%s.0", SessionName, MainWindow)
 
-	// Ctrl+t: toggle terminal/claude (sends F12 to picker from either pane)
+	// Ctrl+t: toggle terminal/AI (sends F12 to picker from either pane)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-t",
 		"send-keys", "-t", target, "F12",
 	).Run()
 
 	// Ctrl+g: toggle pane focus
 	//   working panel → focus picking panel (direct)
-	//   picking panel → focus working panel or start Claude (picker handles via F11)
+	//   picking panel → focus working panel or start AI session (picker handles via F11)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-g",
 		"if-shell", "-F", "#{==:#{pane_index},1}",
 		fmt.Sprintf("select-pane -t %s", target),
 		fmt.Sprintf("send-keys -t %s F11", target),
 	).Run()
 
-	// Ctrl+n: new Claude session (sends F10 to picker from either pane)
+	// Ctrl+n: new AI session (sends F10 to picker from either pane)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-n",
 		"send-keys", "-t", target, "F10",
 	).Run()
@@ -96,6 +96,11 @@ func CreateSession(pickerCmd string) error {
 	// Ctrl+x: toggle batch selection (sends F5 to picker from either pane)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-x",
 		"send-keys", "-t", target, "F5",
+	).Run()
+
+	// Ctrl+p: provider selection (sends F4 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-p",
+		"send-keys", "-t", target, "F4",
 	).Run()
 
 	// Enable focus events so Bubble Tea can detect pane focus/blur
@@ -145,7 +150,7 @@ func FocusWorkingPanel() error {
 	).Run()
 }
 
-// Attach attaches to the csm tmux session (blocking).
+// Attach attaches to the asm tmux session (blocking).
 func Attach() error {
 	cmd := exec.Command("tmux", "attach-session", "-t", SessionName)
 	cmd.Stdin = os.Stdin
@@ -155,9 +160,9 @@ func Attach() error {
 }
 
 // CreateDirectoryWindow creates a hidden tmux window with a shell,
-// then sends the claude command via send-keys so aliases are available.
-// When claude exits, marks the window with @claude-exited for detection.
-func CreateDirectoryWindow(dirName, dirPath, claudePath string, claudeArgs []string) error {
+// then sends the AI command via send-keys so aliases are available.
+// When the AI process exits, signals via wait-for for detection.
+func CreateDirectoryWindow(dirName, dirPath, command string, args []string) error {
 	winName := WindowName(dirName)
 
 	err := exec.Command("tmux", "new-window", "-d",
@@ -169,14 +174,14 @@ func CreateDirectoryWindow(dirName, dirPath, claudePath string, claudeArgs []str
 		return err
 	}
 
-	claudeCmd := claudePath
-	for _, a := range claudeArgs {
-		claudeCmd += " " + a
+	aiCmd := command
+	for _, a := range args {
+		aiCmd += " " + a
 	}
 
-	// After claude exits: signal via wait-for (instant event detection)
+	// After AI exits: signal via wait-for (instant event detection)
 	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(dirName))
-	fullCmd := claudeCmd + " ; " + exitSignal
+	fullCmd := aiCmd + " ; " + exitSignal
 
 	return exec.Command("tmux", "send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
@@ -186,16 +191,16 @@ func CreateDirectoryWindow(dirName, dirPath, claudePath string, claudeArgs []str
 
 // ExitSignalName returns the tmux wait-for signal name for a directory.
 func ExitSignalName(dirName string) string {
-	return "csm-exit-" + dirName
+	return "asm-exit-" + dirName
 }
 
-// WaitForExit blocks until claude exits in the given directory window.
+// WaitForExit blocks until the AI process exits in the given directory window.
 // Returns the directory name when the signal fires.
 func WaitForExit(dirName string) error {
 	return exec.Command("tmux", "wait-for", ExitSignalName(dirName)).Run()
 }
 
-// CleanupExitedWindow handles cleanup when claude exits in a directory.
+// CleanupExitedWindow handles cleanup when the AI process exits in a directory.
 func CleanupExitedWindow(dirName string, isCurrentlyDisplayed bool) {
 	if isCurrentlyDisplayed {
 		SwapBackFromWorkingPanel(dirName)
@@ -308,7 +313,7 @@ func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 }
 
 // GetPaneTitle reads the tmux pane title for a directory's pane.
-// Claude Code sets the pane title to indicate its current state.
+// The AI provider sets the pane title to indicate its current state.
 func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
@@ -323,7 +328,7 @@ func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// KillSession kills the entire csm tmux session.
+// KillSession kills the entire asm tmux session.
 func KillSession() error {
 	return exec.Command("tmux", "kill-session", "-t", SessionName).Run()
 }
@@ -335,7 +340,7 @@ func TerminalWindowName(dirName string) string {
 
 // TermExitSignalName returns the tmux wait-for signal name for a terminal.
 func TermExitSignalName(dirName string) string {
-	return "csm-term-exit-" + dirName
+	return "asm-term-exit-" + dirName
 }
 
 // CreateTerminalWindow creates a hidden tmux window with a shell at the directory path.
@@ -382,6 +387,28 @@ func KillTerminalWindow(dirName string) error {
 	return exec.Command("tmux", "kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 	).Run()
+}
+
+// SetWindowOption sets a tmux window option on a directory's window.
+func SetWindowOption(dirName, key, value string) error {
+	winName := WindowName(dirName)
+	return exec.Command("tmux", "set-option", "-w",
+		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
+		"@"+key, value,
+	).Run()
+}
+
+// GetWindowOption reads a tmux window option from a directory's window.
+func GetWindowOption(dirName, key string) string {
+	winName := WindowName(dirName)
+	out, err := exec.Command("tmux", "show-option", "-w", "-v",
+		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
+		"@"+key,
+	).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // ListDirectoryWindows returns directory names (without "wt-" prefix) of all active directory windows.

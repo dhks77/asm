@@ -1,4 +1,4 @@
-module github.com/nhn/csm
+module github.com/nhn/asm
 
 go 1.24.0
 

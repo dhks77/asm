@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/nhn/csm/config"
-	"github.com/nhn/csm/internal"
+	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/internal"
 )
 
 var defaultPattern = regexp.MustCompile(`\d+`)
