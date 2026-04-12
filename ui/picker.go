@@ -28,9 +28,9 @@ type GitStatusUpdatedMsg struct {
 	Status worktree.GitStatus
 }
 
-type TaskNameResolvedMsg struct {
+type TaskResolvedMsg struct {
 	Path string
-	Name string
+	Info tracker.TaskInfo
 }
 
 type tickMsg time.Time
@@ -64,7 +64,7 @@ type PickerModel struct {
 	rootPath       string
 	directories    []worktree.Worktree
 	gitStatus      map[string]worktree.GitStatus
-	taskNames      map[string]string
+	taskInfos      map[string]tracker.TaskInfo
 	providerStates     map[string]provider.State
 	prevProviderStates map[string]provider.State
 	worktreeProviders  map[string]string // worktree name -> provider name
@@ -93,7 +93,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		cfg:            cfg,
 		rootPath:       rootPath,
 		gitStatus:      make(map[string]worktree.GitStatus),
-		taskNames:      make(map[string]string),
+		taskInfos:      make(map[string]tracker.TaskInfo),
 		providerStates:     make(map[string]provider.State),
 		prevProviderStates: make(map[string]provider.State),
 		worktreeProviders:  make(map[string]string),
@@ -124,8 +124,8 @@ func (m *PickerModel) filteredDirectories() []int {
 			indices = append(indices, i)
 			continue
 		}
-		if taskName, ok := m.taskNames[wt.Path]; ok && taskName != "" {
-			if strings.Contains(strings.ToLower(taskName), query) {
+		if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
+			if strings.Contains(strings.ToLower(info.Name), query) {
 				indices = append(indices, i)
 				continue
 			}
@@ -383,15 +383,15 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case GitStatusUpdatedMsg:
 		m.gitStatus[msg.Path] = msg.Status
 		if m.tracker != nil && msg.Status.Branch != "" {
-			if _, ok := m.taskNames[msg.Path]; !ok {
+			if _, ok := m.taskInfos[msg.Path]; !ok {
 				return m, m.fetchTaskName(msg.Path, msg.Status.Branch)
 			}
 		}
 		return m, nil
 
-	case TaskNameResolvedMsg:
-		if msg.Name != "" {
-			m.taskNames[msg.Path] = msg.Name
+	case TaskResolvedMsg:
+		if msg.Info.Name != "" {
+			m.taskInfos[msg.Path] = msg.Info
 		}
 		return m, nil
 
@@ -551,6 +551,18 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selectedItems[wt.Name] = true
 			}
 		}
+
+	case "f3", "o": // Ctrl+o / o: Open task URL in browser
+		if key == "o" && len(m.selectedItems) > 0 {
+			break // fall through to search in selection mode
+		}
+		wt := m.contextDirectory()
+		if wt != nil {
+			if info, ok := m.taskInfos[wt.Path]; ok && info.URL != "" {
+				exec.Command("open", info.URL).Start()
+			}
+		}
+		return m, nil
 
 	case "backspace":
 		if len(m.searchQuery) > 0 {
@@ -834,8 +846,8 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 	}
 
 	taskName := ""
-	if tn, ok := m.taskNames[wt.Path]; ok {
-		taskName = tn
+	if info, ok := m.taskInfos[wt.Path]; ok {
+		taskName = info.Name
 	}
 
 	dirty := worktree.HasChanges(wt.Path)
@@ -957,8 +969,8 @@ func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 
 func (m *PickerModel) itemHeight(wi int) int {
 	h := 1
-	_, hasTask := m.taskNames[m.directories[wi].Path]
-	hasTask = hasTask && m.taskNames[m.directories[wi].Path] != ""
+	taskInfo, hasTask := m.taskInfos[m.directories[wi].Path]
+	hasTask = hasTask && taskInfo.Name != ""
 	_, hasBranch := m.gitStatus[m.directories[wi].Path]
 	if hasTask {
 		h += 3
@@ -1141,8 +1153,9 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	var primaryName string
 	var subLines []string
 
-	taskName, hasTask := m.taskNames[wt.Path]
-	hasTask = hasTask && taskName != ""
+	taskInfo, hasTask := m.taskInfos[wt.Path]
+	hasTask = hasTask && taskInfo.Name != ""
+	taskName := taskInfo.Name
 	gs, hasBranch := m.gitStatus[wt.Path]
 
 	primaryStyle := taskNameStyle
@@ -1260,8 +1273,8 @@ func (m PickerModel) fetchGitStatus(path string) tea.Cmd {
 func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
 	t := m.tracker
 	return func() tea.Msg {
-		name := t.ResolveName(branch)
-		return TaskNameResolvedMsg{Path: path, Name: name}
+		info := t.Resolve(branch)
+		return TaskResolvedMsg{Path: path, Info: info}
 	}
 }
 

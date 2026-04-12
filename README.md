@@ -34,15 +34,17 @@ asm --path ~/worktrees
 | Key | Action |
 |-----|--------|
 | `Enter` | 세션 열기 (기본 AI) |
-| `Ctrl+P` | AI 프로바이더 선택 |
 | `Ctrl+G` | picker <-> 세션 전환 |
 | `Ctrl+T` | 터미널 <-> AI 토글 |
 | `Ctrl+N` | 새 세션 (기존 kill) |
+| `Ctrl+O` | Task URL 브라우저 열기 |
+| `Ctrl+P` | AI 프로바이더 선택 |
 | `Ctrl+S` | 설정 |
 | `Ctrl+W` | Worktree 생성 |
 | `Ctrl+D` | 디렉토리 삭제 |
 | `Ctrl+X` | 일괄 선택 |
 | `Ctrl+Q` | 종료 |
+| `o` | Task URL 브라우저 열기 (picker) |
 
 ## Plugin System
 
@@ -75,9 +77,9 @@ state: `unknown`, `idle`, `busy`, `thinking`, `tool_use`, `responding`
 `~/.config/asm/trackers/<name>` 에 실행파일 배치.
 
 ```bash
-# 브랜치명 -> 이슈 이름
+# 브랜치명 -> 이슈 이름 + URL
 <tracker> resolve <branch-name>
-# → {"name":"Fix login button alignment"}
+# → {"name":"Fix login button alignment", "url":"https://..."}
 
 # 설정 (선택, AI provider와 동일)
 <tracker> config-fields / config-get / config-set

@@ -15,6 +15,7 @@ type pluginInfo struct {
 
 type resolveResponse struct {
 	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 // PluginTracker implements Tracker by calling an external executable.
@@ -36,7 +37,7 @@ func LoadTracker(path string) (*PluginTracker, error) {
 func (t *PluginTracker) Name() string       { return t.name }
 func (t *PluginTracker) PluginPath() string { return t.path }
 
-func (t *PluginTracker) ResolveName(branch string) string {
+func (t *PluginTracker) Resolve(branch string) TaskInfo {
 	const maxRetries = 2
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -51,10 +52,10 @@ func (t *PluginTracker) ResolveName(branch string) string {
 			continue
 		}
 		if resp.Name != "" {
-			return resp.Name
+			return TaskInfo{Name: resp.Name, URL: resp.URL}
 		}
 	}
-	return ""
+	return TaskInfo{}
 }
 
 // ListNames returns the names of all tracker plugins in the directory.

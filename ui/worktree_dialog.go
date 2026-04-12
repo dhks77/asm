@@ -40,9 +40,9 @@ type WorktreeErrorMsg struct {
 	Err string
 }
 
-type wtTaskNameMsg struct {
+type wtTaskResolvedMsg struct {
 	Branch string
-	Name   string
+	Info   tracker.TaskInfo
 }
 
 type wtTaskRetryTickMsg struct {
@@ -68,7 +68,7 @@ type WorktreeDialogModel struct {
 	repoDir   string
 	repoName  string
 	tracker   tracker.Tracker
-	taskNames map[string]string // branch name -> task name
+	taskInfos map[string]tracker.TaskInfo // branch name -> task info
 	width     int
 	height    int
 	err       string
@@ -78,7 +78,7 @@ func NewWorktreeDialogModel(t tracker.Tracker) WorktreeDialogModel {
 	return WorktreeDialogModel{
 		maxVisible: 10,
 		tracker:    t,
-		taskNames:  make(map[string]string),
+		taskInfos:  make(map[string]tracker.TaskInfo),
 	}
 }
 
@@ -132,13 +132,13 @@ func (m *WorktreeDialogModel) adjustScrollOffset() {
 	usedLines := 0
 	for i := m.scrollOffset; i <= m.cursor && i < len(m.filtered); i++ {
 		usedLines++
-		if taskName, ok := m.taskNames[m.filtered[i].Name]; ok && taskName != "" {
+		if info, ok := m.taskInfos[m.filtered[i].Name]; ok && info.Name != "" {
 			usedLines++
 		}
 	}
 	for usedLines > m.maxVisible && m.scrollOffset < m.cursor {
 		usedLines--
-		if taskName, ok := m.taskNames[m.filtered[m.scrollOffset].Name]; ok && taskName != "" {
+		if info, ok := m.taskInfos[m.filtered[m.scrollOffset].Name]; ok && info.Name != "" {
 			usedLines--
 		}
 		m.scrollOffset++
@@ -156,8 +156,8 @@ func (m *WorktreeDialogModel) applyFilter() {
 		if m.filter != "" {
 			nameMatch := strings.Contains(strings.ToLower(b.Name), lower)
 			taskMatch := false
-			if tn, ok := m.taskNames[b.Name]; ok {
-				taskMatch = strings.Contains(strings.ToLower(tn), lower)
+			if info, ok := m.taskInfos[b.Name]; ok {
+				taskMatch = strings.Contains(strings.ToLower(info.Name), lower)
 			}
 			if !nameMatch && !taskMatch {
 				continue
@@ -199,16 +199,16 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 		}
 		return m, nil
 
-	case wtTaskNameMsg:
-		if msg.Name != "" {
-			m.taskNames[msg.Branch] = msg.Name
+	case wtTaskResolvedMsg:
+		if msg.Info.Name != "" {
+			m.taskInfos[msg.Branch] = msg.Info
 			// Propagate to branches sharing the same base name (e.g., origin/feature/X → feature/X)
 			for _, b := range m.branches {
-				if _, ok := m.taskNames[b.Name]; ok {
+				if _, ok := m.taskInfos[b.Name]; ok {
 					continue
 				}
 				if strings.HasSuffix(msg.Branch, b.Name) || strings.HasSuffix(b.Name, msg.Branch) {
-					m.taskNames[b.Name] = msg.Name
+					m.taskInfos[b.Name] = msg.Info
 				}
 			}
 		}
@@ -220,12 +220,12 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 		}
 		var cmds []tea.Cmd
 		for _, b := range m.branches {
-			if _, ok := m.taskNames[b.Name]; !ok {
+			if _, ok := m.taskInfos[b.Name]; !ok {
 				// Check if another branch with overlapping name already resolved
 				base := strings.TrimPrefix(b.Name, "origin/")
 				if base != b.Name {
-					if name, ok := m.taskNames[base]; ok {
-						m.taskNames[b.Name] = name
+					if info, ok := m.taskInfos[base]; ok {
+						m.taskInfos[b.Name] = info
 						continue
 					}
 				}
@@ -411,8 +411,8 @@ func wtTaskRetryTickCmd(remaining int) tea.Cmd {
 func (m WorktreeDialogModel) fetchTaskName(branch string) tea.Cmd {
 	t := m.tracker
 	return func() tea.Msg {
-		name := t.ResolveName(branch)
-		return wtTaskNameMsg{Branch: branch, Name: name}
+		info := t.Resolve(branch)
+		return wtTaskResolvedMsg{Branch: branch, Info: info}
 	}
 }
 
@@ -601,7 +601,7 @@ func (m WorktreeDialogModel) viewSelectBranch() string {
 		end := m.scrollOffset
 		for end < len(m.filtered) {
 			lines := 1
-			if taskName, ok := m.taskNames[m.filtered[end].Name]; ok && taskName != "" {
+			if info, ok := m.taskInfos[m.filtered[end].Name]; ok && info.Name != "" {
 				lines = 2
 			}
 			if usedLines+lines > m.maxVisible {
@@ -629,8 +629,8 @@ func (m WorktreeDialogModel) viewSelectBranch() string {
 			}
 
 			rows = append(rows, cursor+name)
-			if taskName, ok := m.taskNames[b.Name]; ok && taskName != "" {
-				rows = append(rows, "    "+lipgloss.NewStyle().Foreground(dimColor).Italic(true).Render(taskName))
+			if info, ok := m.taskInfos[b.Name]; ok && info.Name != "" {
+				rows = append(rows, "    "+lipgloss.NewStyle().Foreground(dimColor).Italic(true).Render(info.Name))
 			}
 		}
 
@@ -656,7 +656,7 @@ func (m WorktreeDialogModel) viewSelectBase() string {
 		end := m.scrollOffset
 		for end < len(m.filtered) {
 			lines := 1
-			if taskName, ok := m.taskNames[m.filtered[end].Name]; ok && taskName != "" {
+			if info, ok := m.taskInfos[m.filtered[end].Name]; ok && info.Name != "" {
 				lines = 2
 			}
 			if usedLines+lines > m.maxVisible {
@@ -679,8 +679,8 @@ func (m WorktreeDialogModel) viewSelectBase() string {
 				name += " " + lipgloss.NewStyle().Foreground(dimColor).Render("(local)")
 			}
 			rows = append(rows, cursor+name)
-			if taskName, ok := m.taskNames[b.Name]; ok && taskName != "" {
-				rows = append(rows, "    "+lipgloss.NewStyle().Foreground(dimColor).Italic(true).Render(taskName))
+			if info, ok := m.taskInfos[b.Name]; ok && info.Name != "" {
+				rows = append(rows, "    "+lipgloss.NewStyle().Foreground(dimColor).Italic(true).Render(info.Name))
 			}
 		}
 

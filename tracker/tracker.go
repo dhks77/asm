@@ -5,10 +5,16 @@ import (
 	"time"
 )
 
-// Tracker resolves branch names to task/issue names.
+// TaskInfo holds resolved task information.
+type TaskInfo struct {
+	Name string
+	URL  string
+}
+
+// Tracker resolves branch names to task info.
 type Tracker interface {
 	Name() string
-	ResolveName(branch string) string
+	Resolve(branch string) TaskInfo
 }
 
 // CachedTracker wraps a Tracker with an in-memory TTL cache.
@@ -20,7 +26,7 @@ type CachedTracker struct {
 }
 
 type cacheEntry struct {
-	value     string
+	value     TaskInfo
 	expiresAt time.Time
 }
 
@@ -32,10 +38,10 @@ func NewCachedTracker(inner Tracker, ttl time.Duration) *CachedTracker {
 	}
 }
 
-func (c *CachedTracker) Name() string    { return c.inner.Name() }
-func (c *CachedTracker) Inner() Tracker  { return c.inner }
+func (c *CachedTracker) Name() string   { return c.inner.Name() }
+func (c *CachedTracker) Inner() Tracker { return c.inner }
 
-func (c *CachedTracker) ResolveName(branch string) string {
+func (c *CachedTracker) Resolve(branch string) TaskInfo {
 	c.mu.RLock()
 	if e, ok := c.entries[branch]; ok && time.Now().Before(e.expiresAt) {
 		c.mu.RUnlock()
@@ -43,10 +49,10 @@ func (c *CachedTracker) ResolveName(branch string) string {
 	}
 	c.mu.RUnlock()
 
-	value := c.inner.ResolveName(branch)
+	value := c.inner.Resolve(branch)
 
 	// Only cache non-empty results; empty results will be retried
-	if value != "" {
+	if value.Name != "" {
 		c.mu.Lock()
 		c.entries[branch] = cacheEntry{value: value, expiresAt: time.Now().Add(c.ttl)}
 		c.mu.Unlock()
