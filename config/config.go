@@ -18,6 +18,7 @@ type Config struct {
 	GitRefreshInterval   int                       `toml:"git_refresh_interval"`
 	DesktopNotifications *bool                     `toml:"desktop_notifications"`
 	DefaultProvider      string                    `toml:"default_provider"`
+	DefaultTracker       string                    `toml:"default_tracker"`
 	Providers            map[string]ProviderConfig `toml:"providers"`
 }
 
@@ -65,6 +66,25 @@ func Load() (*Config, error) {
 // PluginDir returns the directory for provider plugins.
 func PluginDir() string {
 	return filepath.Join(homeDir(), ".config", "asm", "plugins")
+}
+
+// TrackerDir returns the directory for tracker plugins.
+func TrackerDir() string {
+	return filepath.Join(homeDir(), ".config", "asm", "trackers")
+}
+
+// Save writes the config to the asm config path.
+func Save(cfg *Config) error {
+	path := filepath.Join(homeDir(), ".config", "asm", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return toml.NewEncoder(f).Encode(cfg)
 }
 
 func (c *Config) IsDesktopNotificationsEnabled() bool {

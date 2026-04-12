@@ -9,7 +9,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/plugincfg"
 	"github.com/nhn/asm/provider"
+	"github.com/nhn/asm/tracker"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/ui"
 )
@@ -17,13 +19,14 @@ import (
 func main() {
 	pathFlag := flag.String("path", "", "Root directory containing directories")
 	pickerMode := flag.Bool("picker", false, "Run in picker mode (inside tmux picking panel)")
-	settingsMode := flag.Bool("settings", false, "Run in settings mode (inside tmux working panel)")
+	settingsMode := flag.Bool("settings", false, "Run plugin settings editor")
 	deleteMode := flag.String("delete", "", "Run delete confirmation (directory name)")
 	deleteTaskName := flag.String("delete-task", "", "Task name to display in delete confirmation")
 	deleteDirty := flag.Bool("delete-dirty", false, "Directory has uncommitted changes")
 	deleteWorktree := flag.Bool("delete-worktree", false, "Directory is a git worktree")
 	worktreeCreate := flag.Bool("worktree-create", false, "Run worktree creation dialog")
 	worktreeDir := flag.String("worktree-dir", "", "Directory path for worktree operations")
+	providerSelect := flag.Bool("provider-select", false, "Run provider selection dialog")
 	flag.Parse()
 
 	cfg, err := config.Load()
@@ -59,17 +62,20 @@ func main() {
 	}
 
 	registry := buildRegistry(cfg)
+	t := tracker.LoadFromDir(config.TrackerDir(), cfg.DefaultTracker)
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
 	} else if *worktreeCreate {
-		runWorktreeCreate(rootPath, *worktreeDir)
+		runWorktreeCreate(rootPath, *worktreeDir, t)
+	} else if *providerSelect {
+		runProviderSelect(registry)
 	} else if *settingsMode {
-		runSettings(rootPath)
+		runSettings(cfg, registry, t)
 	} else if *pickerMode {
-		runPicker(cfg, rootPath, registry)
+		runPicker(cfg, rootPath, registry, t)
 	} else {
-		runOrchestrator(cfg, rootPath, registry)
+		runOrchestrator(cfg, rootPath, registry, t)
 	}
 }
 
@@ -111,7 +117,7 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 	return reg
 }
 
-func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry) {
+func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
 	if !asmtmux.IsAvailable() {
 		fmt.Fprintln(os.Stderr, "Error: tmux is required. Install it with: brew install tmux")
 		os.Exit(1)
@@ -119,7 +125,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 
 	// If already inside the asm tmux session, run picker directly
 	if asmtmux.IsInsideTmux() && asmtmux.SessionExists() {
-		runPicker(cfg, rootPath, registry)
+		runPicker(cfg, rootPath, registry, t)
 		return
 	}
 
@@ -180,8 +186,8 @@ func runDelete(dirName, taskName string, dirty, isWorktree bool) {
 	os.Exit(1)
 }
 
-func runWorktreeCreate(rootPath, dirPath string) {
-	model := ui.NewWorktreeRunnerModel(rootPath, dirPath)
+func runWorktreeCreate(rootPath, dirPath string, t tracker.Tracker) {
+	model := ui.NewWorktreeRunnerModel(rootPath, dirPath, t)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	result, err := p.Run()
@@ -195,8 +201,28 @@ func runWorktreeCreate(rootPath, dirPath string) {
 	os.Exit(1)
 }
 
-func runSettings(rootPath string) {
-	model := ui.NewSettingsModel(rootPath)
+
+func runProviderSelect(registry *provider.Registry) {
+	model := ui.NewProviderSelectModel(registry.Names())
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	result, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if m, ok := result.(ui.ProviderSelectModel); ok && m.Selected != "" {
+		// Store selection in tmux session variable for picker to read
+		asmtmux.SetSessionOption("asm-selected-provider", m.Selected)
+		os.Exit(0)
+	}
+	os.Exit(1)
+}
+
+func runSettings(cfg *config.Config, registry *provider.Registry, t tracker.Tracker) {
+	plugins := collectConfigurablePlugins(registry, t)
+	trackerNames := tracker.ListNames(config.TrackerDir())
+	model := ui.NewSettingsModel(cfg, registry.Names(), trackerNames, plugins)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
@@ -205,8 +231,39 @@ func runSettings(rootPath string) {
 	}
 }
 
-func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry) {
-	model := ui.NewPickerModel(cfg, rootPath, registry)
+func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) []plugincfg.Entry {
+	var entries []plugincfg.Entry
+
+	// AI provider plugins
+	for _, name := range registry.Names() {
+		p := registry.Get(name)
+		if pp, ok := p.(*provider.PluginProvider); ok {
+			entries = append(entries, plugincfg.Entry{
+				Name:       pp.DisplayName(),
+				Category:   "provider",
+				PluginPath: pp.PluginPath(),
+			})
+		}
+	}
+
+	// Tracker plugin
+	if t != nil {
+		if ct, ok := t.(*tracker.CachedTracker); ok {
+			if pt, ok := ct.Inner().(*tracker.PluginTracker); ok {
+				entries = append(entries, plugincfg.Entry{
+					Name:       pt.Name(),
+					Category:   "tracker",
+					PluginPath: pt.PluginPath(),
+				})
+			}
+		}
+	}
+
+	return entries
+}
+
+func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
+	model := ui.NewPickerModel(cfg, rootPath, registry, t)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {

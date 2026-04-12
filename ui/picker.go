@@ -11,9 +11,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nhn/asm/config"
-	"github.com/nhn/asm/integration"
 	"github.com/nhn/asm/notification"
 	"github.com/nhn/asm/provider"
+	"github.com/nhn/asm/tracker"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/worktree"
 )
@@ -77,7 +77,7 @@ type PickerModel struct {
 	viewTop        int    // first visible item index for scrolling
 	workingDir     string // directory shown in working panel (AI session)
 	termDir        string // directory shown in working panel (terminal)
-	dooray         *integration.DoorayClient
+	tracker        tracker.Tracker
 	focused        bool
 	width          int
 	height         int
@@ -86,15 +86,9 @@ type PickerModel struct {
 	searchQuery    string
 	selectedItems    map[string]bool
 	batchConfirm     BatchConfirmModel
-	providerDialog   ProviderDialogModel
 }
 
-func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry) PickerModel {
-	var dooray *integration.DoorayClient
-	projectSettings, err := config.LoadProjectSettings(rootPath)
-	if err == nil {
-		dooray = integration.NewDoorayClient(projectSettings.Dooray)
-	}
+func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) PickerModel {
 	return PickerModel{
 		cfg:            cfg,
 		rootPath:       rootPath,
@@ -108,8 +102,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		flashItems:         make(map[string]time.Time),
 		selectedItems:  make(map[string]bool),
 		batchConfirm:     NewBatchConfirmModel(),
-		providerDialog:   NewProviderDialogModel(),
-		dooray:            dooray,
+		tracker:           t,
 		focused:        true,
 	}
 }
@@ -152,18 +145,6 @@ func (m PickerModel) Init() tea.Cmd {
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Delegate to provider dialog when visible
-	if m.providerDialog.IsVisible() {
-		switch msg.(type) {
-		case tea.WindowSizeMsg:
-			// fall through
-		default:
-			var cmd tea.Cmd
-			m.providerDialog, cmd = m.providerDialog.Update(msg)
-			return m, cmd
-		}
-	}
-
 	// Delegate to batch confirm dialog when visible
 	if m.batchConfirm.IsVisible() {
 		switch msg.(type) {
@@ -181,12 +162,15 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.batchConfirm.SetSize(msg.Width)
-		m.providerDialog.SetSize(msg.Width)
 		m.ready = true
 		return m, nil
 
 	case tea.FocusMsg:
 		m.focused = true
+		// Close any utility dialogs when picker gets focus
+		if asmtmux.HasUtilityWindow() {
+			asmtmux.CloseUtilityPanel()
+		}
 		return m, nil
 
 	case tea.BlurMsg:
@@ -240,7 +224,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmds []tea.Cmd
 				cmds = append(cmds, flashExpireCmd(msg.Name, now, 3*time.Second))
 				if m.cfg.IsDesktopNotificationsEnabled() {
-					cmds = append(cmds, notifyCompletionCmd(msg.Name))
+					cmds = append(cmds, notifyCompletionCmd(msg.Name, m.workingDir))
 				}
 				return m, tea.Batch(cmds...)
 			}
@@ -337,15 +321,28 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BatchCancelledMsg:
 		return m, nil
 
-	case ProviderSelectedMsg:
-		wt := m.contextDirectory()
-		if wt != nil {
-			return m, m.startSession(wt, msg.ProviderName)
+	case providerSelectDoneMsg:
+		if msg.ProviderName == "" {
+			return m, nil
 		}
-		return m, nil
-
-	case ProviderCancelledMsg:
-		return m, nil
+		wt := m.contextDirectory()
+		if wt == nil {
+			return m, nil
+		}
+		// Kill existing session if any, then start with selected provider
+		winName := asmtmux.WindowName(wt.Name)
+		if asmtmux.WindowExists(winName) {
+			if m.workingDir == wt.Name {
+				asmtmux.SwapBackFromWorkingPanel(wt.Name)
+				m.workingDir = ""
+			}
+			asmtmux.KillDirectoryWindow(wt.Name)
+		}
+		delete(m.providerStates, wt.Name)
+		delete(m.prevProviderStates, wt.Name)
+		delete(m.worktreeProviders, wt.Name)
+		delete(m.sessionStartTimes, wt.Name)
+		return m, m.startSession(wt, msg.ProviderName)
 
 	case batchKillCompletedMsg:
 		return m, nil
@@ -385,7 +382,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case GitStatusUpdatedMsg:
 		m.gitStatus[msg.Path] = msg.Status
-		if m.dooray != nil && msg.Status.Branch != "" {
+		if m.tracker != nil && msg.Status.Branch != "" {
 			if _, ok := m.taskNames[msg.Path]; !ok {
 				return m, m.fetchTaskName(msg.Path, msg.Status.Branch)
 			}
@@ -395,6 +392,18 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TaskNameResolvedMsg:
 		if msg.Name != "" {
 			m.taskNames[msg.Path] = msg.Name
+		}
+		return m, nil
+
+	case settingsExitedMsg:
+		// Reload config to pick up changed defaults
+		if newCfg, err := config.Load(); err == nil {
+			m.cfg = newCfg
+			defaultName := newCfg.DefaultProvider
+			if defaultName == "" {
+				defaultName = provider.DefaultProviderName
+			}
+			m.registry.SetDefault(defaultName)
 		}
 		return m, nil
 
@@ -417,18 +426,6 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case settingsExitedMsg:
-		m.reloadDoorayClient()
-		if m.dooray != nil {
-			var cmds []tea.Cmd
-			for _, wt := range m.directories {
-				if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
-					cmds = append(cmds, m.fetchTaskName(wt.Path, gs.Branch))
-				}
-			}
-			return m, tea.Batch(cmds...)
-		}
-		return m, nil
 	}
 
 	return m, nil
@@ -479,6 +476,12 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.switchToTerminal(wt)
 
 	case "f11": // Ctrl+g: focus working panel or start AI session
+		// Close any open utility dialogs (settings, worktree, delete, provider-select)
+		if asmtmux.HasUtilityWindow() {
+			asmtmux.CloseUtilityPanel()
+			return m, nil
+		}
+
 		if m.workingDir != "" || m.termDir != "" {
 			asmtmux.FocusWorkingPanel()
 		} else {
@@ -536,7 +539,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "f4": // Ctrl+p: select AI provider
 		if m.registry.Count() > 1 {
-			m.providerDialog.Show(m.registry.Names())
+			return m, m.openProviderSelect()
 		}
 
 	case "f5": // Ctrl+x: toggle selection
@@ -763,6 +766,28 @@ func (m *PickerModel) swapOutWorkingPanel() {
 	}
 }
 
+func (m *PickerModel) openProviderSelect() tea.Cmd {
+	m.swapOutWorkingPanel()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+
+	cmd := fmt.Sprintf("%s --provider-select", exe)
+	asmtmux.RunInWorkingPanel("asm-provider-select", cmd)
+	asmtmux.FocusWorkingPanel()
+
+	return func() tea.Msg {
+		exitCode := asmtmux.WaitAndCleanupWorkingPanel("asm-provider-select")
+		if exitCode == 0 {
+			selected := asmtmux.GetSessionOption("asm-selected-provider")
+			return providerSelectDoneMsg{ProviderName: selected}
+		}
+		return providerSelectDoneMsg{}
+	}
+}
+
 func (m *PickerModel) openSettings() tea.Cmd {
 	m.swapOutWorkingPanel()
 
@@ -771,7 +796,7 @@ func (m *PickerModel) openSettings() tea.Cmd {
 		return nil
 	}
 
-	cmd := fmt.Sprintf("%s --settings --path %s", exe, m.rootPath)
+	cmd := fmt.Sprintf("%s --settings", exe)
 	asmtmux.RunInWorkingPanel("asm-settings", cmd)
 	asmtmux.FocusWorkingPanel()
 
@@ -780,6 +805,7 @@ func (m *PickerModel) openSettings() tea.Cmd {
 		return settingsExitedMsg{}
 	}
 }
+
 
 func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
 	m.swapOutWorkingPanel()
@@ -909,20 +935,14 @@ func waitForTermExitCmd(dirName string) tea.Cmd {
 	}
 }
 
-func (m *PickerModel) reloadDoorayClient() {
-	projectSettings, err := config.LoadProjectSettings(m.rootPath)
-	if err != nil {
-		return
-	}
-	m.dooray = integration.NewDoorayClient(projectSettings.Dooray)
-	m.taskNames = make(map[string]string)
-}
 
 func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 	if m.workingDir == wt.Name {
 		asmtmux.FocusWorkingPanel()
 		return
 	}
+	// Recreate working panel if it was lost
+	asmtmux.EnsureWorkingPanel()
 	if m.workingDir != "" {
 		asmtmux.SwapBackFromWorkingPanel(m.workingDir)
 	}
@@ -1091,10 +1111,6 @@ func (m PickerModel) View() string {
 		view = m.overlayCenter(view, m.batchConfirm.View())
 	}
 
-	if m.providerDialog.IsVisible() {
-		view = m.overlayCenter(view, m.providerDialog.View())
-	}
-
 	return view
 }
 
@@ -1242,9 +1258,9 @@ func (m PickerModel) fetchGitStatus(path string) tea.Cmd {
 }
 
 func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
-	dooray := m.dooray
+	t := m.tracker
 	return func() tea.Msg {
-		name := dooray.ResolveTaskName(branch)
+		name := t.ResolveName(branch)
 		return TaskNameResolvedMsg{Path: path, Name: name}
 	}
 }
@@ -1255,11 +1271,74 @@ func flashExpireCmd(dirName string, startedAt time.Time, after time.Duration) te
 	})
 }
 
-func notifyCompletionCmd(dirName string) tea.Cmd {
+func notifyCompletionCmd(dirName string, currentWorkingDir string) tea.Cmd {
 	return func() tea.Msg {
-		notification.Send("ASM", dirName+" session is idle")
+		isDisplayed := currentWorkingDir == dirName
+		content, err := asmtmux.CapturePaneContent(dirName, isDisplayed)
+		if err != nil {
+			notification.Send("ASM", dirName+" done")
+			return nil
+		}
+		snippet := extractLastResponse(content)
+		if snippet != "" {
+			notification.Send("ASM – "+dirName, snippet)
+		} else {
+			notification.Send("ASM", dirName+" done")
+		}
 		return nil
 	}
+}
+
+// extractLastResponse extracts the last meaningful text from pane content for notification.
+func extractLastResponse(content string) string {
+	lines := strings.Split(content, "\n")
+
+	var meaningful []string
+	for i := len(lines) - 1; i >= 0 && len(meaningful) < 5; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if isNoiseeLine(line) {
+			continue
+		}
+		meaningful = append(meaningful, line)
+	}
+
+	if len(meaningful) == 0 {
+		return ""
+	}
+
+	// Take up to 2 lines, reverse back to original order
+	take := min(2, len(meaningful))
+	var result []string
+	for i := take - 1; i >= 0; i-- {
+		result = append(result, meaningful[i])
+	}
+
+	text := strings.Join(result, "\n")
+
+	runes := []rune(text)
+	if len(runes) > 120 {
+		return string(runes[:120]) + "…"
+	}
+	return text
+}
+
+// isNoiseeLine returns true if the line is a prompt, separator, or UI decoration.
+func isNoiseeLine(line string) bool {
+	// Single-char prompts and indicators
+	if len([]rune(line)) <= 2 {
+		return true
+	}
+	// Lines made entirely of box-drawing, dashes, or decorative chars
+	for _, r := range line {
+		if r != '─' && r != '━' && r != '—' && r != '-' && r != '=' && r != '~' &&
+			r != '╌' && r != '┄' && r != ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 func tickCmd() tea.Cmd {

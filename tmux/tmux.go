@@ -60,7 +60,7 @@ func CreateSession(pickerCmd string) error {
 	).Run()
 
 	// Ctrl+g: toggle pane focus
-	//   working panel → focus picking panel (direct)
+	//   working panel → focus picking panel
 	//   picking panel → focus working panel or start AI session (picker handles via F11)
 	exec.Command("tmux", "bind-key", "-T", "root", "C-g",
 		"if-shell", "-F", "#{==:#{pane_index},1}",
@@ -134,6 +134,30 @@ func SplitWorkingPanel(percentage int) error {
 		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
 		"cat",
 	).Run()
+}
+
+// WorkingPanelExists checks if the working panel (pane 1) exists.
+func WorkingPanelExists() bool {
+	out, err := exec.Command("tmux", "list-panes",
+		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
+		"-F", "#{pane_index}",
+	).Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "1" {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureWorkingPanel recreates the working panel if it was lost.
+func EnsureWorkingPanel() {
+	if !WorkingPanelExists() {
+		SplitWorkingPanel(70)
+	}
 }
 
 // FocusPickingPanel focuses the picking panel (picker).
@@ -244,6 +268,7 @@ func KillDirectoryWindow(dirName string) error {
 // working panel, and returns the window name used for waiting/cleanup.
 // The exit code is stored in tmux variable @{windowName}-exit.
 func RunInWorkingPanel(windowName, cmd string) error {
+	EnsureWorkingPanel()
 	err := exec.Command("tmux", "new-window", "-d",
 		"-t", SessionName,
 		"-n", windowName,
@@ -328,6 +353,27 @@ func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// utilityWindows are non-session windows that should be closed on Ctrl+G.
+var utilityWindows = []string{"asm-settings", "asm-worktree", "asm-delete", "asm-provider-select"}
+
+// HasUtilityWindow returns true if any utility window is open.
+func HasUtilityWindow() bool {
+	for _, name := range utilityWindows {
+		if WindowExists(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// CloseUtilityPanel sends Escape to the working panel to gracefully close any utility dialog.
+func CloseUtilityPanel() {
+	exec.Command("tmux", "send-keys",
+		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+		"Escape",
+	).Run()
+}
+
 // KillSession kills the entire asm tmux session.
 func KillSession() error {
 	return exec.Command("tmux", "kill-session", "-t", SessionName).Run()
@@ -387,6 +433,20 @@ func KillTerminalWindow(dirName string) error {
 	return exec.Command("tmux", "kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 	).Run()
+}
+
+// SetSessionOption sets a tmux session-level option.
+func SetSessionOption(key, value string) error {
+	return exec.Command("tmux", "set-option", "-t", SessionName, "@"+key, value).Run()
+}
+
+// GetSessionOption reads a tmux session-level option.
+func GetSessionOption(key string) string {
+	out, err := exec.Command("tmux", "show-option", "-t", SessionName, "-v", "@"+key).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // SetWindowOption sets a tmux window option on a directory's window.

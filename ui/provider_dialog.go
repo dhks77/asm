@@ -1,50 +1,39 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ProviderDialogModel presents a list of AI providers for selection.
-type ProviderDialogModel struct {
+// ProviderSelectModel is a standalone tea.Model for the working panel.
+type ProviderSelectModel struct {
 	providers []string
 	cursor    int
-	visible   bool
+	Selected  string // set on selection, read after Run()
 	width     int
+	height    int
 }
 
-// ProviderSelectedMsg is sent when a provider is selected.
-type ProviderSelectedMsg struct {
+// providerSelectDoneMsg is the result of provider selection in the working panel.
+type providerSelectDoneMsg struct {
 	ProviderName string
 }
 
-// ProviderCancelledMsg is sent when the dialog is cancelled.
-type ProviderCancelledMsg struct{}
-
-func NewProviderDialogModel() ProviderDialogModel {
-	return ProviderDialogModel{}
+func NewProviderSelectModel(providerNames []string) ProviderSelectModel {
+	return ProviderSelectModel{providers: providerNames}
 }
 
-func (m *ProviderDialogModel) Show(providerNames []string) {
-	m.providers = providerNames
-	m.cursor = 0
-	m.visible = true
-}
+func (m ProviderSelectModel) Init() tea.Cmd { return nil }
 
-func (m *ProviderDialogModel) Hide() {
-	m.visible = false
-	m.providers = nil
-}
-
-func (m ProviderDialogModel) Update(msg tea.Msg) (ProviderDialogModel, tea.Cmd) {
-	if !m.visible {
-		return m, nil
-	}
-
+func (m ProviderSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
@@ -57,31 +46,21 @@ func (m ProviderDialogModel) Update(msg tea.Msg) (ProviderDialogModel, tea.Cmd) 
 			}
 		case "enter":
 			if len(m.providers) > 0 {
-				selected := m.providers[m.cursor]
-				m.Hide()
-				return m, func() tea.Msg {
-					return ProviderSelectedMsg{ProviderName: selected}
-				}
+				m.Selected = m.providers[m.cursor]
 			}
-		case "esc", "q":
-			m.Hide()
-			return m, func() tea.Msg {
-				return ProviderCancelledMsg{}
-			}
+			return m, tea.Quit
+		case "esc", "q", "ctrl+c":
+			return m, tea.Quit
 		}
 	}
-
 	return m, nil
 }
 
-func (m ProviderDialogModel) View() string {
-	if !m.visible || len(m.providers) == 0 {
-		return ""
-	}
-
+func (m ProviderSelectModel) View() string {
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(primaryColor).
+		Padding(1, 2).
 		Render("Select AI Provider")
 
 	var rows []string
@@ -92,25 +71,23 @@ func (m ProviderDialogModel) View() string {
 			cursor = lipgloss.NewStyle().Foreground(primaryColor).Render("▸ ")
 			style = selectedItemStyle
 		}
-		rows = append(rows, fmt.Sprintf("%s%s", cursor, style.Render(name)))
+		rows = append(rows, "  "+cursor+style.Render(name))
 	}
 
-	content := title + "\n\n" + strings.Join(rows, "\n") + "\n\n" +
-		statusBarStyle.Render("Enter: select  Esc: cancel")
+	content := title + "\n\n" + strings.Join(rows, "\n")
 
-	dialogStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(primaryColor).
-		Padding(1, 2).
-		Width(min(40, m.width-4))
+	lines := lipgloss.Height(content)
+	contentHeight := m.height - 3
+	for lines < contentHeight {
+		content += "\n"
+		lines++
+	}
 
-	return dialogStyle.Render(content)
-}
+	statusBar := statusBarStyle.
+		Width(m.width).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("252")).
+		Render(" ↑↓: navigate  Enter: select  Esc: cancel")
 
-func (m *ProviderDialogModel) SetSize(w int) {
-	m.width = w
-}
-
-func (m ProviderDialogModel) IsVisible() bool {
-	return m.visible
+	return content + "\n" + statusBar
 }

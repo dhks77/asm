@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"time"
 )
@@ -53,6 +54,11 @@ func LoadPlugin(path string) (*PluginProvider, error) {
 		return nil, err
 	}
 
+	// Verify the command binary exists on PATH
+	if _, err := exec.LookPath(info.Command); err != nil {
+		return nil, fmt.Errorf("%s: command %q not found", info.Name, info.Command)
+	}
+
 	return &PluginProvider{path: path, info: info}, nil
 }
 
@@ -60,6 +66,7 @@ func (p *PluginProvider) Name() string        { return p.info.Name }
 func (p *PluginProvider) DisplayName() string  { return p.info.DisplayName }
 func (p *PluginProvider) Command() string      { return p.info.Command }
 func (p *PluginProvider) Args() []string       { return p.info.Args }
+func (p *PluginProvider) PluginPath() string   { return p.path }
 func (p *PluginProvider) NeedsContent(title string) bool {
 	return p.info.NeedsContent
 }
