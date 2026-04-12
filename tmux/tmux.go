@@ -371,12 +371,12 @@ func HasUtilityWindow() bool {
 	return false
 }
 
-// CloseUtilityPanel sends Escape to the working panel to gracefully close any utility dialog.
+// CloseUtilityPanel sends Escape twice to the working panel to gracefully close any utility dialog.
+// First Escape clears any active filter/input, second Escape closes the dialog.
 func CloseUtilityPanel() {
-	exec.Command("tmux", "send-keys",
-		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-		"Escape",
-	).Run()
+	target := fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+	exec.Command("tmux", "send-keys", "-t", target, "Escape").Run()
+	exec.Command("tmux", "send-keys", "-t", target, "Escape").Run()
 }
 
 // KillSession kills the entire asm tmux session.
