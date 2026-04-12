@@ -8,10 +8,11 @@ import (
 )
 
 type Config struct {
-	DefaultPath        string   `toml:"default_path"`
-	GitRefreshInterval int      `toml:"git_refresh_interval"`
-	ClaudePath         string   `toml:"claude_path"`
-	ClaudeArgs         []string `toml:"claude_args"`
+	DefaultPath          string   `toml:"default_path"`
+	GitRefreshInterval   int      `toml:"git_refresh_interval"`
+	ClaudePath           string   `toml:"claude_path"`
+	ClaudeArgs           []string `toml:"claude_args"`
+	DesktopNotifications *bool    `toml:"desktop_notifications"`
 }
 
 func homeDir() string {
@@ -45,6 +46,13 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) IsDesktopNotificationsEnabled() bool {
+	if c.DesktopNotifications == nil {
+		return true // default: enabled
+	}
+	return *c.DesktopNotifications
 }
 
 func (c *Config) ResolveClaudePath() string {

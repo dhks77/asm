@@ -69,4 +69,10 @@ var (
 	ThinkingStateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	ToolUseStateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	RespondingStateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
+
+	// Elapsed time badge
+	ElapsedTimeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	// Completion flash (busy→idle transition)
+	CompletionFlashStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 )

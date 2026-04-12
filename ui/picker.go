@@ -13,6 +13,7 @@ import (
 	"github.com/nhn/csm/claude"
 	"github.com/nhn/csm/config"
 	"github.com/nhn/csm/integration"
+	"github.com/nhn/csm/notification"
 	csmtmux "github.com/nhn/csm/tmux"
 	"github.com/nhn/csm/worktree"
 )
@@ -48,6 +49,14 @@ type sessionExitedMsg struct {
 	DirName string
 }
 
+type flashExpiredMsg struct {
+	DirName   string
+	StartedAt time.Time
+}
+
+type batchKillCompletedMsg struct{ count int }
+type batchDeleteCompletedMsg struct{ count int }
+
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
@@ -56,8 +65,11 @@ type PickerModel struct {
 	directories    []worktree.Worktree
 	gitStatus      map[string]worktree.GitStatus
 	taskNames      map[string]string
-	claudeStates   map[string]claude.State
-	spinnerFrame   int
+	claudeStates      map[string]claude.State
+	prevClaudeStates  map[string]claude.State
+	sessionStartTimes map[string]time.Time
+	flashItems        map[string]time.Time
+	spinnerFrame      int
 	scrollTick     int
 	cursor         int
 	viewTop        int    // first visible item index for scrolling
@@ -70,6 +82,8 @@ type PickerModel struct {
 	ready          bool
 	err            string
 	searchQuery    string
+	selectedItems  map[string]bool
+	batchConfirm   BatchConfirmModel
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
@@ -83,8 +97,13 @@ func NewPickerModel(cfg *config.Config, rootPath string) PickerModel {
 		rootPath:       rootPath,
 		gitStatus:      make(map[string]worktree.GitStatus),
 		taskNames:      make(map[string]string),
-		claudeStates:   make(map[string]claude.State),
-		dooray:         dooray,
+		claudeStates:      make(map[string]claude.State),
+		prevClaudeStates:  make(map[string]claude.State),
+		sessionStartTimes: make(map[string]time.Time),
+		flashItems:        make(map[string]time.Time),
+		selectedItems:  make(map[string]bool),
+		batchConfirm:   NewBatchConfirmModel(),
+		dooray:            dooray,
 		focused:        true,
 	}
 }
@@ -127,10 +146,23 @@ func (m PickerModel) Init() tea.Cmd {
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Delegate to batch confirm dialog when visible
+	if m.batchConfirm.IsVisible() {
+		switch msg.(type) {
+		case tea.WindowSizeMsg:
+			// fall through to main handler
+		default:
+			var cmd tea.Cmd
+			m.batchConfirm, cmd = m.batchConfirm.Update(msg)
+			return m, cmd
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.batchConfirm.SetSize(msg.Width)
 		m.ready = true
 		return m, nil
 
@@ -159,6 +191,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		for _, wt := range m.directories {
 			if activeSet[wt.Name] {
+				if _, tracked := m.sessionStartTimes[wt.Name]; !tracked {
+					m.sessionStartTimes[wt.Name] = time.Now()
+				}
 				cmds = append(cmds, m.fetchClaudeState(wt.Name))
 			}
 		}
@@ -167,7 +202,28 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ClaudeStateUpdatedMsg:
 		if msg.State != claude.StateUnknown {
+			prevState := m.prevClaudeStates[msg.Name]
 			m.claudeStates[msg.Name] = msg.State
+			m.prevClaudeStates[msg.Name] = msg.State
+
+			if prevState.IsBusy() && msg.State == claude.StateIdle {
+				now := time.Now()
+				m.flashItems[msg.Name] = now
+				var cmds []tea.Cmd
+				cmds = append(cmds, flashExpireCmd(msg.Name, now, 3*time.Second))
+				if m.cfg.IsDesktopNotificationsEnabled() {
+					cmds = append(cmds, notifyCompletionCmd(msg.Name))
+				}
+				return m, tea.Batch(cmds...)
+			}
+		}
+		return m, nil
+
+	case flashExpiredMsg:
+		if startedAt, ok := m.flashItems[msg.DirName]; ok {
+			if startedAt.Equal(msg.StartedAt) {
+				delete(m.flashItems, msg.DirName)
+			}
 		}
 		return m, nil
 
@@ -181,6 +237,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionExitedMsg:
 		delete(m.claudeStates, msg.DirName)
+		delete(m.prevClaudeStates, msg.DirName)
+		delete(m.sessionStartTimes, msg.DirName)
+		delete(m.flashItems, msg.DirName)
 		isDisplayed := m.workingDir == msg.DirName
 		csmtmux.CleanupExitedWindow(msg.DirName, isDisplayed)
 		if isDisplayed {
@@ -224,6 +283,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		delete(m.claudeStates, wt.Name)
+		delete(m.sessionStartTimes, wt.Name)
 		winName := csmtmux.WindowName(wt.Name)
 		if csmtmux.WindowExists(winName) {
 			csmtmux.KillDirectoryWindow(wt.Name)
@@ -234,6 +294,25 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.removeDirectory(wt)
 
+	case BatchConfirmedMsg:
+		m.clearSelection()
+		switch msg.Action {
+		case BatchKillSessions:
+			return m, m.batchKillSessions(msg.Items)
+		case BatchDeleteWorktrees:
+			return m, m.batchDeleteWorktrees(msg.Items)
+		}
+		return m, nil
+
+	case BatchCancelledMsg:
+		return m, nil
+
+	case batchKillCompletedMsg:
+		return m, nil
+
+	case batchDeleteCompletedMsg:
+		return m, m.scanDirectories()
+
 	case tea.KeyMsg:
 		if m.err != "" {
 			m.err = ""
@@ -243,6 +322,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DirectoriesScannedMsg:
 		m.directories = msg.Directories
+		// Prune stale selections
+		validNames := make(map[string]bool)
+		for _, wt := range msg.Directories {
+			validNames[wt.Name] = true
+		}
+		for name := range m.selectedItems {
+			if !validNames[name] {
+				delete(m.selectedItems, name)
+			}
+		}
 		filtered := m.filteredDirectories()
 		if m.cursor >= len(filtered) {
 			m.cursor = max(0, len(filtered)-1)
@@ -366,6 +455,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		delete(m.claudeStates, wt.Name)
+		delete(m.sessionStartTimes, wt.Name)
 		winName := csmtmux.WindowName(wt.Name)
 		if csmtmux.WindowExists(winName) {
 			if m.workingDir == wt.Name {
@@ -397,6 +487,16 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.openDelete(wt)
 
+	case "f5": // Ctrl+x: toggle selection
+		wt := m.selectedDirectory()
+		if wt != nil {
+			if m.selectedItems[wt.Name] {
+				delete(m.selectedItems, wt.Name)
+			} else {
+				m.selectedItems[wt.Name] = true
+			}
+		}
+
 	case "backspace":
 		if len(m.searchQuery) > 0 {
 			runes := []rune(m.searchQuery)
@@ -406,13 +506,24 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "esc":
-		if m.searchQuery != "" {
+		if len(m.selectedItems) > 0 {
+			m.clearSelection()
+		} else if m.searchQuery != "" {
 			m.searchQuery = ""
 			m.cursor = 0
 			m.viewTop = 0
 		}
 
 	default:
+		// Batch action keys (only active when items are selected)
+		if len(m.selectedItems) > 0 && msg.Type == tea.KeyRunes {
+			switch string(msg.Runes) {
+			case "k":
+				return m, m.openBatchKill()
+			case "x":
+				return m, m.openBatchDelete()
+			}
+		}
 		if msg.Type == tea.KeyRunes {
 			m.searchQuery += string(msg.Runes)
 			m.cursor = 0
@@ -430,8 +541,116 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *PickerModel) startSession(wt *worktree.Worktree) tea.Cmd {
 	claudePath := m.cfg.ResolveClaudePath()
 	csmtmux.CreateDirectoryWindow(wt.Name, wt.Path, claudePath, m.cfg.ClaudeArgs)
+	m.sessionStartTimes[wt.Name] = time.Now()
 	m.showInWorkingPanel(wt)
 	return waitForExitCmd(wt.Name)
+}
+
+func (m *PickerModel) clearSelection() {
+	m.selectedItems = make(map[string]bool)
+}
+
+func (m *PickerModel) selectedItemNames() []string {
+	var names []string
+	for name := range m.selectedItems {
+		names = append(names, name)
+	}
+	return names
+}
+
+func (m *PickerModel) openBatchKill() tea.Cmd {
+	names := m.selectedItemNames()
+	m.batchConfirm.Show(BatchKillSessions, names, 0)
+	return nil
+}
+
+func (m *PickerModel) openBatchDelete() tea.Cmd {
+	names := m.selectedItemNames()
+	dirtyCount := 0
+	for _, name := range names {
+		for _, wt := range m.directories {
+			if wt.Name == name {
+				if worktree.HasChanges(wt.Path) {
+					dirtyCount++
+				}
+				break
+			}
+		}
+	}
+	m.batchConfirm.Show(BatchDeleteWorktrees, names, dirtyCount)
+	return nil
+}
+
+func (m *PickerModel) batchKillSessions(names []string) tea.Cmd {
+	return func() tea.Msg {
+		count := 0
+		for _, name := range names {
+			winName := csmtmux.WindowName(name)
+			if csmtmux.WindowExists(winName) {
+				csmtmux.KillDirectoryWindow(name)
+				count++
+			}
+		}
+		return batchKillCompletedMsg{count: count}
+	}
+}
+
+func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
+	// Kill active sessions and collect worktrees to remove
+	for _, name := range names {
+		delete(m.claudeStates, name)
+		delete(m.prevClaudeStates, name)
+		delete(m.sessionStartTimes, name)
+		delete(m.flashItems, name)
+
+		winName := csmtmux.WindowName(name)
+		if csmtmux.WindowExists(winName) {
+			if m.workingDir == name {
+				csmtmux.SwapBackFromWorkingPanel(name)
+				m.workingDir = ""
+			}
+			csmtmux.KillDirectoryWindow(name)
+		}
+
+		termWinName := csmtmux.TerminalWindowName(name)
+		if csmtmux.WindowExists(termWinName) {
+			if m.termDir == name {
+				csmtmux.SwapTermBackFromWorkingPanel(name)
+				m.termDir = ""
+			}
+			csmtmux.KillTerminalWindow(name)
+		}
+	}
+
+	var toRemove []worktree.Worktree
+	for _, name := range names {
+		for _, wt := range m.directories {
+			if wt.Name == name {
+				toRemove = append(toRemove, wt)
+				break
+			}
+		}
+	}
+
+	return func() tea.Msg {
+		count := 0
+		for _, wt := range toRemove {
+			if worktree.IsWorktree(wt.Path) {
+				mainRepo, err := worktree.FindMainRepo(wt.Path)
+				if err == nil {
+					if err := worktree.RemoveWorktree(mainRepo, wt.Path, false); err != nil {
+						worktree.RemoveWorktree(mainRepo, wt.Path, true)
+					}
+					count++
+					continue
+				}
+			}
+			if err := os.RemoveAll(wt.Path); err == nil {
+				count++
+			}
+		}
+		return batchDeleteCompletedMsg{count: count}
+	}
 }
 
 type DirectoryRemovedMsg struct{}
@@ -787,7 +1006,7 @@ func (m PickerModel) View() string {
 		viewLines = append(viewLines, strings.Split(row, "\n")...)
 	}
 	targetLines := m.height - 3
-	statusBar := RenderStatusBar(m.width, m.focused)
+	statusBar := RenderStatusBar(m.width, m.focused, len(m.selectedItems))
 	for len(viewLines) < targetLines {
 		viewLines = append(viewLines, "")
 	}
@@ -808,6 +1027,10 @@ func (m PickerModel) View() string {
 					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
 					statusBarStyle.Render("Press any key to dismiss"))
 		view = m.overlayCenter(view, errDialog)
+	}
+
+	if m.batchConfirm.IsVisible() {
+		view = m.overlayCenter(view, m.batchConfirm.View())
 	}
 
 	return view
@@ -852,8 +1075,22 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		primaryStyle = lipgloss.NewStyle().Foreground(dimColor)
 	}
 
+	// Selection checkbox (only shown when in selection mode)
+	var checkbox string
+	inSelectionMode := len(m.selectedItems) > 0
+	if inSelectionMode {
+		if m.selectedItems[wt.Name] {
+			checkbox = lipgloss.NewStyle().Foreground(primaryColor).Bold(true).Render("◆") + " "
+		} else {
+			checkbox = lipgloss.NewStyle().Foreground(dimColor).Render("◇") + " "
+		}
+	}
+
 	// Calculate available width for primary name
 	prefixWidth := 2 // indicator(1) + space(1)
+	if inSelectionMode {
+		prefixWidth += 2 // checkbox(1) + space(1)
+	}
 	maxNameWidth := m.width - prefixWidth
 
 	var rawName string
@@ -873,8 +1110,23 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	// State as sub-line (prepend to subLines)
 	var stateLine string
 	if hasSession {
-		if state, ok := m.claudeStates[wt.Name]; ok {
+		if _, flashing := m.flashItems[wt.Name]; flashing {
+			if m.spinnerFrame%4 < 2 {
+				stateLine = CompletionFlashStyle.Render("✓ done!")
+			} else {
+				stateLine = IdleStateStyle.Render("idle")
+			}
+		} else if state, ok := m.claudeStates[wt.Name]; ok {
 			stateLine = renderClaudeState(state, m.spinnerFrame)
+		}
+		if startTime, ok := m.sessionStartTimes[wt.Name]; ok {
+			elapsed := formatElapsed(time.Since(startTime))
+			badge := ElapsedTimeStyle.Render(elapsed)
+			if stateLine != "" {
+				stateLine = stateLine + " " + badge
+			} else {
+				stateLine = badge
+			}
 		}
 	} else {
 		stateLine = ClosedStateStyle.Render("closed")
@@ -886,16 +1138,20 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 	displayName := scrollText(rawName, maxNameWidth, m.scrollTick)
 	primaryName = primaryStyle.Render(displayName)
 
-	line1 := fmt.Sprintf("%s %s", indicator, primaryName)
+	line1 := fmt.Sprintf("%s%s %s", checkbox, indicator, primaryName)
 
-	bar := "  "
+	barPad := "  "
+	if inSelectionMode {
+		barPad = "    "
+	}
+	bar := barPad
 	if isSelected {
-		bar = lipgloss.NewStyle().Foreground(primaryColor).Render("▎") + " "
+		bar = barPad[:len(barPad)-2] + lipgloss.NewStyle().Foreground(primaryColor).Render("▎") + " "
 	}
 
 	result := line1
 	for _, sub := range subLines {
-		result += "\n" + fmt.Sprintf("  %s%s", bar, sub)
+		result += "\n" + fmt.Sprintf("%s%s", bar, sub)
 	}
 
 	return result
@@ -935,6 +1191,19 @@ func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
 	}
 }
 
+func flashExpireCmd(dirName string, startedAt time.Time, after time.Duration) tea.Cmd {
+	return tea.Tick(after, func(t time.Time) tea.Msg {
+		return flashExpiredMsg{DirName: dirName, StartedAt: startedAt}
+	})
+}
+
+func notifyCompletionCmd(dirName string) tea.Cmd {
+	return func() tea.Msg {
+		notification.Send("CSM", dirName+" session is idle")
+		return nil
+	}
+}
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -957,6 +1226,21 @@ func scrollTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return scrollTickMsg(t)
 	})
+}
+
+func formatElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h == 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
 }
 
 func scrollText(text string, maxWidth int, tick int) string {

@@ -1,11 +1,18 @@
 package ui
 
 import (
+	"fmt"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
-func RenderStatusBar(width int, focused bool) string {
-	keys := " ^g: focus  ^t: term  ^n: new  ^s: settings  ^w: worktree  ^d: remove  ^q: quit"
+func RenderStatusBar(width int, focused bool, selectedCount int) string {
+	var keys string
+	if selectedCount > 0 {
+		keys = fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
+	} else {
+		keys = " ^g: focus  ^t: term  ^n: new  ^s: settings  ^w: worktree  ^d: remove  ^q: quit"
+	}
 
 	bg := lipgloss.Color("236")
 	fg := lipgloss.Color("252")

@@ -93,6 +93,11 @@ func CreateSession(pickerCmd string) error {
 		"send-keys", "-t", target, "F6",
 	).Run()
 
+	// Ctrl+x: toggle batch selection (sends F5 to picker from either pane)
+	exec.Command("tmux", "bind-key", "-T", "root", "C-x",
+		"send-keys", "-t", target, "F5",
+	).Run()
+
 	// Enable focus events so Bubble Tea can detect pane focus/blur
 	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()
 
