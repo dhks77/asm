@@ -2,6 +2,39 @@
 
 tmux 기반 멀티 AI 세션 매니저. git worktree별로 AI CLI 세션을 관리하는 TUI 프로그램.
 
+## Screenshot
+
+```
+ my-project                      │  Claude Code
+                                 │
+ ⠹ thinking… 12m                 │  ● Changes not staged for commit:
+ ● Add user auth API endpoint    │    (use "git add <file>..." to update)
+   app-auth-4012                 │
+   feature/4012  ↑1              │    modified:   src/auth/handler.go
+                                 │    modified:   src/auth/middleware.go
+   idle 45m                      │    modified:   src/auth/token.go
+   Fix payment retry logic       │
+   app-payment-3891              │  Untracked files:
+   feature/3891  ✓+2~1           │    (use "git add <file>..." to include)
+                                 │
+ ✓ done! 8m                      │    src/auth/handler_test.go
+   Refactor DB connection pool   │    src/auth/middleware_test.go
+   app-refactor-3756             │
+   feature/3756  ↑2              │
+                                 │  ● staged: commit message for 2 files?
+   closed                        │    (Continue to edit)
+   Setup CI/CD pipeline          │
+   app-cicd-3680                 │
+   feature/3680                  │
+                                 │
+   closed                        │
+   Update API documentation      │
+   app-docs-3544                 │
+   feature/3544  ↑1              │
+                                 │
+ ^g: focus  ^t: term  ^n: new  ^k: task  ^p: AI  ^s: settings  ^w: worktree
+```
+
 ## Features
 
 - **멀티 AI 프로바이더** -- Claude, Codex 빌트인 + 플러그인으로 확장
