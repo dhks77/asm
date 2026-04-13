@@ -119,9 +119,14 @@ func CreateSession(pickerCmd string) error {
 		"send-keys", "-t", target, "F6",
 	).Run()
 
-	// Ctrl+x: toggle batch selection (sends F5 to picker from either pane)
+	// Ctrl+x: toggle batch selection (picker-only). Pane-aware — when
+	// the working pane is focused (settings dialog, worktree dialog,
+	// etc.) we pass the key through so those UIs can use Ctrl+X for
+	// their own actions (e.g. deleting an IDE entry in settings).
 	exec.Command("tmux", "bind-key", "-T", "root", "C-x",
-		"send-keys", "-t", target, "F5",
+		"if-shell", "-F", "#{==:#{pane_index},0}",
+		fmt.Sprintf("send-keys -t %s F5", target),
+		"send-keys C-x",
 	).Run()
 
 	// Ctrl+p: provider selection (sends F4 to picker from either pane)
