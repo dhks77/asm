@@ -57,6 +57,11 @@ type scrollTickMsg time.Time
 // Update goroutine. Dispatched on WindowSizeMsg.
 type terminalWidthResolvedMsg struct{ width int }
 
+// statusSummaryWrittenMsg is returned by writeStatusSummaryCmd once its
+// tmux set-option calls have finished. It clears the inflight flag so the
+// next scrollTick can issue another write.
+type statusSummaryWrittenMsg struct{}
+
 type sessionExitedMsg struct {
 	DirName string
 }
@@ -96,7 +101,12 @@ type PickerModel struct {
 	// computations don't call tmux synchronously from Update. Refreshed
 	// on WindowSizeMsg via an async tea.Cmd.
 	terminalWidth int
-	spinnerFrame  int
+	// statusSummaryWriting is true while a writeStatusSummaryCmd goroutine
+	// is still flushing set-option calls to tmux. scrollTick skips issuing
+	// a new write while this is set, so a slow tmux server can't snowball
+	// goroutines at the 200ms scroll cadence.
+	statusSummaryWriting bool
+	spinnerFrame         int
 	scrollTick     int
 	cursor         int
 	viewTop        int    // first visible item index for scrolling
@@ -230,6 +240,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.width > 0 {
 			m.terminalWidth = msg.width
 		}
+		return m, nil
+
+	case statusSummaryWrittenMsg:
+		m.statusSummaryWriting = false
 		return m, nil
 
 	case tea.FocusMsg:
@@ -1356,9 +1370,18 @@ const (
 // exec, which would block the Bubble Tea event loop.
 //
 // Reads come from cached state (m.activeKinds, m.terminalWidth) populated on
-// slower cadences. Writes are dispatched as a fire-and-forget tea.Cmd only
-// when the rendered output actually changed.
+// slower cadences. Writes are dispatched as a tea.Cmd only when the rendered
+// output actually changed AND no previous write is still in flight — the
+// inflight gate keeps a slow tmux server from snowballing goroutines at the
+// 5Hz scroll cadence.
 func (m *PickerModel) refreshStatusSummary() tea.Cmd {
+	if m.statusSummaryWriting {
+		// A previous write hasn't returned yet — skip this cycle. The next
+		// scrollTick (200ms later) will rebuild against the latest state;
+		// the dropped frame is invisible at this cadence.
+		return nil
+	}
+
 	line1, line1Target := m.buildLine1(m.activeKinds)
 	line2 := m.buildLine2(m.activeKinds, line1Target)
 	shortcuts := renderShortcutsPlain(len(m.selectedItems))
@@ -1376,11 +1399,14 @@ func (m *PickerModel) refreshStatusSummary() tea.Cmd {
 	if !enable && !changed {
 		return nil
 	}
+	m.statusSummaryWriting = true
 	return writeStatusSummaryCmd(enable, changed, line1, line2, shortcuts)
 }
 
 // writeStatusSummaryCmd pushes the three status-bar lines to tmux in a
-// goroutine so Update never blocks on the set-option execs.
+// goroutine and signals completion so the next scrollTick can run. All
+// underlying tmux calls have context timeouts (3s) so this goroutine is
+// bounded even if tmux is unresponsive.
 func writeStatusSummaryCmd(enable, changed bool, line1, line2, shortcuts string) tea.Cmd {
 	return func() tea.Msg {
 		if enable {
@@ -1390,7 +1416,7 @@ func writeStatusSummaryCmd(enable, changed bool, line1, line2, shortcuts string)
 			asmtmux.SetStatusLines(line1, line2)
 			asmtmux.SetShortcutsLine(shortcuts)
 		}
-		return nil
+		return statusSummaryWrittenMsg{}
 	}
 }
 
