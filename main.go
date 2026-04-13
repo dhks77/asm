@@ -75,7 +75,7 @@ func main() {
 
 	registry := buildRegistry(cfg)
 	t := buildTracker(cfg, rootPath)
-	taskCache := tracker.NewPathCache(rootPath, time.Hour)
+	taskCache := tracker.NewPathCache(rootPath, 7*24*time.Hour)
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
@@ -148,7 +148,7 @@ func buildTracker(cfg *config.Config, rootPath string) tracker.Tracker {
 			return saveDoorayConfig(dc, config.ScopeUser, rootPath)
 		}
 		dt := tracker.NewDoorayTracker(dc, saveFn)
-		return tracker.NewCachedTrackerWithStore(dt, time.Hour, rootPath)
+		return tracker.NewCachedTrackerWithStore(dt, 7*24*time.Hour, rootPath)
 	}
 
 	// Fall back to any available plugin
