@@ -327,6 +327,14 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case worktreeExitedMsg:
 		if msg.created {
+			// Surface any template-copy warnings posted by the worktree
+			// runner via tmux session options. Success counts are not
+			// shown — the copied files speak for themselves.
+			if w := asmtmux.GetSessionOption("asm-worktree-warnings"); w != "" {
+				m.err = "Template copy issues:\n" + w
+			}
+			_ = asmtmux.SetSessionOption("asm-worktree-warnings", "")
+			_ = asmtmux.SetSessionOption("asm-worktree-copied", "")
 			return m, m.scanDirectories()
 		}
 		return m, nil

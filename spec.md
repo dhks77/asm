@@ -83,6 +83,13 @@ AI 세션이 busy(thinking/tool-use/responding) → idle로 전환되면:
 - 데스크톱 알림 (macOS: osascript, Linux: notify-send, Windows: PowerShell toast)
 - `desktop_notifications = false`로 비활성화 가능
 
+### Worktree 템플릿 자동 복사
+새 worktree를 만들면 `{projectRoot}/.asm/templates/{repo}/` 하위의 파일이 동일 상대 경로로 자동 복사됨.
+- git에 올리지 않는 `.env`, `.vscode/settings.json`, `CLAUDE.md.local` 등 로컬 전용 파일용
+- repo 식별자는 `worktree.RepoName` (origin URL > main repo 폴더명) 기준
+- 충돌 정책 `on_conflict`: `skip`(기본) / `overwrite` — 설정 다이얼로그에서 토글 가능
+- 상세 스펙: `docs/worktree-template-copy.md`
+
 ### 파일 구조
 ```
 csm/
@@ -130,6 +137,11 @@ args = []
 [providers.codex]
 command = "codex"
 args = []
+
+# 새 worktree 생성 직후 {projectRoot}/.asm/templates/{repo}/ 하위 파일을 자동 복사
+# (상세: docs/worktree-template-copy.md)
+[worktree_template]
+on_conflict = "skip"                  # "skip" (default) | "overwrite"
 ```
 
 ### 플러그인 시스템
