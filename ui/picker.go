@@ -530,21 +530,24 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.switchToTerminal(wt)
 
-	case "f11": // Ctrl+g: focus working panel or start AI session
+	case "f11": // Ctrl+g: act on cursor dir — swap/focus existing session, or start new
 		// Close any open utility dialogs (settings, worktree, delete, provider-select)
 		if asmtmux.HasUtilityWindow() {
 			asmtmux.CloseUtilityPanel()
 			return m, nil
 		}
 
-		if m.workingDir != "" || m.termDir != "" {
-			asmtmux.FocusWorkingPanel()
-			m.applyAutoZoom()
+		wt := m.selectedDirectory()
+		if wt == nil {
+			return m, nil
+		}
+		winName := asmtmux.WindowName(wt.Name)
+		if asmtmux.WindowExists(winName) {
+			// Session exists: showInWorkingPanel handles both cases —
+			// if already fronted, it just focuses + zooms; otherwise it
+			// swaps the cursor's session into the working pane.
+			m.showInWorkingPanel(wt)
 		} else {
-			wt := m.selectedDirectory()
-			if wt == nil {
-				return m, nil
-			}
 			return m, m.startSession(wt, m.registry.Default().Name())
 		}
 
@@ -1148,6 +1151,17 @@ const (
 	statusLine1TaskMinWidth = 60
 	// Fixed chrome cost on line 1 (icon, separators, state, elapsed, badge, padding).
 	statusLine1ChromeWidth = 58
+
+	// Display-column cost of one line2 item: icon(1) + space + name(20) +
+	// space + badge(5) + space + state(10) = 39.
+	statusLine2ItemWidth = 39
+	// Display-column cost of the " │ " separator between items.
+	statusLine2SepWidth = 3
+	// Reserved room for page indicator "(p/N) " plus the leading/trailing
+	// single-space margins on the line.
+	statusLine2ChromeWidth = 12
+	// How many 200ms scroll ticks each page stays visible (5s).
+	statusLine2TicksPerPage = 25
 )
 
 // refreshStatusSummary rebuilds the three-line bottom-bar (summary + shortcuts)
@@ -1293,6 +1307,11 @@ func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (st
 // shown on line 1 to avoid duplication) with fixed-width items. One row per
 // worktree: a worktree with both AI and terminal collapses into a single
 // "[a+t]" item.
+//
+// When the set of items doesn't fit on one row, items are paginated and the
+// visible page rotates every statusLine2TicksPerPage scroll ticks (e.g. 9
+// sessions on a 3-per-page terminal becomes 1-3 → 4-6 → 7-9 → 1-3 …). A
+// "(p/N)" indicator is prepended so the user can see rotation is happening.
 func (m *PickerModel) buildLine2(activeKinds map[string]asmtmux.SessionKind, line1Target string) string {
 	var items []string
 	for _, wt := range m.directories {
@@ -1309,7 +1328,30 @@ func (m *PickerModel) buildLine2(activeKinds map[string]asmtmux.SessionKind, lin
 		return ""
 	}
 	sep := "#[fg=colour240] │ #[default]"
-	return " " + strings.Join(items, sep) + " "
+
+	// How many items fit on a single row of the current terminal.
+	// Solve: itemWidth*p + sepWidth*(p-1) + chrome <= termWidth
+	//     => p <= (termWidth - chrome + sepWidth) / (itemWidth + sepWidth)
+	termWidth := asmtmux.TerminalWidth()
+	perPage := (termWidth - statusLine2ChromeWidth + statusLine2SepWidth) /
+		(statusLine2ItemWidth + statusLine2SepWidth)
+	if perPage < 1 {
+		perPage = 1
+	}
+
+	if len(items) <= perPage {
+		return " " + strings.Join(items, sep) + " "
+	}
+
+	numPages := (len(items) + perPage - 1) / perPage
+	page := (m.scrollTick / statusLine2TicksPerPage) % numPages
+	start := page * perPage
+	end := start + perPage
+	if end > len(items) {
+		end = len(items)
+	}
+	indicator := fmt.Sprintf("#[fg=colour240](%d/%d)#[default] ", page+1, numPages)
+	return " " + indicator + strings.Join(items[start:end], sep) + " "
 }
 
 // renderStatusItem renders one active session as a fixed-width tmux format string.
