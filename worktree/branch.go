@@ -122,12 +122,6 @@ func RemoveWorktree(repoDir, targetPath string, force bool) error {
 	return err
 }
 
-// HasChanges returns true if the worktree has modified or untracked files.
-func HasChanges(dir string) bool {
-	gs := GetGitStatus(dir)
-	return gs.Staged+gs.Unstaged+gs.Untracked > 0
-}
-
 // BranchToFolderName converts a branch name to a suitable folder name.
 func BranchToFolderName(branch string) string {
 	name := strings.TrimPrefix(branch, "origin/")

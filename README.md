@@ -210,7 +210,6 @@ runtime에서 project가 user를 override (map 필드는 per-key merge). Setting
 
 ```toml
 default_path = ""
-git_refresh_interval = 5
 desktop_notifications = true
 default_provider = "claude"
 default_tracker = "dooray"
