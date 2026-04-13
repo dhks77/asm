@@ -48,12 +48,16 @@ func IsInsideTmux() bool {
 }
 
 func SessionExists() bool {
-	err := exec.Command("tmux", "has-session", "-t", SessionName).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", SessionName).Run()
 	return err == nil
 }
 
 func WindowExists(windowName string) bool {
-	out, err := exec.Command("tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
 	if err != nil {
 		return false
 	}
@@ -240,7 +244,9 @@ func FocusPickingPanel() error {
 // ActivePaneIndex returns the index of the currently active pane in the main
 // window (0 = picker, 1 = working). Returns -1 on error.
 func ActivePaneIndex() int {
-	out, err := exec.Command("tmux", "display-message",
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message",
 		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
 		"-p", "#{pane_index}",
 	).Output()
@@ -259,7 +265,9 @@ func ActivePaneIndex() int {
 
 // IsWorkingPanelZoomed reports whether the main window is currently zoomed.
 func IsWorkingPanelZoomed() bool {
-	out, err := exec.Command("tmux", "display-message",
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message",
 		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
 		"-p", "#{window_zoomed_flag}",
 	).Output()
@@ -423,10 +431,40 @@ func ExitSignalName(dirName string) string {
 	return "asm-exit-" + dirName
 }
 
+// waitForExitPollInterval bounds each `tmux wait-for` blocking call so a
+// lost/racy signal can't park the caller goroutine forever. On timeout the
+// wrapper re-checks whether the window still exists; if it's gone we treat
+// the session as exited. If it's still alive we loop and wait again.
+const waitForExitPollInterval = 30 * time.Second
+
 // WaitForExit blocks until the AI process exits in the given directory window.
-// Returns the directory name when the signal fires.
+// Uses a bounded `tmux wait-for` + window-existence probe so a missed signal
+// or a tmux server restart can't leak the caller goroutine indefinitely.
 func WaitForExit(dirName string) error {
-	return exec.Command("tmux", "wait-for", ExitSignalName(dirName)).Run()
+	return waitForSignalOrWindowGone(ExitSignalName(dirName), WindowName(dirName))
+}
+
+// waitForSignalOrWindowGone is the shared logic behind WaitForExit and the
+// terminal-exit waiter. Returns nil once either the tmux signal fires or the
+// window has disappeared. Propagates only non-deadline exec errors.
+func waitForSignalOrWindowGone(signal, windowName string) error {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), waitForExitPollInterval)
+		err := exec.CommandContext(ctx, "tmux", "wait-for", signal).Run()
+		cancel()
+		if err == nil {
+			return nil
+		}
+		// Deadline hit — the signal may have been missed. If the window
+		// is gone, treat the session as exited; otherwise re-arm the
+		// wait. Any non-deadline error propagates.
+		if ctx.Err() != context.DeadlineExceeded {
+			return err
+		}
+		if !WindowExists(windowName) {
+			return nil
+		}
+	}
 }
 
 // CleanupExitedWindow handles cleanup when the AI process exits in a directory.
@@ -621,6 +659,13 @@ func TerminalWindowName(dirName string) string {
 // TermExitSignalName returns the tmux wait-for signal name for a terminal.
 func TermExitSignalName(dirName string) string {
 	return "asm-term-exit-" + dirName
+}
+
+// WaitForTermExit is the terminal-window counterpart of WaitForExit — it uses
+// the same bounded wait + window-existence probe so a missed signal can't
+// park the caller goroutine forever.
+func WaitForTermExit(dirName string) error {
+	return waitForSignalOrWindowGone(TermExitSignalName(dirName), TerminalWindowName(dirName))
 }
 
 // CreateTerminalWindow creates a hidden tmux window with a shell at the directory path.
