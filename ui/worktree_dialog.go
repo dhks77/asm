@@ -296,8 +296,9 @@ func (m WorktreeDialogModel) handleSelectBranchKey(msg tea.KeyMsg) (WorktreeDial
 		m.applyFilter()
 
 	case "backspace":
-		if len(m.filter) > 0 {
-			m.filter = m.filter[:len(m.filter)-1]
+		if m.filter != "" {
+			runes := []rune(m.filter)
+			m.filter = string(runes[:len(runes)-1])
 			m.applyFilter()
 		}
 
@@ -306,8 +307,13 @@ func (m WorktreeDialogModel) handleSelectBranchKey(msg tea.KeyMsg) (WorktreeDial
 		m.applyFilter()
 
 	default:
-		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
-			m.filter += key
+		// Accept typed runes including non-ASCII (e.g. Korean 가, Japanese あ).
+		// Named keys like "up"/"enter" don't reach here — they're matched above.
+		if msg.Type == tea.KeyRunes {
+			m.filter += string(msg.Runes)
+			m.applyFilter()
+		} else if msg.Type == tea.KeySpace {
+			m.filter += " "
 			m.applyFilter()
 		}
 	}
@@ -347,8 +353,9 @@ func (m WorktreeDialogModel) handleSelectBaseKey(msg tea.KeyMsg) (WorktreeDialog
 		m.mode = wtModeNewBranch
 
 	case "backspace":
-		if len(m.filter) > 0 {
-			m.filter = m.filter[:len(m.filter)-1]
+		if m.filter != "" {
+			runes := []rune(m.filter)
+			m.filter = string(runes[:len(runes)-1])
 			m.applyFilter()
 		}
 
@@ -357,8 +364,11 @@ func (m WorktreeDialogModel) handleSelectBaseKey(msg tea.KeyMsg) (WorktreeDialog
 		m.applyFilter()
 
 	default:
-		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
-			m.filter += key
+		if msg.Type == tea.KeyRunes {
+			m.filter += string(msg.Runes)
+			m.applyFilter()
+		} else if msg.Type == tea.KeySpace {
+			m.filter += " "
 			m.applyFilter()
 		}
 	}
@@ -386,16 +396,19 @@ func (m WorktreeDialogModel) handleNewBranchKey(msg tea.KeyMsg) (WorktreeDialogM
 		return m, createWorktreeNewBranchCmd(repoDir, rootPath, name, baseBranch)
 
 	case "backspace":
-		if len(m.newBranchName) > 0 {
-			m.newBranchName = m.newBranchName[:len(m.newBranchName)-1]
+		if m.newBranchName != "" {
+			runes := []rune(m.newBranchName)
+			m.newBranchName = string(runes[:len(runes)-1])
 		}
 
 	case "ctrl+u":
 		m.newBranchName = ""
 
 	default:
-		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
-			m.newBranchName += key
+		if msg.Type == tea.KeyRunes {
+			m.newBranchName += string(msg.Runes)
+		} else if msg.Type == tea.KeySpace {
+			m.newBranchName += " "
 		}
 	}
 
