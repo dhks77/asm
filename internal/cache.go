@@ -24,15 +24,7 @@ func NewCache(name string) *Cache {
 	if err != nil {
 		home = os.TempDir()
 	}
-	// Try asm config dir first, fall back to csm for backward compat
-	asmPath := filepath.Join(home, ".config", "asm", "cache", name+".json")
-	csmPath := filepath.Join(home, ".config", "csm", "cache", name+".json")
-	path := asmPath
-	if _, err := os.Stat(csmPath); err == nil {
-		if _, err := os.Stat(asmPath); os.IsNotExist(err) {
-			path = csmPath
-		}
-	}
+	path := filepath.Join(home, ".asm", "cache", name+".json")
 
 	c := &Cache{
 		entries: make(map[string]CacheEntry),

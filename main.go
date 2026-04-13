@@ -99,7 +99,7 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 		reg.Register(p)
 	}
 
-	// Load plugins from ~/.config/asm/plugins/
+	// Load plugins from ~/.asm/plugins/
 	pluginDir := config.PluginDir()
 	if entries, err := os.ReadDir(pluginDir); err == nil {
 		for _, entry := range entries {

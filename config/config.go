@@ -51,23 +51,8 @@ func UserConfigDir() string {
 }
 
 // UserConfigPath returns the user-level config path.
-// Checks for existing config in this order: ~/.asm/, ~/.config/asm/, ~/.config/csm/.
-// If none exist, returns the primary ~/.asm/ path.
 func UserConfigPath() string {
-	primary := filepath.Join(UserConfigDir(), "config.toml")
-	if _, err := os.Stat(primary); err == nil {
-		return primary
-	}
-	// Fallback to legacy locations
-	for _, legacy := range []string{
-		filepath.Join(homeDir(), ".config", "asm", "config.toml"),
-		filepath.Join(homeDir(), ".config", "csm", "config.toml"),
-	} {
-		if _, err := os.Stat(legacy); err == nil {
-			return legacy
-		}
-	}
-	return primary
+	return filepath.Join(UserConfigDir(), "config.toml")
 }
 
 // ProjectConfigPath returns the project-level config path.
@@ -175,28 +160,12 @@ func merge(base, overlay *Config) {
 
 // PluginDir returns the directory for provider plugins.
 func PluginDir() string {
-	primary := filepath.Join(UserConfigDir(), "plugins")
-	if _, err := os.Stat(primary); err == nil {
-		return primary
-	}
-	legacy := filepath.Join(homeDir(), ".config", "asm", "plugins")
-	if _, err := os.Stat(legacy); err == nil {
-		return legacy
-	}
-	return primary
+	return filepath.Join(UserConfigDir(), "plugins")
 }
 
 // TrackerDir returns the directory for tracker plugins.
 func TrackerDir() string {
-	primary := filepath.Join(UserConfigDir(), "trackers")
-	if _, err := os.Stat(primary); err == nil {
-		return primary
-	}
-	legacy := filepath.Join(homeDir(), ".config", "asm", "trackers")
-	if _, err := os.Stat(legacy); err == nil {
-		return legacy
-	}
-	return primary
+	return filepath.Join(UserConfigDir(), "trackers")
 }
 
 // Save writes the config to the user config path (backward compat).
