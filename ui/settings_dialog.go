@@ -106,13 +106,10 @@ func (m SettingsModel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	for i, e := range m.entries {
 		idx := i
-		path := e.entry.PluginPath
+		entry := e.entry
 		cmds = append(cmds, func() tea.Msg {
-			fields, _ := plugincfg.GetFields(path)
-			values, _ := plugincfg.GetValues(path)
-			if values == nil {
-				values = make(map[string]string)
-			}
+			fields := entry.GetFields()
+			values := entry.GetValues()
 			return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values}
 		})
 	}
@@ -255,20 +252,20 @@ func (m SettingsModel) save() tea.Cmd {
 	cfgCopy := *m.cfg
 
 	type saveItem struct {
-		path   string
+		entry  plugincfg.Entry
 		values map[string]string
 	}
 	var items []saveItem
 	for _, e := range m.entries {
 		if len(e.fields) > 0 {
-			items = append(items, saveItem{path: e.entry.PluginPath, values: e.values})
+			items = append(items, saveItem{entry: e.entry, values: e.values})
 		}
 	}
 
 	return func() tea.Msg {
 		config.Save(&cfgCopy)
 		for _, item := range items {
-			plugincfg.SetValues(item.path, item.values)
+			item.entry.SetValues(item.values)
 		}
 		return SettingsSavedMsg{}
 	}

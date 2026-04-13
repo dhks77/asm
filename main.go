@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nhn/asm/config"
@@ -62,7 +63,7 @@ func main() {
 	}
 
 	registry := buildRegistry(cfg)
-	t := tracker.LoadFromDir(config.TrackerDir(), cfg.DefaultTracker)
+	t := buildTracker(cfg)
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
@@ -115,6 +116,58 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 	reg.SetDefault(defaultName)
 
 	return reg
+}
+
+// buildTracker constructs the active tracker (built-in or plugin).
+func buildTracker(cfg *config.Config) tracker.Tracker {
+	name := cfg.DefaultTracker
+
+	// Try plugin first if name is not a built-in
+	if name != "" && !tracker.IsBuiltin(name) {
+		if t := tracker.LoadFromDir(config.TrackerDir(), name); t != nil {
+			return t
+		}
+	}
+
+	// Built-in Dooray
+	if name == "dooray" || name == "" {
+		cfg := loadDoorayConfig(cfg)
+		dt := tracker.NewDoorayTracker(cfg, saveDoorayConfig)
+		return tracker.NewCachedTracker(dt, time.Hour)
+	}
+
+	// Fall back to any available plugin
+	return tracker.LoadFromDir(config.TrackerDir(), "")
+}
+
+func loadDoorayConfig(cfg *config.Config) *tracker.DoorayConfig {
+	dc := &tracker.DoorayConfig{}
+	if m, ok := cfg.Trackers["dooray"]; ok {
+		dc.Token = m["token"]
+		dc.ProjectID = m["project_id"]
+		dc.APIBaseURL = m["api_base_url"]
+		dc.WebURL = m["web_url"]
+		dc.TaskPattern = m["task_pattern"]
+	}
+	return dc
+}
+
+func saveDoorayConfig(dc *tracker.DoorayConfig) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.Trackers == nil {
+		cfg.Trackers = make(map[string]map[string]string)
+	}
+	cfg.Trackers["dooray"] = map[string]string{
+		"token":        dc.Token,
+		"project_id":   dc.ProjectID,
+		"api_base_url": dc.APIBaseURL,
+		"web_url":      dc.WebURL,
+		"task_pattern": dc.TaskPattern,
+	}
+	return config.Save(cfg)
 }
 
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
@@ -221,7 +274,7 @@ func runProviderSelect(registry *provider.Registry) {
 
 func runSettings(cfg *config.Config, registry *provider.Registry, t tracker.Tracker) {
 	plugins := collectConfigurablePlugins(registry, t)
-	trackerNames := tracker.ListNames(config.TrackerDir())
+	trackerNames := append(tracker.BuiltinNames(), tracker.ListNames(config.TrackerDir())...)
 	model := ui.NewSettingsModel(cfg, registry.Names(), trackerNames, plugins)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
@@ -239,23 +292,32 @@ func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) 
 		p := registry.Get(name)
 		if pp, ok := p.(*provider.PluginProvider); ok {
 			entries = append(entries, plugincfg.Entry{
-				Name:       pp.DisplayName(),
-				Category:   "provider",
-				PluginPath: pp.PluginPath(),
+				Name:     pp.DisplayName(),
+				Category: "provider",
+				Path:     pp.PluginPath(),
 			})
 		}
 	}
 
-	// Tracker plugin
+	// Tracker (built-in or plugin)
 	if t != nil {
+		inner := t
 		if ct, ok := t.(*tracker.CachedTracker); ok {
-			if pt, ok := ct.Inner().(*tracker.PluginTracker); ok {
-				entries = append(entries, plugincfg.Entry{
-					Name:       pt.Name(),
-					Category:   "tracker",
-					PluginPath: pt.PluginPath(),
-				})
-			}
+			inner = ct.Inner()
+		}
+		switch tr := inner.(type) {
+		case *tracker.PluginTracker:
+			entries = append(entries, plugincfg.Entry{
+				Name:     tr.Name(),
+				Category: "tracker",
+				Path:     tr.PluginPath(),
+			})
+		case plugincfg.Configurable:
+			entries = append(entries, plugincfg.Entry{
+				Name:     inner.(tracker.Tracker).Name(),
+				Category: "tracker",
+				Source:   tr,
+			})
 		}
 	}
 

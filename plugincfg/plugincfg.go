@@ -16,23 +16,57 @@ type Field struct {
 	Placeholder string `json:"placeholder,omitempty"`
 }
 
-// Entry represents a configurable plugin (provider or tracker).
-type Entry struct {
-	Name        string // display name
-	Category    string // "provider" or "tracker"
-	PluginPath  string // path to executable
+// Configurable represents anything that exposes configurable fields.
+type Configurable interface {
+	ConfigFields() []Field
+	ConfigGet() map[string]string
+	ConfigSet(values map[string]string) error
 }
 
-// GetFields calls `<plugin> config-fields` and returns field definitions.
-func GetFields(pluginPath string) ([]Field, error) {
+// Entry represents a configurable plugin (provider or tracker).
+type Entry struct {
+	Name     string       // display name
+	Category string       // "provider" or "tracker"
+	Source   Configurable // in-process configurable (for built-ins)
+	Path     string       // path to plugin executable (for plugins)
+}
+
+// GetFields returns the field definitions for the entry.
+func (e Entry) GetFields() []Field {
+	if e.Source != nil {
+		return e.Source.ConfigFields()
+	}
+	fields, _ := getPluginFields(e.Path)
+	return fields
+}
+
+// GetValues returns the current values for the entry.
+func (e Entry) GetValues() map[string]string {
+	if e.Source != nil {
+		return e.Source.ConfigGet()
+	}
+	values, _ := getPluginValues(e.Path)
+	if values == nil {
+		values = make(map[string]string)
+	}
+	return values
+}
+
+// SetValues saves the values for the entry.
+func (e Entry) SetValues(values map[string]string) error {
+	if e.Source != nil {
+		return e.Source.ConfigSet(values)
+	}
+	return setPluginValues(e.Path, values)
+}
+
+func getPluginFields(pluginPath string) ([]Field, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
 	out, err := exec.CommandContext(ctx, pluginPath, "config-fields").Output()
 	if err != nil {
 		return nil, err
 	}
-
 	var fields []Field
 	if err := json.Unmarshal(out, &fields); err != nil {
 		return nil, err
@@ -40,16 +74,13 @@ func GetFields(pluginPath string) ([]Field, error) {
 	return fields, nil
 }
 
-// GetValues calls `<plugin> config-get` and returns current values.
-func GetValues(pluginPath string) (map[string]string, error) {
+func getPluginValues(pluginPath string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
 	out, err := exec.CommandContext(ctx, pluginPath, "config-get").Output()
 	if err != nil {
 		return nil, err
 	}
-
 	var values map[string]string
 	if err := json.Unmarshal(out, &values); err != nil {
 		return nil, err
@@ -57,11 +88,9 @@ func GetValues(pluginPath string) (map[string]string, error) {
 	return values, nil
 }
 
-// SetValues calls `echo JSON | <plugin> config-set` to save values.
-func SetValues(pluginPath string, values map[string]string) error {
+func setPluginValues(pluginPath string, values map[string]string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-
 	data, _ := json.Marshal(values)
 	cmd := exec.CommandContext(ctx, pluginPath, "config-set")
 	cmd.Stdin = bytes.NewReader(data)

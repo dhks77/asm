@@ -14,12 +14,13 @@ type ProviderConfig struct {
 }
 
 type Config struct {
-	DefaultPath          string                    `toml:"default_path"`
-	GitRefreshInterval   int                       `toml:"git_refresh_interval"`
-	DesktopNotifications *bool                     `toml:"desktop_notifications"`
-	DefaultProvider      string                    `toml:"default_provider"`
-	DefaultTracker       string                    `toml:"default_tracker"`
-	Providers            map[string]ProviderConfig `toml:"providers"`
+	DefaultPath          string                       `toml:"default_path"`
+	GitRefreshInterval   int                          `toml:"git_refresh_interval"`
+	DesktopNotifications *bool                        `toml:"desktop_notifications"`
+	DefaultProvider      string                       `toml:"default_provider"`
+	DefaultTracker       string                       `toml:"default_tracker"`
+	Providers            map[string]ProviderConfig    `toml:"providers"`
+	Trackers             map[string]map[string]string `toml:"trackers"`
 }
 
 func homeDir() string {
