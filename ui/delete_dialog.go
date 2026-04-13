@@ -69,11 +69,7 @@ func (m DeleteModel) View() string {
 	dangerColor := lipgloss.Color("196")
 	warnColor := lipgloss.Color("220")
 
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(dangerColor).
-		Padding(1, 2).
-		Render("Remove Directory")
+	title := renderDialogTitle("Remove Directory", dangerColor)
 
 	var info string
 	if m.taskName != "" {
@@ -122,22 +118,10 @@ func (m DeleteModel) View() string {
 		lipgloss.JoinHorizontal(lipgloss.Center, buttons...),
 	)
 
-	content := title + "\n" + info + warning + "\n" + question + "\n\n" + buttonRow
-
-	// Fill remaining height
-	lines := lipgloss.Height(content)
-	contentHeight := m.height - 3
-	for lines < contentHeight {
-		content += "\n"
-		lines++
-	}
-
-	hint := " ←→: select  Enter: confirm  y/n  Esc: cancel"
-	statusBar := statusBarStyle.
-		Width(m.width).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
-		Render(hint)
-
-	return content + "\n" + statusBar
+	content := padToHeight(
+		title+"\n"+info+warning+"\n"+question+"\n\n"+buttonRow,
+		m.height-3,
+	)
+	hint := renderDialogHintBar(m.width, " ←→: select  Enter: confirm  y/n  Esc: cancel")
+	return content + "\n" + hint
 }

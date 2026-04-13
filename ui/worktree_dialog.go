@@ -489,32 +489,16 @@ func (m WorktreeRunnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m WorktreeRunnerModel) View() string {
 	if m.err != "" {
-		title := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("196")).
-			Padding(1, 2).
-			Render("Error")
+		title := renderDialogTitle("Error", lipgloss.Color("196"))
 
 		body := lipgloss.NewStyle().
 			Padding(0, 2).
 			Foreground(lipgloss.Color("255")).
 			Render(m.err)
 
-		hint := statusBarStyle.Render("Press any key to dismiss")
-
-		content := title + "\n\n" + body + "\n\n" + hint
-		lines := lipgloss.Height(content)
-		for lines < m.height-3 {
-			content += "\n"
-			lines++
-		}
-
-		statusBar := statusBarStyle.
-			Width(m.width).
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252")).
-			Render(" Press any key to close")
-
+		inlineHint := statusBarStyle.Render("Press any key to dismiss")
+		content := padToHeight(title+"\n\n"+body+"\n\n"+inlineHint, m.height-3)
+		statusBar := renderDialogHintBar(m.width, " Press any key to close")
 		return content + "\n" + statusBar
 	}
 	return m.dialog.View()
@@ -545,11 +529,7 @@ func (m WorktreeDialogModel) repoLine() string {
 }
 
 func (m WorktreeDialogModel) renderFullScreen(title, subtitle, filterLine string, rows []string, hint string) string {
-	titleStr := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		Padding(1, 2).
-		Render(title)
+	titleStr := renderDialogTitle(title, primaryColor)
 
 	repo := m.repoLine()
 
@@ -568,19 +548,8 @@ func (m WorktreeDialogModel) renderFullScreen(title, subtitle, filterLine string
 		content += "  " + row + "\n"
 	}
 
-	lines := lipgloss.Height(content)
-	contentHeight := m.height - 3
-	for lines < contentHeight {
-		content += "\n"
-		lines++
-	}
-
-	statusBar := statusBarStyle.
-		Width(m.width).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
-		Render(" " + hint)
-
+	content = padToHeight(content, m.height-3)
+	statusBar := renderDialogHintBar(m.width, " "+hint)
 	return content + "\n" + statusBar
 }
 
@@ -696,11 +665,7 @@ func (m WorktreeDialogModel) viewSelectBase() string {
 }
 
 func (m WorktreeDialogModel) viewNewBranch() string {
-	titleStr := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		Padding(1, 2).
-		Render("New Branch")
+	titleStr := renderDialogTitle("New Branch", primaryColor)
 
 	repo := m.repoLine()
 
@@ -715,20 +680,10 @@ func (m WorktreeDialogModel) viewNewBranch() string {
 			lipgloss.NewStyle().Foreground(primaryColor).Render("▎"),
 	)
 
-	content := titleStr + "\n" + repo + "\n\n" + baseLine + "\n\n" + nameInput
-
-	lines := lipgloss.Height(content)
-	contentHeight := m.height - 3
-	for lines < contentHeight {
-		content += "\n"
-		lines++
-	}
-
-	statusBar := statusBarStyle.
-		Width(m.width).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
-		Render(" Enter: create  Esc: back")
-
+	content := padToHeight(
+		titleStr+"\n"+repo+"\n\n"+baseLine+"\n\n"+nameInput,
+		m.height-3,
+	)
+	statusBar := renderDialogHintBar(m.width, " Enter: create  Esc: back")
 	return content + "\n" + statusBar
 }

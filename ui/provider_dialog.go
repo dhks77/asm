@@ -57,11 +57,7 @@ func (m ProviderSelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ProviderSelectModel) View() string {
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		Padding(1, 2).
-		Render("Select AI Provider")
+	title := renderDialogTitle("Select AI Provider", primaryColor)
 
 	var rows []string
 	for i, name := range m.providers {
@@ -74,20 +70,7 @@ func (m ProviderSelectModel) View() string {
 		rows = append(rows, "  "+cursor+style.Render(name))
 	}
 
-	content := title + "\n\n" + strings.Join(rows, "\n")
-
-	lines := lipgloss.Height(content)
-	contentHeight := m.height - 3
-	for lines < contentHeight {
-		content += "\n"
-		lines++
-	}
-
-	statusBar := statusBarStyle.
-		Width(m.width).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
-		Render(" ↑↓: navigate  Enter: select  Esc: cancel")
-
-	return content + "\n" + statusBar
+	content := padToHeight(title+"\n\n"+strings.Join(rows, "\n"), m.height-3)
+	hint := renderDialogHintBar(m.width, " ↑↓: navigate  Enter: select  Esc: cancel")
+	return content + "\n" + hint
 }
