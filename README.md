@@ -133,7 +133,14 @@ state: `unknown`, `idle`, `busy`, `thinking`, `tool_use`, `responding`
   설치돼 있으면 동작 (CLI 별도 등록 불필요).
 - Linux/Windows: `idea` / `code` CLI 사용 — 각각 PATH 에 있어야 함.
 
-나머지 IDE 는 **config 로 자유롭게 추가/오버라이드** 한다.
+나머지 IDE 는 **Settings(`Ctrl+S`) 의 IDEs 섹션** 또는 **config 파일**
+에서 자유롭게 추가/오버라이드 한다.
+
+- Settings: `+ Add IDE` 에서 Enter → 새 항목의 Name/Command/Args 편집
+  후 Enter 로 저장. 기존 항목의 `Ctrl+X` 는 제거(커스텀) 또는 디폴트
+  복원(빌트인).
+- Args 는 `-a "Visual Studio Code"` 처럼 공백이 들어간 토큰을 큰따옴표로
+  묶어서 입력.
 
 ```toml
 # 기본 IDE 고정 (selector 건너뜀). 비워두면 매번 selector.

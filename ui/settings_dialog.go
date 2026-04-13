@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/plugincfg"
 )
 
@@ -26,9 +27,15 @@ type settingsEntry struct {
 }
 
 // flatItem represents a navigable item in the settings UI.
+//
+// IDE-related kinds:
+//
+//	"ide-name", "ide-cmd", "ide-args" — editable fields. section is the
+//	  index into m.ideEntries.
+//	"ide-add" — a single trailing row. Enter appends a new ideEditEntry.
 type flatItem struct {
-	kind     string // "scope", "select", "text"
-	section  int    // -1 for general, >=0 for plugin index
+	kind     string // "scope", "select", "text", "number", "ide-name", "ide-cmd", "ide-args", "ide-add"
+	section  int    // -1 for general, >=0 for plugin index (or IDE index when kind starts with "ide-")
 	fieldIdx int
 }
 
@@ -57,6 +64,10 @@ type SettingsModel struct {
 	rootPath   string
 
 	entries []settingsEntry // plugin entries (user scope only)
+	// ideEntries are the editable IDE launchers shown in the Settings UI.
+	// Built-ins are always present; user-added entries follow. On save
+	// they're serialized back into cfg.IDEs.
+	ideEntries []ideEditEntry
 
 	providerNames    []string
 	trackerNames     []string
@@ -100,6 +111,7 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 		projectCfg:    projectCfg,
 		rootPath:      rootPath,
 		entries:       entries,
+		ideEntries:    loadIDEEntries(userCfg),
 		providerNames: providerNames,
 		trackerNames:  trackerNames,
 		ideNames:      displayIDEs,
@@ -414,6 +426,18 @@ func (m *SettingsModel) rebuildItems() {
 			m.items = append(m.items, flatItem{kind: "text", section: ei, fieldIdx: fi})
 		}
 	}
+
+	// IDE entries. Each custom entry exposes all three fields (name,
+	// command, args); built-ins hide the name field since renaming a
+	// builtin would just create a phantom entry on save.
+	for i, e := range m.ideEntries {
+		if !e.IsBuiltin {
+			m.items = append(m.items, flatItem{kind: "ide-name", section: i})
+		}
+		m.items = append(m.items, flatItem{kind: "ide-cmd", section: i})
+		m.items = append(m.items, flatItem{kind: "ide-args", section: i})
+	}
+	m.items = append(m.items, flatItem{kind: "ide-add"})
 }
 
 // builtinValuesFromCfg returns the current scope's values for a built-in entry.
@@ -496,6 +520,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				e := &m.entries[item.section]
 				key := e.fields[item.fieldIdx].Key
 				e.values[key] += string(msg.Runes)
+			} else if isIDEField(item.kind) {
+				if p := m.ideFieldPtr(item.section, item.kind); p != nil {
+					*p += string(msg.Runes)
+				}
 			}
 		}
 		return m, nil
@@ -592,8 +620,53 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case "ctrl+s", "enter":
+	case "ctrl+s":
 		return m, m.save()
+
+	case "enter":
+		// Enter on the "+ Add IDE" row appends a new editable entry;
+		// anywhere else it still saves.
+		if m.cursor < len(m.items) && m.items[m.cursor].kind == "ide-add" {
+			m.ideEntries = append(m.ideEntries, ideEditEntry{IsNew: true})
+			newIdx := len(m.ideEntries) - 1
+			m.rebuildItems()
+			// Move cursor onto the new entry's name field.
+			for i, it := range m.items {
+				if it.kind == "ide-name" && it.section == newIdx {
+					m.cursor = i
+					break
+				}
+			}
+			return m, nil
+		}
+		return m, m.save()
+
+	case "ctrl+x":
+		// Delete the current IDE entry. For built-ins this just clears
+		// any override (next load restores the default command/args).
+		if m.cursor < len(m.items) {
+			item := m.items[m.cursor]
+			if isIDEField(item.kind) && item.section >= 0 && item.section < len(m.ideEntries) {
+				e := m.ideEntries[item.section]
+				if e.IsBuiltin {
+					// Reset the builtin's fields back to the default.
+					defaults := ide.Builtins(nil)
+					for _, b := range defaults {
+						if b.Name == e.Name {
+							m.ideEntries[item.section].CommandStr = b.Command
+							m.ideEntries[item.section].ArgsStr = formatArgs(b.Args)
+							break
+						}
+					}
+				} else {
+					m.ideEntries = append(m.ideEntries[:item.section], m.ideEntries[item.section+1:]...)
+				}
+				m.rebuildItems()
+				if m.cursor >= len(m.items) {
+					m.cursor = len(m.items) - 1
+				}
+			}
+		}
 
 	case "ctrl+r":
 		// Clear the current field's project override (inherit from user).
@@ -635,6 +708,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if item.kind == "number" && len(m.pickerWidthStr) > 0 {
 				m.pickerWidthStr = m.pickerWidthStr[:len(m.pickerWidthStr)-1]
 				m.markGeneralOverride(item.fieldIdx)
+			} else if isIDEField(item.kind) {
+				if p := m.ideFieldPtr(item.section, item.kind); p != nil && len(*p) > 0 {
+					*p = (*p)[:len(*p)-1]
+				}
 			}
 		}
 
@@ -648,6 +725,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else if item.kind == "number" {
 				m.pickerWidthStr = ""
 				m.markGeneralOverride(item.fieldIdx)
+			} else if isIDEField(item.kind) {
+				if p := m.ideFieldPtr(item.section, item.kind); p != nil {
+					*p = ""
+				}
 			}
 		}
 
@@ -665,6 +746,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.pickerWidthStr += key
 					}
 					m.markGeneralOverride(item.fieldIdx)
+				} else if isIDEField(item.kind) {
+					if p := m.ideFieldPtr(item.section, item.kind); p != nil {
+						*p += key
+					}
 				}
 			}
 		}
@@ -677,6 +762,10 @@ func (m SettingsModel) save() tea.Cmd {
 	// cfg already holds its latest state because persistGeneralToScope
 	// was called each time we switched away from it.)
 	m.persistGeneralToScope()
+
+	// IDEs are always user-scoped in the settings UI — project-scope
+	// per-IDE overrides aren't worth the complexity right now.
+	saveIDEEntries(m.userCfg, m.ideEntries)
 
 	userCfg := *m.userCfg
 	projectCfg := *m.projectCfg
@@ -792,6 +881,85 @@ func (m SettingsModel) View() string {
 		sections = append(sections, "")
 	}
 
+	// IDEs section — editable list of command/args, plus a trailing
+	// "+ Add IDE" row. Built-ins show (builtin) tag; new (unsaved)
+	// entries show (new). Deleting a custom entry is Ctrl+X; on a
+	// built-in Ctrl+X restores the default command/args.
+	{
+		header := lipgloss.NewStyle().Padding(0, 2).Render(
+			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("IDEs") + " " +
+				lipgloss.NewStyle().Foreground(dimColor).Render("(user scope)"),
+		)
+		sections = append(sections, header)
+
+		for i, e := range m.ideEntries {
+			tag := ""
+			switch {
+			case e.IsNew:
+				tag = " " + lipgloss.NewStyle().Foreground(primaryColor).Render("(new)")
+			case e.IsBuiltin:
+				tag = " " + lipgloss.NewStyle().Foreground(dimColor).Render("(builtin)")
+			}
+
+			// Name header (editable only for custom/new entries)
+			if !e.IsBuiltin {
+				isCursor := itemIdx == m.cursor
+				indicator, labelStyle := fieldRowCursor(isCursor)
+				nameVal := e.Name
+				if nameVal == "" && !isCursor {
+					nameVal = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(name, e.g. cursor)")
+				}
+				if isCursor {
+					nameVal += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+				}
+				sections = append(sections, "  "+indicator+labelStyle.Render("Name:    ")+nameVal+tag)
+				itemIdx++
+			} else {
+				// Built-in name is static — just a label row.
+				sections = append(sections, lipgloss.NewStyle().Padding(0, 4).Render(
+					lipgloss.NewStyle().Foreground(whiteColor).Render(e.Name)+tag,
+				))
+			}
+
+			// Command
+			isCursor := itemIdx == m.cursor
+			indicator, labelStyle := fieldRowCursor(isCursor)
+			cmdVal := e.CommandStr
+			if cmdVal == "" && !isCursor {
+				cmdVal = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(executable, e.g. code)")
+			}
+			if isCursor {
+				cmdVal += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+			}
+			sections = append(sections, "  "+indicator+labelStyle.Render("Command: ")+cmdVal)
+			itemIdx++
+
+			// Args
+			isCursor = itemIdx == m.cursor
+			indicator, labelStyle = fieldRowCursor(isCursor)
+			argsVal := e.ArgsStr
+			if argsVal == "" && !isCursor {
+				argsVal = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(`(e.g. -a "Visual Studio Code")`)
+			}
+			if isCursor {
+				argsVal += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+			}
+			sections = append(sections, "  "+indicator+labelStyle.Render("Args:    ")+argsVal)
+			itemIdx++
+
+			sections = append(sections, "")
+			_ = i
+		}
+
+		// "+ Add IDE" row
+		isCursor := itemIdx == m.cursor
+		indicator, _ := fieldRowCursor(isCursor)
+		add := lipgloss.NewStyle().Foreground(primaryColor).Render("+ Add IDE")
+		sections = append(sections, "  "+indicator+add)
+		itemIdx++
+		sections = append(sections, "")
+	}
+
 	if len(sections) == 0 {
 		sections = append(sections, lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).Render("No configurable plugins installed"))
 	}
@@ -804,7 +972,7 @@ func (m SettingsModel) View() string {
 
 	content = padToHeight(content, m.height-3)
 	statusBar := renderDialogHintBar(m.width,
-		" ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Enter: save  Esc: cancel")
+		" ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Ctrl+X: delete IDE  Enter: save/add  Esc: cancel")
 	return content + "\n" + statusBar
 }
 

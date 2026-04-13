@@ -499,6 +499,13 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				defaultName = provider.DefaultProviderName
 			}
 			m.registry.SetDefault(defaultName)
+			// Rebuild the IDE list so adds/edits/removes from the settings
+			// UI take effect without a restart.
+			overrides := make(map[string]ide.Override, len(newCfg.IDEs))
+			for name, c := range newCfg.IDEs {
+				overrides[name] = ide.Override{Command: c.Command, Args: c.Args}
+			}
+			m.ides = ide.Builtins(overrides)
 			// Apply picker width immediately — only if not zoomed (resize is
 			// ignored on zoomed panes and would confuse the state otherwise).
 			if !asmtmux.IsWorkingPanelZoomed() {
