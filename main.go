@@ -75,6 +75,7 @@ func main() {
 
 	registry := buildRegistry(cfg)
 	t := buildTracker(cfg, rootPath)
+	taskCache := tracker.NewPathCache(rootPath, time.Hour)
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
@@ -85,9 +86,9 @@ func main() {
 	} else if *settingsMode {
 		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
-		runPicker(cfg, rootPath, registry, t)
+		runPicker(cfg, rootPath, registry, t, taskCache)
 	} else {
-		runOrchestrator(cfg, rootPath, registry, t)
+		runOrchestrator(cfg, rootPath, registry, t, taskCache)
 	}
 }
 
@@ -147,7 +148,7 @@ func buildTracker(cfg *config.Config, rootPath string) tracker.Tracker {
 			return saveDoorayConfig(dc, config.ScopeUser, rootPath)
 		}
 		dt := tracker.NewDoorayTracker(dc, saveFn)
-		return tracker.NewCachedTracker(dt, time.Hour)
+		return tracker.NewCachedTrackerWithStore(dt, time.Hour, rootPath)
 	}
 
 	// Fall back to any available plugin
@@ -184,7 +185,7 @@ func saveDoorayConfig(dc *tracker.DoorayConfig, scope config.Scope, rootPath str
 	return config.SaveScope(cfg, scope, rootPath)
 }
 
-func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
+func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache) {
 	if !asmtmux.IsAvailable() {
 		fmt.Fprintln(os.Stderr, "Error: tmux is required. Install it with: brew install tmux")
 		os.Exit(1)
@@ -192,7 +193,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 
 	// If already inside the asm tmux session, run picker directly
 	if asmtmux.IsInsideTmux() && asmtmux.SessionExists() {
-		runPicker(cfg, rootPath, registry, t)
+		runPicker(cfg, rootPath, registry, t, taskCache)
 		return
 	}
 
@@ -340,8 +341,8 @@ func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) 
 	return entries
 }
 
-func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
-	model := ui.NewPickerModel(cfg, rootPath, registry, t)
+func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache) {
+	model := ui.NewPickerModel(cfg, rootPath, registry, t, taskCache)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {

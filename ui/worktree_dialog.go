@@ -27,6 +27,10 @@ type BranchesLoadedMsg struct {
 	RepoDir  string
 	RepoName string
 	Err      error
+	// CachedTasks are task infos already present in the persistent cache,
+	// keyed by branch name. Seeded in one message to avoid the N-way
+	// per-branch render wave.
+	CachedTasks map[string]tracker.TaskInfo
 }
 
 type WorktreeCreatedMsg struct {
@@ -96,13 +100,31 @@ func (m *WorktreeDialogModel) Show(rootPath, dirPath string) tea.Cmd {
 	m.branches = nil
 	m.filtered = nil
 
+	t := m.tracker
 	return func() tea.Msg {
 		branches, err := worktree.ListBranches(dirPath)
 		if err != nil {
 			return BranchesLoadedMsg{Err: err}
 		}
 		repoName := worktree.RepoName(dirPath)
-		return BranchesLoadedMsg{Branches: branches, RepoDir: dirPath, RepoName: repoName}
+		// Peek the persistent cache for all branches up front so the first
+		// render already has the known task names. Only branches missing
+		// from the cache will need async API lookups.
+		var cached map[string]tracker.TaskInfo
+		if peeker, ok := t.(tracker.Peeker); ok {
+			cached = make(map[string]tracker.TaskInfo, len(branches))
+			for _, b := range branches {
+				if info, ok := peeker.Peek(b.Name); ok {
+					cached[b.Name] = info
+				}
+			}
+		}
+		return BranchesLoadedMsg{
+			Branches:    branches,
+			RepoDir:     dirPath,
+			RepoName:    repoName,
+			CachedTasks: cached,
+		}
 	}
 }
 
@@ -188,10 +210,19 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 		m.branches = msg.Branches
 		m.repoDir = msg.RepoDir
 		m.repoName = msg.RepoName
+		// Seed cached task infos before applyFilter so search-by-task works
+		// immediately and the first render is fully populated.
+		for name, info := range msg.CachedTasks {
+			m.taskInfos[name] = info
+		}
 		m.applyFilter()
 		if m.tracker != nil {
 			var cmds []tea.Cmd
 			for _, b := range m.branches {
+				// Skip fetches for branches already resolved from cache.
+				if _, ok := m.taskInfos[b.Name]; ok {
+					continue
+				}
 				cmds = append(cmds, m.fetchTaskName(b.Name))
 			}
 			cmds = append(cmds, wtTaskRetryTickCmd(5))

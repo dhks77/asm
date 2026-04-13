@@ -21,6 +21,12 @@ import (
 // Messages
 type DirectoriesScannedMsg struct {
 	Directories []worktree.Worktree
+	// CachedTasks seeds m.taskInfos on the first frame so task names don't
+	// trickle in over multiple renders. Keyed by worktree path.
+	CachedTasks map[string]tracker.TaskInfo
+	// CachedBranches records the branch each cached entry was observed
+	// under; used to invalidate stale names once GitStatus arrives.
+	CachedBranches map[string]string
 }
 
 type GitStatusUpdatedMsg struct {
@@ -29,8 +35,9 @@ type GitStatusUpdatedMsg struct {
 }
 
 type TaskResolvedMsg struct {
-	Path string
-	Info tracker.TaskInfo
+	Path   string
+	Branch string
+	Info   tracker.TaskInfo
 }
 
 type tickMsg time.Time
@@ -79,6 +86,10 @@ type PickerModel struct {
 	workingDir     string // directory shown in working panel (AI session)
 	termDir        string // directory shown in working panel (terminal)
 	tracker        tracker.Tracker
+	taskCache      *tracker.PathCache
+	// cachedBranches tracks the branch each seeded taskInfo was observed
+	// under; we invalidate the seed when GitStatus reveals a different branch.
+	cachedBranches map[string]string
 	focused        bool
 	width          int
 	height         int
@@ -93,7 +104,7 @@ type PickerModel struct {
 	statusBarEnabled  bool
 }
 
-func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) PickerModel {
+func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache) PickerModel {
 	return PickerModel{
 		cfg:            cfg,
 		rootPath:       rootPath,
@@ -109,6 +120,8 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		selectedItems:  make(map[string]bool),
 		batchConfirm:     NewBatchConfirmModel(),
 		tracker:           t,
+		taskCache:        taskCache,
+		cachedBranches:    make(map[string]string),
 		focused:        true,
 	}
 }
@@ -396,6 +409,26 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DirectoriesScannedMsg:
 		m.directories = msg.Directories
+		// Seed taskInfos from the persistent cache so the first render has
+		// task names filled in. Any entry with a branch mismatch when git
+		// status arrives will be invalidated by GitStatusUpdatedMsg below.
+		validPaths := make(map[string]bool, len(msg.Directories))
+		for _, wt := range msg.Directories {
+			validPaths[wt.Path] = true
+		}
+		for p, info := range msg.CachedTasks {
+			if !validPaths[p] {
+				continue
+			}
+			if _, exists := m.taskInfos[p]; !exists {
+				m.taskInfos[p] = info
+			}
+		}
+		for p, b := range msg.CachedBranches {
+			if validPaths[p] {
+				m.cachedBranches[p] = b
+			}
+		}
 		// Prune stale selections
 		validNames := make(map[string]bool)
 		for _, wt := range msg.Directories {
@@ -420,6 +453,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case GitStatusUpdatedMsg:
 		m.gitStatus[msg.Path] = msg.Status
 		if m.tracker != nil && msg.Status.Branch != "" {
+			// Invalidate a seeded cache entry whose branch no longer matches
+			// what's actually checked out — otherwise a stale task name
+			// would stick until TTL expiry.
+			if seeded, ok := m.cachedBranches[msg.Path]; ok && seeded != msg.Status.Branch {
+				delete(m.taskInfos, msg.Path)
+				delete(m.cachedBranches, msg.Path)
+				if m.taskCache != nil {
+					m.taskCache.Delete(msg.Path)
+				}
+			}
 			if _, ok := m.taskInfos[msg.Path]; !ok {
 				return m, m.fetchTaskName(msg.Path, msg.Status.Branch)
 			}
@@ -429,6 +472,12 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case TaskResolvedMsg:
 		if msg.Info.Name != "" {
 			m.taskInfos[msg.Path] = msg.Info
+			if msg.Branch != "" {
+				m.cachedBranches[msg.Path] = msg.Branch
+				if m.taskCache != nil {
+					m.taskCache.Set(msg.Path, msg.Branch, msg.Info)
+				}
+			}
 		}
 		return m, nil
 
@@ -1696,9 +1745,26 @@ func (m PickerModel) overlayCenter(base, overlay string) string {
 // Commands
 
 func (m PickerModel) scanDirectories() tea.Cmd {
+	cache := m.taskCache
 	return func() tea.Msg {
 		wts, _ := worktree.Scan(m.rootPath)
-		return DirectoriesScannedMsg{Directories: wts}
+		var tasks map[string]tracker.TaskInfo
+		var branches map[string]string
+		if cache != nil {
+			tasks = make(map[string]tracker.TaskInfo, len(wts))
+			branches = make(map[string]string, len(wts))
+			for _, wt := range wts {
+				if e, ok := cache.GetEntry(wt.Path); ok {
+					tasks[wt.Path] = e.Info
+					branches[wt.Path] = e.Branch
+				}
+			}
+		}
+		return DirectoriesScannedMsg{
+			Directories:    wts,
+			CachedTasks:    tasks,
+			CachedBranches: branches,
+		}
 	}
 }
 
@@ -1713,7 +1779,7 @@ func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
 	t := m.tracker
 	return func() tea.Msg {
 		info := t.Resolve(branch)
-		return TaskResolvedMsg{Path: path, Info: info}
+		return TaskResolvedMsg{Path: path, Branch: branch, Info: info}
 	}
 }
 
