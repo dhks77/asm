@@ -519,7 +519,10 @@ func RunInWorkingPanel(windowName, cmd string) error {
 // swaps back, kills the window, and focuses picking panel.
 // Returns the exit code of the process (0 = success).
 func WaitAndCleanupWorkingPanel(windowName string) int {
-	exec.Command("tmux", "wait-for", windowName).Run()
+	// Bounded wait with window-existence probe — same pattern as
+	// WaitForExit, so a lost signal or externally-killed window can't
+	// park this goroutine forever.
+	_ = waitForSignalOrWindowGone(windowName, windowName)
 
 	exitCode := 1
 	exitVar := fmt.Sprintf("@%s-exit", windowName)

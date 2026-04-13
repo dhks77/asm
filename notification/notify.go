@@ -24,17 +24,22 @@ func Send(title, body string) {
 	}
 }
 
-func sendDarwin(title, body string) {
+// runNotify runs the native notification command bounded by notifyTimeout.
+// Errors are intentionally dropped — notifications are best-effort and must
+// not surface to the caller on platforms where the daemon is unavailable.
+func runNotify(name string, args ...string) {
 	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 	defer cancel()
+	_ = exec.CommandContext(ctx, name, args...).Run()
+}
+
+func sendDarwin(title, body string) {
 	script := `display notification "` + escapeAppleScript(body) + `" with title "` + escapeAppleScript(title) + `"`
-	_ = exec.CommandContext(ctx, "osascript", "-e", script).Run()
+	runNotify("osascript", "-e", script)
 }
 
 func sendLinux(title, body string) {
-	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
-	defer cancel()
-	_ = exec.CommandContext(ctx, "notify-send", "-u", "normal", "-t", "5000", title, body).Run()
+	runNotify("notify-send", "-u", "normal", "-t", "5000", title, body)
 }
 
 func sendWindows(title, body string) {
@@ -56,9 +61,7 @@ $xdoc.LoadXml($xml)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xdoc)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("ASM").Show($toast)
 `
-	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
-	defer cancel()
-	_ = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", script).Run()
+	runNotify("powershell", "-NoProfile", "-Command", script)
 }
 
 func escapeAppleScript(s string) string {
