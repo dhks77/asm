@@ -258,17 +258,33 @@ func IsWorkingPanelZoomed() bool {
 }
 
 // ZoomWorkingPanel zooms the working pane (pane 1) to fullscreen.
-// No-op if already zoomed. Selects the working pane first so zoom targets it.
+// If zoom is currently on a different pane (e.g. the picker), unzoom first
+// so the zoom flag moves onto pane 1.
 func ZoomWorkingPanel() error {
-	exec.Command("tmux", "select-pane",
-		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-	).Run()
-	if IsWorkingPanelZoomed() {
+	return zoomPane(1)
+}
+
+// ZoomPickingPanel zooms the picker pane (pane 0) to fullscreen.
+// If zoom is currently on a different pane (e.g. the working pane), unzoom
+// first so the zoom flag moves onto pane 0.
+func ZoomPickingPanel() error {
+	return zoomPane(0)
+}
+
+// zoomPane is the shared implementation for ZoomWorkingPanel / ZoomPickingPanel.
+// tmux's zoom invariant: when a window is zoomed, the active pane IS the
+// zoomed pane. So we can detect "already zoomed on target" via
+// ActivePaneIndex() and skip the flash of unzoom + re-zoom in that case.
+func zoomPane(idx int) error {
+	target := fmt.Sprintf("%s:%s.%d", SessionName, MainWindow, idx)
+	if IsWorkingPanelZoomed() && ActivePaneIndex() == idx {
 		return nil
 	}
-	return exec.Command("tmux", "resize-pane",
-		"-Z", "-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-	).Run()
+	if IsWorkingPanelZoomed() {
+		UnzoomWorkingPanel()
+	}
+	exec.Command("tmux", "select-pane", "-t", target).Run()
+	return exec.Command("tmux", "resize-pane", "-Z", "-t", target).Run()
 }
 
 // UnzoomWorkingPanel removes zoom if currently zoomed. Safe to call always.
@@ -297,15 +313,6 @@ func EnableStatusBar() {
 	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[1]", "").Run()
 	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[2]", "").Run()
 }
-
-// DisableStatusBar hides the tmux status line entirely.
-func DisableStatusBar() {
-	exec.Command("tmux", "set-option", "-t", SessionName, "status", "off").Run()
-}
-
-// Back-compat aliases (deprecated names).
-func EnableTopStatusBar()  { EnableStatusBar() }
-func DisableTopStatusBar() { DisableStatusBar() }
 
 // SetStatusLines writes the two summary lines (current + other sessions).
 // Both accept tmux format strings (e.g. "#[fg=cyan,bold]...#[default]").

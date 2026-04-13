@@ -102,7 +102,6 @@ csm/
 │   ├── picker.go            # 메인 Bubble Tea 모델 (worktree 리스트 + 세션 관리)
 │   ├── provider_dialog.go   # AI 프로바이더 선택 다이얼로그
 │   ├── resume_dialog.go     # 과거 세션 선택 팝업
-│   ├── confirm_dialog.go    # 종료 확인 다이얼로그
 │   ├── status_bar.go        # 하단 키 힌트
 │   └── styles.go            # Lipgloss 스타일 정의
 ├── session/resume.go        # 세션 디렉토리 JSON 파일 스캔
@@ -111,8 +110,7 @@ csm/
 │   ├── git.go               # git status 조회 (브랜치, ahead/behind, 변경 수)
 │   └── branch.go            # 브랜치 관리
 ├── integration/dooray.go    # Dooray API 클라이언트 (선택적)
-├── notification/notify.go   # 크로스 플랫폼 데스크톱 알림 (macOS/Linux/Windows)
-└── internal/cache.go        # 파일 기반 캐시 (TTL 지원)
+└── notification/notify.go   # 크로스 플랫폼 데스크톱 알림 (macOS/Linux/Windows)
 ```
 
 ### 설정 파일

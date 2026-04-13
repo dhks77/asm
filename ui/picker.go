@@ -179,7 +179,13 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.batchConfirm.SetSize(msg.Width)
+		firstReady := !m.ready
 		m.ready = true
+		// On initial render, fullscreen the picker so the right-hand working
+		// pane isn't visible in auto_zoom mode.
+		if firstReady {
+			m.applyAutoZoomPicker()
+		}
 		return m, nil
 
 	case tea.FocusMsg:
@@ -188,6 +194,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if asmtmux.HasUtilityWindow() {
 			asmtmux.CloseUtilityPanel()
 		}
+		// Whenever picker regains focus (Ctrl+G from working, dialog exit,
+		// session exit, etc.), re-apply picker fullscreen if auto_zoom is on.
+		m.applyAutoZoomPicker()
 		return m, nil
 
 	case tea.BlurMsg:
@@ -284,11 +293,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scrollTickCmd()
 
 	case sessionExitedMsg:
-		delete(m.providerStates, msg.DirName)
-		delete(m.prevProviderStates, msg.DirName)
-		delete(m.worktreeProviders, msg.DirName)
-		delete(m.sessionStartTimes, msg.DirName)
-		delete(m.flashItems, msg.DirName)
+		m.cleanupSessionState(msg.DirName)
 		isDisplayed := m.workingDir == msg.DirName
 		asmtmux.CleanupExitedWindow(msg.DirName, isDisplayed)
 		if isDisplayed {
@@ -331,9 +336,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if wt == nil {
 			return m, nil
 		}
-		delete(m.providerStates, wt.Name)
-		delete(m.worktreeProviders, wt.Name)
-		delete(m.sessionStartTimes, wt.Name)
+		m.cleanupSessionState(wt.Name)
 		winName := asmtmux.WindowName(wt.Name)
 		if asmtmux.WindowExists(winName) {
 			asmtmux.KillDirectoryWindow(wt.Name)
@@ -375,10 +378,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			asmtmux.KillDirectoryWindow(wt.Name)
 		}
-		delete(m.providerStates, wt.Name)
-		delete(m.prevProviderStates, wt.Name)
-		delete(m.worktreeProviders, wt.Name)
-		delete(m.sessionStartTimes, wt.Name)
+		m.cleanupSessionState(wt.Name)
 		return m, m.startSession(wt, msg.ProviderName)
 
 	case batchKillCompletedMsg:
@@ -458,11 +458,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		asmtmux.KillTerminalWindow(msg.dirName)
 		delete(m.terminalStartTimes, msg.dirName)
 		if isDisplayed {
-			// Show AI session for this directory if it exists
+			// If this directory also has an AI session, show it fullscreen in
+			// the working pane instead of leaving the user with a split view
+			// where the picker has focus and the working pane sits idle on
+			// the right.
 			winName := asmtmux.WindowName(msg.dirName)
 			if asmtmux.WindowExists(winName) {
 				asmtmux.SwapToWorkingPanel(msg.dirName)
 				m.workingDir = msg.dirName
+				asmtmux.FocusWorkingPanel()
+				m.applyAutoZoom()
 			} else {
 				asmtmux.FocusPickingPanel()
 			}
@@ -561,10 +566,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if providerName == "" {
 			providerName = m.registry.Default().Name()
 		}
-		delete(m.providerStates, wt.Name)
-		delete(m.prevProviderStates, wt.Name)
-		delete(m.worktreeProviders, wt.Name)
-		delete(m.sessionStartTimes, wt.Name)
+		m.cleanupSessionState(wt.Name)
 		winName := asmtmux.WindowName(wt.Name)
 		if asmtmux.WindowExists(winName) {
 			if m.workingDir == wt.Name {
@@ -732,11 +734,7 @@ func (m *PickerModel) batchKillSessions(names []string) tea.Cmd {
 func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
 	// Kill active sessions and collect worktrees to remove
 	for _, name := range names {
-		delete(m.providerStates, name)
-		delete(m.prevProviderStates, name)
-		delete(m.worktreeProviders, name)
-		delete(m.sessionStartTimes, name)
-		delete(m.flashItems, name)
+		m.cleanupSessionState(name)
 
 		winName := asmtmux.WindowName(name)
 		if asmtmux.WindowExists(winName) {
@@ -830,6 +828,18 @@ type deleteExitedMsg struct {
 	confirmed bool
 }
 
+// cleanupSessionState removes per-session bookkeeping for the given worktree
+// name. Called whenever a session ends or is about to be restarted so stale
+// state doesn't leak into the next session (e.g. frozen provider state,
+// leftover "done!" flash, old start time).
+func (m *PickerModel) cleanupSessionState(name string) {
+	delete(m.providerStates, name)
+	delete(m.prevProviderStates, name)
+	delete(m.worktreeProviders, name)
+	delete(m.sessionStartTimes, name)
+	delete(m.flashItems, name)
+}
+
 func (m *PickerModel) swapOutWorkingPanel() {
 	if m.workingDir != "" {
 		asmtmux.SwapBackFromWorkingPanel(m.workingDir)
@@ -841,7 +851,16 @@ func (m *PickerModel) swapOutWorkingPanel() {
 	}
 }
 
-func (m *PickerModel) openProviderSelect() tea.Cmd {
+// runDialogInWorkingPanel is the shared boilerplate for every modal dialog
+// that runs as a child `asm` invocation inside the working pane. It swaps any
+// current session out, spawns the dialog, focuses + zooms the working pane,
+// and returns a tea.Cmd that blocks on dialog exit and converts the exit
+// code into the caller-supplied message.
+//
+// cmdFlags is the argv portion appended to the executable path (e.g.
+// "--settings" or "--delete foo --delete-dirty"). resultMsg is invoked with
+// the dialog's exit code once it terminates.
+func (m *PickerModel) runDialogInWorkingPanel(windowName, cmdFlags string, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
 	m.swapOutWorkingPanel()
 
 	exe, err := os.Executable()
@@ -849,91 +868,76 @@ func (m *PickerModel) openProviderSelect() tea.Cmd {
 		return nil
 	}
 
-	cmd := fmt.Sprintf("%s --provider-select", exe)
-	asmtmux.RunInWorkingPanel("asm-provider-select", cmd)
+	asmtmux.RunInWorkingPanel(windowName, fmt.Sprintf("%s %s", exe, cmdFlags))
 	asmtmux.FocusWorkingPanel()
+	m.applyAutoZoom()
 
 	return func() tea.Msg {
-		exitCode := asmtmux.WaitAndCleanupWorkingPanel("asm-provider-select")
+		return resultMsg(asmtmux.WaitAndCleanupWorkingPanel(windowName))
+	}
+}
+
+func (m *PickerModel) openProviderSelect() tea.Cmd {
+	return m.runDialogInWorkingPanel("asm-provider-select", "--provider-select", func(exitCode int) tea.Msg {
 		if exitCode == 0 {
-			selected := asmtmux.GetSessionOption("asm-selected-provider")
-			return providerSelectDoneMsg{ProviderName: selected}
+			return providerSelectDoneMsg{ProviderName: asmtmux.GetSessionOption("asm-selected-provider")}
 		}
 		return providerSelectDoneMsg{}
-	}
+	})
 }
 
 func (m *PickerModel) openSettings() tea.Cmd {
-	m.swapOutWorkingPanel()
-
-	exe, err := os.Executable()
-	if err != nil {
-		return nil
-	}
-
-	cmd := fmt.Sprintf("%s --settings", exe)
-	asmtmux.RunInWorkingPanel("asm-settings", cmd)
-	asmtmux.FocusWorkingPanel()
-
-	return func() tea.Msg {
-		asmtmux.WaitAndCleanupWorkingPanel("asm-settings")
+	return m.runDialogInWorkingPanel("asm-settings", "--settings", func(int) tea.Msg {
 		return settingsExitedMsg{}
-	}
+	})
 }
 
-
 func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
-	m.swapOutWorkingPanel()
-
-	exe, err := os.Executable()
-	if err != nil {
-		return nil
-	}
-
-	cmd := fmt.Sprintf("%s --worktree-create --path %s --worktree-dir %s", exe, m.rootPath, dir.Path)
-	asmtmux.RunInWorkingPanel("asm-worktree", cmd)
-	asmtmux.FocusWorkingPanel()
-
-	return func() tea.Msg {
-		exitCode := asmtmux.WaitAndCleanupWorkingPanel("asm-worktree")
+	flags := fmt.Sprintf("--worktree-create --path %s --worktree-dir %s", m.rootPath, dir.Path)
+	return m.runDialogInWorkingPanel("asm-worktree", flags, func(exitCode int) tea.Msg {
 		return worktreeExitedMsg{created: exitCode == 0}
-	}
+	})
 }
 
 func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
-	m.swapOutWorkingPanel()
-
-	exe, err := os.Executable()
-	if err != nil {
-		return nil
-	}
-
 	taskName := ""
 	if info, ok := m.taskInfos[wt.Path]; ok {
 		taskName = info.Name
 	}
 
-	dirty := worktree.HasChanges(wt.Path)
-	isWt := worktree.IsWorktree(wt.Path)
-
-	cmd := fmt.Sprintf("%s --delete %s", exe, wt.Name)
+	flags := fmt.Sprintf("--delete %s", wt.Name)
 	if taskName != "" {
-		cmd += fmt.Sprintf(" --delete-task '%s'", taskName)
+		flags += fmt.Sprintf(" --delete-task '%s'", taskName)
 	}
-	if dirty {
-		cmd += " --delete-dirty"
+	if worktree.HasChanges(wt.Path) {
+		flags += " --delete-dirty"
 	}
-	if isWt {
-		cmd += " --delete-worktree"
+	if worktree.IsWorktree(wt.Path) {
+		flags += " --delete-worktree"
 	}
-	asmtmux.RunInWorkingPanel("asm-delete", cmd)
-	asmtmux.FocusWorkingPanel()
 
 	wtName := wt.Name
-	return func() tea.Msg {
-		exitCode := asmtmux.WaitAndCleanupWorkingPanel("asm-delete")
+	return m.runDialogInWorkingPanel("asm-delete", flags, func(exitCode int) tea.Msg {
 		return deleteExitedMsg{dirName: wtName, confirmed: exitCode == 0}
+	})
+}
+
+// showTerminalInWorkingPanel lazily creates the terminal window for `name`,
+// swaps it into the working pane, sets m.termDir, and focuses + zooms.
+// Returns a tea.Cmd that watches for the terminal's exit (nil if the
+// terminal window already existed — its watcher is already running).
+func (m *PickerModel) showTerminalInWorkingPanel(name, path string) tea.Cmd {
+	var cmd tea.Cmd
+	if !asmtmux.WindowExists(asmtmux.TerminalWindowName(name)) {
+		asmtmux.CreateTerminalWindow(name, path)
+		m.terminalStartTimes[name] = time.Now()
+		cmd = waitForTermExitCmd(name)
 	}
+	asmtmux.SwapTermToWorkingPanel(name)
+	m.termDir = name
+	asmtmux.FocusWorkingPanel()
+	m.applyAutoZoom()
+	return cmd
 }
 
 func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
@@ -946,21 +950,7 @@ func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 
 	// Swap out whatever is in the working panel
 	m.swapOutWorkingPanel()
-
-	// Create terminal if needed
-	var cmd tea.Cmd
-	termWin := asmtmux.TerminalWindowName(wt.Name)
-	if !asmtmux.WindowExists(termWin) {
-		asmtmux.CreateTerminalWindow(wt.Name, wt.Path)
-		m.terminalStartTimes[wt.Name] = time.Now()
-		cmd = waitForTermExitCmd(wt.Name)
-	}
-
-	asmtmux.SwapTermToWorkingPanel(wt.Name)
-	m.termDir = wt.Name
-	asmtmux.FocusWorkingPanel()
-	m.applyAutoZoom()
-	return cmd
+	return m.showTerminalInWorkingPanel(wt.Name, wt.Path)
 }
 
 func (m *PickerModel) toggleTerminal() tea.Cmd {
@@ -979,19 +969,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		}
 		asmtmux.SwapBackFromWorkingPanel(wtName)
 		m.workingDir = ""
-
-		var cmd tea.Cmd
-		termWin := asmtmux.TerminalWindowName(wtName)
-		if !asmtmux.WindowExists(termWin) {
-			asmtmux.CreateTerminalWindow(wtName, wtPath)
-			m.terminalStartTimes[wtName] = time.Now()
-			cmd = waitForTermExitCmd(wtName)
-		}
-		asmtmux.SwapTermToWorkingPanel(wtName)
-		m.termDir = wtName
-		asmtmux.FocusWorkingPanel()
-		m.applyAutoZoom()
-		return cmd
+		return m.showTerminalInWorkingPanel(wtName, wtPath)
 	} else if m.termDir != "" {
 		// Terminal is displayed → switch to AI session (if exists)
 		wtName := m.termDir
@@ -1043,6 +1021,15 @@ func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 func (m *PickerModel) applyAutoZoom() {
 	if m.cfg != nil && m.cfg.IsAutoZoomEnabled() {
 		asmtmux.ZoomWorkingPanel()
+	}
+}
+
+// applyAutoZoomPicker zooms the picker pane if config's auto_zoom is enabled,
+// so the picker fills the screen instead of leaving the working pane visible
+// on the right. No-op when auto_zoom is disabled (keeps the split view).
+func (m *PickerModel) applyAutoZoomPicker() {
+	if m.cfg != nil && m.cfg.IsAutoZoomEnabled() {
+		asmtmux.ZoomPickingPanel()
 	}
 }
 
@@ -1257,7 +1244,7 @@ func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (st
 	}
 
 	// Folder name (fixed width, scrolled if longer)
-	folder := padToWidth(tmuxEscape(scrollText(wt.Name, statusLine1NameWidth, m.scrollTick)), statusLine1NameWidth)
+	folder := m.scrollPadName(wt.Name, statusLine1NameWidth)
 
 	// Kind badge (padded to fixed width to avoid jitter)
 	badge := padToWidth(renderKindBadgeTmux(targetKind), statusLine2KindWidth)
@@ -1269,19 +1256,10 @@ func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (st
 	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
 		taskRaw = info.Name
 	}
-	var taskPart string
-	if taskRaw != "" {
-		taskPart = padToWidth(tmuxEscape(scrollText(taskRaw, taskWidth, m.scrollTick)), taskWidth)
-	} else {
-		taskPart = padToWidth("", taskWidth)
-	}
+	taskPart := m.scrollPadName(taskRaw, taskWidth)
 
 	// State + color (blank when terminal is displayed — terminal has no provider state)
-	stateLabel, stateColor := "", "colour244"
-	if !displayingTerm {
-		stateLabel, stateColor = m.stateLabelColor(wt.Name)
-	}
-	statePart := padToWidth(stateLabel, statusLine2StateWidth)
+	statePart, stateColor := m.statePaddedColumn(wt.Name, !displayingTerm)
 
 	// Elapsed — AI session time when AI is displayed, else terminal open time.
 	elapsed := ""
@@ -1363,16 +1341,10 @@ func (m *PickerModel) renderStatusItem(wt worktree.Worktree, kind asmtmux.Sessio
 	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
 		rawName = info.Name
 	}
-	displayName := scrollText(rawName, statusLine2NameWidth, m.scrollTick)
-	displayName = tmuxEscape(displayName)
-	displayName = padToWidth(displayName, statusLine2NameWidth)
+	displayName := m.scrollPadName(rawName, statusLine2NameWidth)
 
 	// State only meaningful for AI sessions; terminal-only rows leave it blank.
-	stateLabel, stateColor := "", "colour244"
-	if kind.HasAI() {
-		stateLabel, stateColor = m.stateLabelColor(wt.Name)
-	}
-	statePadded := padToWidth(stateLabel, statusLine2StateWidth)
+	statePadded, stateColor := m.statePaddedColumn(wt.Name, kind.HasAI())
 
 	badge := padToWidth(renderKindBadgeTmux(kind), statusLine2KindWidth)
 
@@ -1381,6 +1353,25 @@ func (m *PickerModel) renderStatusItem(wt worktree.Worktree, kind asmtmux.Sessio
 
 	return fmt.Sprintf("%s #[fg=%s]%s#[default] %s #[fg=%s]%s#[default]",
 		iconPart, nameColor, displayName, badge, stateColor, statePadded)
+}
+
+// scrollPadName renders a name column for the status bar: scrolls the text
+// when longer than the column width, escapes tmux format characters, and
+// right-pads the result to exactly `width` display columns. Used on both
+// status-bar lines to keep the column boundaries stable as names animate.
+func (m *PickerModel) scrollPadName(raw string, width int) string {
+	return padToWidth(tmuxEscape(scrollText(raw, width, m.scrollTick)), width)
+}
+
+// statePaddedColumn returns the padded state label and its tmux color for a
+// session. When `showState` is false (e.g. for terminal-only rows or when the
+// terminal is fronted), the label is blank and the color is neutral.
+func (m *PickerModel) statePaddedColumn(dirName string, showState bool) (string, string) {
+	label, color := "", "colour244"
+	if showState {
+		label, color = m.stateLabelColor(dirName)
+	}
+	return padToWidth(label, statusLine2StateWidth), color
 }
 
 // stateLabelColor returns the provider-state label and tmux color code for a session.
