@@ -46,6 +46,7 @@ worktree를 선택하면 해당 hidden window의 pane을 `tmux swap-pane`으로 
 | `Ctrl+p` | AI 프로바이더 선택 다이얼로그 |
 | `Ctrl+t` | 터미널 ↔ AI 토글 |
 | `Ctrl+g` | 우측 세션 포커스 또는 세션 시작 |
+| `Ctrl+]` | 활성 세션 순환 (단방향, 마지막 → 처음) |
 | `Ctrl+s` | 설정 열기 |
 | `Ctrl+w` | 새 worktree 생성 |
 | `Ctrl+d` | 디렉토리 삭제 |
@@ -54,6 +55,17 @@ worktree를 선택하면 해당 hidden window의 pane을 `tmux swap-pane`으로 
 | `k` | (선택 모드) 선택된 세션 일괄 종료 |
 | `x` | (선택 모드) 선택된 worktree 일괄 삭제 |
 | `Esc` | 선택 해제 → 검색 해제 |
+
+### 목록 정렬 (picking panel)
+- 활성 AI 세션이 열려있는 worktree가 **최상단**
+- 나머지는 아래 — 각 그룹 내부 순서는 `worktree.Scan()` 결과 유지
+
+### 풀스크린 / 상단 요약 바 (working panel)
+- `auto_zoom=true` (기본) 이면 세션 열 때 working pane을 tmux zoom
+- 상단 tmux status line에 모든 활성 세션 요약: `▶ 이름 상태 │ ● 이름 상태 │ …`
+  - 이름: tracker task name 우선, 없으면 폴더명
+  - 상태: `thinking` / `responding` / `tool-use` / `idle` / `done`
+  - `▶` = 현재 표시 중, `●` = 그 외 활성
 
 ### 좌측 패널 표시 정보
 각 worktree 항목:
@@ -109,6 +121,7 @@ csm/
 default_path = ""
 git_refresh_interval = 5
 desktop_notifications = true
+auto_zoom = true                      # working pane 자동 풀스크린
 default_provider = "claude"           # 기본 AI 프로바이더
 
 # Preset 오버라이드 (선택사항 — command/args 커스터마이즈)

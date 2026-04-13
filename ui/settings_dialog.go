@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -31,6 +33,18 @@ type flatItem struct {
 }
 
 var scopeOptions = []string{"user", "project"}
+var autoZoomOptions = []string{"on", "off"}
+
+const pickerWidthMin = 10
+const pickerWidthMax = 50
+
+// General field keys used for per-field project-override tracking.
+const (
+	fieldProvider    = "provider"
+	fieldTracker     = "tracker"
+	fieldAutoZoom    = "autoZoom"
+	fieldPickerWidth = "pickerWidth"
+)
 
 type SettingsModel struct {
 	userCfg    *config.Config // user-level raw config
@@ -43,6 +57,12 @@ type SettingsModel struct {
 	trackerNames     []string
 	selectedProvider int
 	selectedTracker  int
+	autoZoomIdx      int    // 0=on, 1=off
+	pickerWidthStr   string // free-form percentage input (e.g. "22")
+
+	// Per-field project-scope overrides. true = explicit value in project;
+	// false = inherits from user. Only consulted when scopeIdx == 1.
+	projectOverrides map[string]bool
 
 	scopeIdx int // 0=user, 1=project
 
@@ -53,24 +73,9 @@ type SettingsModel struct {
 	err    string
 }
 
-func NewSettingsModel(mergedCfg *config.Config, rootPath string, providerNames []string, trackerNames []string, plugins []plugincfg.Entry) SettingsModel {
+func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string, trackerNames []string, plugins []plugincfg.Entry) SettingsModel {
 	userCfg, _ := config.LoadScope(config.ScopeUser, rootPath)
 	projectCfg, _ := config.LoadScope(config.ScopeProject, rootPath)
-
-	selProvider := 0
-	for i, n := range providerNames {
-		if n == mergedCfg.DefaultProvider {
-			selProvider = i
-			break
-		}
-	}
-	selTracker := 0
-	for i, n := range trackerNames {
-		if n == mergedCfg.DefaultTracker {
-			selTracker = i
-			break
-		}
-	}
 
 	entries := make([]settingsEntry, len(plugins))
 	for i, p := range plugins {
@@ -78,17 +83,243 @@ func NewSettingsModel(mergedCfg *config.Config, rootPath string, providerNames [
 	}
 
 	m := SettingsModel{
-		userCfg:          userCfg,
-		projectCfg:       projectCfg,
-		rootPath:         rootPath,
-		entries:          entries,
-		providerNames:    providerNames,
-		trackerNames:     trackerNames,
-		selectedProvider: selProvider,
-		selectedTracker:  selTracker,
+		userCfg:       userCfg,
+		projectCfg:    projectCfg,
+		rootPath:      rootPath,
+		entries:       entries,
+		providerNames: providerNames,
+		trackerNames:  trackerNames,
+		projectOverrides: map[string]bool{
+			fieldProvider:    projectCfg.DefaultProvider != "",
+			fieldTracker:     projectCfg.DefaultTracker != "",
+			fieldAutoZoom:    projectCfg.AutoZoom != nil,
+			fieldPickerWidth: projectCfg.PickerWidth != 0,
+		},
 	}
+	// Default to project scope when a project context exists so overrides
+	// are front-and-center; fall back to user scope otherwise.
+	if rootPath != "" {
+		m.scopeIdx = 1
+	}
+	m.loadGeneralFromScope()
 	m.rebuildItems()
 	return m
+}
+
+// loadGeneralFromScope syncs the general-section UI state (provider, tracker,
+// auto zoom, picker width) with the currently selected scope. For project
+// scope, fields that are not explicitly overridden show the user-scope value
+// so the user can see what they would inherit.
+func (m *SettingsModel) loadGeneralFromScope() {
+	isProject := m.currentScope() == config.ScopeProject
+
+	providerName := m.projectCfg.DefaultProvider
+	if !isProject || !m.projectOverrides[fieldProvider] {
+		providerName = m.userCfg.DefaultProvider
+	}
+	m.selectedProvider = 0
+	for i, n := range m.providerNames {
+		if n == providerName {
+			m.selectedProvider = i
+			break
+		}
+	}
+
+	trackerName := m.projectCfg.DefaultTracker
+	if !isProject || !m.projectOverrides[fieldTracker] {
+		trackerName = m.userCfg.DefaultTracker
+	}
+	m.selectedTracker = 0
+	for i, n := range m.trackerNames {
+		if n == trackerName {
+			m.selectedTracker = i
+			break
+		}
+	}
+
+	azEnabled := m.userCfg.IsAutoZoomEnabled()
+	if isProject && m.projectOverrides[fieldAutoZoom] {
+		azEnabled = m.projectCfg.IsAutoZoomEnabled()
+	}
+	if azEnabled {
+		m.autoZoomIdx = 0
+	} else {
+		m.autoZoomIdx = 1
+	}
+
+	pw := m.userCfg.GetPickerWidth()
+	if isProject && m.projectOverrides[fieldPickerWidth] {
+		pw = m.projectCfg.GetPickerWidth()
+	}
+	m.pickerWidthStr = fmt.Sprintf("%d", pw)
+}
+
+// persistGeneralToScope writes the current UI state back into the currently
+// selected scope's in-memory *config.Config. This lets scope switches and
+// the final save preserve edits made across both scopes in one session.
+func (m *SettingsModel) persistGeneralToScope() {
+	scope := m.currentScope()
+	cfg := m.currentCfg()
+
+	if scope == config.ScopeProject {
+		if m.projectOverrides[fieldProvider] && len(m.providerNames) > 0 {
+			cfg.DefaultProvider = m.providerNames[m.selectedProvider]
+		} else {
+			cfg.DefaultProvider = ""
+		}
+		if m.projectOverrides[fieldTracker] && len(m.trackerNames) > 0 {
+			cfg.DefaultTracker = m.trackerNames[m.selectedTracker]
+		} else {
+			cfg.DefaultTracker = ""
+		}
+		if m.projectOverrides[fieldAutoZoom] {
+			azOn := m.autoZoomIdx == 0
+			cfg.AutoZoom = &azOn
+		} else {
+			cfg.AutoZoom = nil
+		}
+		if m.projectOverrides[fieldPickerWidth] {
+			if w := parsePickerWidth(m.pickerWidthStr); w > 0 {
+				cfg.PickerWidth = w
+			} else {
+				cfg.PickerWidth = 0
+			}
+		} else {
+			cfg.PickerWidth = 0
+		}
+	} else {
+		if len(m.providerNames) > 0 {
+			cfg.DefaultProvider = m.providerNames[m.selectedProvider]
+		}
+		if len(m.trackerNames) > 0 {
+			cfg.DefaultTracker = m.trackerNames[m.selectedTracker]
+		}
+		azOn := m.autoZoomIdx == 0
+		cfg.AutoZoom = &azOn
+		if w := parsePickerWidth(m.pickerWidthStr); w > 0 {
+			cfg.PickerWidth = w
+		}
+	}
+
+	// Persist tracker-entry edits for built-in trackers into the scope's cfg.
+	if cfg.Trackers == nil {
+		cfg.Trackers = make(map[string]map[string]string)
+	}
+	for _, e := range m.entries {
+		if e.entry.Source == nil || e.entry.Category != "tracker" {
+			continue
+		}
+		if scope == config.ScopeProject {
+			filtered := make(map[string]string, len(e.values))
+			for k, v := range e.values {
+				if v != "" {
+					filtered[k] = v
+				}
+			}
+			if len(filtered) == 0 {
+				delete(cfg.Trackers, e.entry.Name)
+			} else {
+				cfg.Trackers[e.entry.Name] = filtered
+			}
+		} else {
+			cfg.Trackers[e.entry.Name] = copyMap(e.values)
+		}
+	}
+}
+
+// markGeneralOverride marks a general field as explicitly overridden when in
+// project scope. No-op in user scope.
+func (m *SettingsModel) markGeneralOverride(fieldIdx int) {
+	if m.currentScope() != config.ScopeProject {
+		return
+	}
+	switch fieldIdx {
+	case 0:
+		m.projectOverrides[fieldProvider] = true
+	case 1:
+		m.projectOverrides[fieldTracker] = true
+	case 2:
+		m.projectOverrides[fieldAutoZoom] = true
+	case 3:
+		m.projectOverrides[fieldPickerWidth] = true
+	}
+}
+
+// generalStateMarker returns a state marker suffix for a general field in
+// project scope:
+//   - "● project"                      → explicitly overridden in project
+//   - "○ inherit (user: <value>)"      → inheriting from user scope
+//
+// Returns empty string in user scope.
+func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
+	if m.currentScope() != config.ScopeProject {
+		return ""
+	}
+	key := ""
+	switch fieldIdx {
+	case 0:
+		key = fieldProvider
+	case 1:
+		key = fieldTracker
+	case 2:
+		key = fieldAutoZoom
+	case 3:
+		key = fieldPickerWidth
+	}
+	if key == "" {
+		return ""
+	}
+	if m.projectOverrides[key] {
+		return lipgloss.NewStyle().Foreground(primaryColor).Render("  ● project")
+	}
+	// Inheriting — also surface the user value.
+	userVal := ""
+	switch fieldIdx {
+	case 0:
+		userVal = m.userCfg.DefaultProvider
+	case 1:
+		userVal = m.userCfg.DefaultTracker
+	case 2:
+		if m.userCfg.IsAutoZoomEnabled() {
+			userVal = "on"
+		} else {
+			userVal = "off"
+		}
+	case 3:
+		userVal = fmt.Sprintf("%d%%", m.userCfg.GetPickerWidth())
+	}
+	suffix := "  ○ inherit"
+	if userVal != "" {
+		suffix += " (user: " + userVal + ")"
+	}
+	return lipgloss.NewStyle().Foreground(dimColor).Render(suffix)
+}
+
+// trackerFieldStateMarker returns a state marker for a tracker/plugin field
+// in project scope. Empty string otherwise.
+func (m *SettingsModel) trackerFieldStateMarker(entryName, key, currentValue string, isSecret bool) string {
+	if m.currentScope() != config.ScopeProject {
+		return ""
+	}
+	if currentValue != "" {
+		return lipgloss.NewStyle().Foreground(primaryColor).Render("  ● project")
+	}
+	userVal := ""
+	if fields, ok := m.userCfg.Trackers[entryName]; ok {
+		userVal = fields[key]
+	}
+	suffix := "  ○ inherit"
+	if userVal != "" {
+		display := userVal
+		if isSecret {
+			visible := userVal[max(0, len(userVal)-4):]
+			display = strings.Repeat("*", min(len(userVal), 8)) + visible
+		}
+		suffix += " (user: " + display + ")"
+	} else {
+		suffix += " (unset)"
+	}
+	return lipgloss.NewStyle().Foreground(dimColor).Render(suffix)
 }
 
 func (m *SettingsModel) currentScope() config.Scope {
@@ -118,6 +349,10 @@ func (m *SettingsModel) rebuildItems() {
 	if len(m.trackerNames) > 0 {
 		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 1})
 	}
+	// Auto zoom toggle
+	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 2})
+	// Picker width (free-form number input)
+	m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: 3})
 
 	// Plugin fields
 	for ei, e := range m.entries {
@@ -242,12 +477,17 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
 			if item.kind == "scope" {
+				// Save current scope's UI state into its cfg so edits are
+				// preserved when we come back to it (or hit save).
+				m.persistGeneralToScope()
+
 				delta := 1
 				if key == "left" {
 					delta = -1
 				}
 				m.scopeIdx = (m.scopeIdx + delta + len(scopeOptions)) % len(scopeOptions)
-				// Reload built-in entry values from new scope's config
+				// Reload general and built-in entry values from new scope's config.
+				m.loadGeneralFromScope()
 				for i := range m.entries {
 					if m.entries[i].entry.Source != nil {
 						m.entries[i].values = m.builtinValuesFromCfg(m.entries[i].entry)
@@ -266,12 +506,59 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					} else {
 						m.selectedTracker = (m.selectedTracker - 1 + len(m.trackerNames)) % len(m.trackerNames)
 					}
+				} else if item.fieldIdx == 2 {
+					if key == "right" {
+						m.autoZoomIdx = (m.autoZoomIdx + 1) % len(autoZoomOptions)
+					} else {
+						m.autoZoomIdx = (m.autoZoomIdx - 1 + len(autoZoomOptions)) % len(autoZoomOptions)
+					}
 				}
+				m.markGeneralOverride(item.fieldIdx)
+			} else if item.kind == "number" && item.section == -1 && item.fieldIdx == 3 {
+				// ←/→ step picker width by 1, clamped
+				delta := 1
+				if key == "left" {
+					delta = -1
+				}
+				v := parsePickerWidth(m.pickerWidthStr) + delta
+				if v < pickerWidthMin {
+					v = pickerWidthMin
+				}
+				if v > pickerWidthMax {
+					v = pickerWidthMax
+				}
+				m.pickerWidthStr = fmt.Sprintf("%d", v)
+				m.markGeneralOverride(item.fieldIdx)
 			}
 		}
 
 	case "ctrl+s", "enter":
 		return m, m.save()
+
+	case "ctrl+r":
+		// Clear the current field's project override (inherit from user).
+		// Only meaningful in project scope.
+		if m.currentScope() != config.ScopeProject || m.cursor >= len(m.items) {
+			return m, nil
+		}
+		item := m.items[m.cursor]
+		if item.section == -1 && (item.kind == "select" || item.kind == "number") {
+			switch item.fieldIdx {
+			case 0:
+				m.projectOverrides[fieldProvider] = false
+			case 1:
+				m.projectOverrides[fieldTracker] = false
+			case 2:
+				m.projectOverrides[fieldAutoZoom] = false
+			case 3:
+				m.projectOverrides[fieldPickerWidth] = false
+			}
+			m.loadGeneralFromScope()
+		} else if item.kind == "text" {
+			e := &m.entries[item.section]
+			k := e.fields[item.fieldIdx].Key
+			e.values[k] = ""
+		}
 
 	case "backspace":
 		if m.cursor < len(m.items) {
@@ -283,6 +570,9 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if len(v) > 0 {
 					e.values[k] = v[:len(v)-1]
 				}
+			} else if item.kind == "number" && len(m.pickerWidthStr) > 0 {
+				m.pickerWidthStr = m.pickerWidthStr[:len(m.pickerWidthStr)-1]
+				m.markGeneralOverride(item.fieldIdx)
 			}
 		}
 
@@ -293,6 +583,9 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				e := &m.entries[item.section]
 				k := e.fields[item.fieldIdx].Key
 				e.values[k] = ""
+			} else if item.kind == "number" {
+				m.pickerWidthStr = ""
+				m.markGeneralOverride(item.fieldIdx)
 			}
 		}
 
@@ -304,6 +597,12 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					e := &m.entries[item.section]
 					k := e.fields[item.fieldIdx].Key
 					e.values[k] += key
+				} else if item.kind == "number" && key[0] >= '0' && key[0] <= '9' {
+					// Cap length at 3 digits
+					if len(m.pickerWidthStr) < 3 {
+						m.pickerWidthStr += key
+					}
+					m.markGeneralOverride(item.fieldIdx)
 				}
 			}
 		}
@@ -312,31 +611,13 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m SettingsModel) save() tea.Cmd {
-	scope := m.currentScope()
-	targetCfg := m.currentCfg()
+	// Persist the active scope's in-memory state. (The inactive scope's
+	// cfg already holds its latest state because persistGeneralToScope
+	// was called each time we switched away from it.)
+	m.persistGeneralToScope()
 
-	// Update general settings
-	if len(m.providerNames) > 0 {
-		targetCfg.DefaultProvider = m.providerNames[m.selectedProvider]
-	}
-	if len(m.trackerNames) > 0 {
-		targetCfg.DefaultTracker = m.trackerNames[m.selectedTracker]
-	}
-
-	// Update built-in entries in the scope's config
-	if targetCfg.Trackers == nil {
-		targetCfg.Trackers = make(map[string]map[string]string)
-	}
-	for _, e := range m.entries {
-		if e.entry.Source == nil {
-			continue
-		}
-		if e.entry.Category == "tracker" {
-			targetCfg.Trackers[e.entry.Name] = copyMap(e.values)
-		}
-	}
-
-	cfgCopy := *targetCfg
+	userCfg := *m.userCfg
+	projectCfg := *m.projectCfg
 	rootPath := m.rootPath
 
 	type saveItem struct {
@@ -351,7 +632,10 @@ func (m SettingsModel) save() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		config.SaveScope(&cfgCopy, scope, rootPath)
+		config.SaveScope(&userCfg, config.ScopeUser, rootPath)
+		if rootPath != "" {
+			config.SaveScope(&projectCfg, config.ScopeProject, rootPath)
+		}
 		// Plugin configs are always user-scoped (plugin manages its own storage)
 		for _, item := range pluginItems {
 			item.entry.SetValues(item.values)
@@ -375,21 +659,25 @@ func (m SettingsModel) View() string {
 	itemIdx++
 	sections = append(sections, "")
 
-	// General section
-	if len(m.providerNames) > 0 || len(m.trackerNames) > 0 {
+	// General section (always shown — auto_zoom is always present)
+	{
 		header := lipgloss.NewStyle().Padding(0, 2).Render(
 			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("General"),
 		)
 		sections = append(sections, header)
 
 		if len(m.providerNames) > 0 {
-			sections = append(sections, m.renderSelectField(itemIdx, "Default Provider", m.providerNames, m.selectedProvider))
+			sections = append(sections, m.renderSelectField(itemIdx, "Default Provider", m.providerNames, m.selectedProvider)+m.generalStateMarker(0))
 			itemIdx++
 		}
 		if len(m.trackerNames) > 0 {
-			sections = append(sections, m.renderSelectField(itemIdx, "Default Tracker", m.trackerNames, m.selectedTracker))
+			sections = append(sections, m.renderSelectField(itemIdx, "Default Tracker", m.trackerNames, m.selectedTracker)+m.generalStateMarker(1))
 			itemIdx++
 		}
+		sections = append(sections, m.renderSelectField(itemIdx, "Auto Zoom", autoZoomOptions, m.autoZoomIdx)+m.generalStateMarker(2))
+		itemIdx++
+		sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%")+m.generalStateMarker(3))
+		itemIdx++
 		sections = append(sections, "")
 	}
 
@@ -441,6 +729,7 @@ func (m SettingsModel) View() string {
 			}
 
 			row := "  " + indicator + labelStyle.Render(padding+f.Label+": ") + valueStr
+			row += m.trackerFieldStateMarker(e.entry.Name, f.Key, value, f.Secret)
 			sections = append(sections, row)
 			itemIdx++
 		}
@@ -464,7 +753,7 @@ func (m SettingsModel) View() string {
 		lines++
 	}
 
-	hint := " ↑↓/Tab: navigate  ←→: select  Enter: save  Esc: cancel"
+	hint := " ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Enter: save  Esc: cancel"
 	statusBar := statusBarStyle.
 		Width(m.width).
 		Background(lipgloss.Color("236")).
@@ -472,6 +761,56 @@ func (m SettingsModel) View() string {
 		Render(hint)
 
 	return content + "\n" + statusBar
+}
+
+// renderNumberField renders a free-form numeric input with a trailing unit suffix.
+func (m SettingsModel) renderNumberField(itemIdx int, label, value, unit string) string {
+	isCursor := itemIdx == m.cursor
+
+	labelStyle := lipgloss.NewStyle().Foreground(dimColor)
+	indicator := "  "
+	if isCursor {
+		labelStyle = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
+		indicator = lipgloss.NewStyle().Foreground(primaryColor).Render("▸ ")
+	}
+
+	display := value
+	if display == "" {
+		display = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("-")
+	} else {
+		display = lipgloss.NewStyle().Foreground(whiteColor).Render(display)
+	}
+	if isCursor {
+		display += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+	}
+	display += lipgloss.NewStyle().Foreground(dimColor).Render(unit)
+
+	hint := ""
+	if isCursor {
+		hint = lipgloss.NewStyle().Foreground(dimColor).Render(
+			fmt.Sprintf("   (←/→ ±1, range %d–%d)", pickerWidthMin, pickerWidthMax))
+	}
+
+	return "  " + indicator + labelStyle.Render(label+": ") + display + hint
+}
+
+// parsePickerWidth parses s as an int and clamps to the picker-width range.
+// Returns 0 if the input isn't a valid number.
+func parsePickerWidth(s string) int {
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v <= 0 {
+		return 0
+	}
+	if v < pickerWidthMin {
+		return pickerWidthMin
+	}
+	if v > pickerWidthMax {
+		return pickerWidthMax
+	}
+	return v
 }
 
 func (m SettingsModel) renderSelectField(itemIdx int, label string, options []string, selected int) string {

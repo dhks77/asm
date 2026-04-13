@@ -11,7 +11,7 @@ func RenderStatusBar(width int, focused bool, selectedCount int) string {
 	if selectedCount > 0 {
 		keys = fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
 	} else {
-		keys = " ^g: focus  ^t: term  ^n: new  ^k: task  ^p: AI  ^s: settings  ^w: worktree  ^d: remove  ^q: quit"
+		keys = " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
 	}
 
 	bg := lipgloss.Color("236")

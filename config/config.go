@@ -25,6 +25,8 @@ type Config struct {
 	DefaultPath          string                       `toml:"default_path"`
 	GitRefreshInterval   int                          `toml:"git_refresh_interval"`
 	DesktopNotifications *bool                        `toml:"desktop_notifications"`
+	AutoZoom             *bool                        `toml:"auto_zoom"`
+	PickerWidth          int                          `toml:"picker_width"` // picker pane width in %
 	DefaultProvider      string                       `toml:"default_provider"`
 	DefaultTracker       string                       `toml:"default_tracker"`
 	Providers            map[string]ProviderConfig    `toml:"providers"`
@@ -123,6 +125,12 @@ func merge(base, overlay *Config) {
 	if overlay.DesktopNotifications != nil {
 		base.DesktopNotifications = overlay.DesktopNotifications
 	}
+	if overlay.AutoZoom != nil {
+		base.AutoZoom = overlay.AutoZoom
+	}
+	if overlay.PickerWidth != 0 {
+		base.PickerWidth = overlay.PickerWidth
+	}
 	if overlay.DefaultProvider != "" {
 		base.DefaultProvider = overlay.DefaultProvider
 	}
@@ -201,4 +209,27 @@ func (c *Config) IsDesktopNotificationsEnabled() bool {
 		return true // default: enabled
 	}
 	return *c.DesktopNotifications
+}
+
+func (c *Config) IsAutoZoomEnabled() bool {
+	if c.AutoZoom == nil {
+		return true // default: enabled
+	}
+	return *c.AutoZoom
+}
+
+// GetPickerWidth returns the picker pane width in percent, clamped to a
+// sensible range. Defaults to 22 when unset.
+func (c *Config) GetPickerWidth() int {
+	w := c.PickerWidth
+	if w == 0 {
+		w = 22
+	}
+	if w < 10 {
+		w = 10
+	}
+	if w > 50 {
+		w = 50
+	}
+	return w
 }
