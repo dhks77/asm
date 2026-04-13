@@ -225,6 +225,26 @@ func FocusPickingPanel() error {
 	).Run()
 }
 
+// ActivePaneIndex returns the index of the currently active pane in the main
+// window (0 = picker, 1 = working). Returns -1 on error.
+func ActivePaneIndex() int {
+	out, err := exec.Command("tmux", "display-message",
+		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
+		"-p", "#{pane_index}",
+	).Output()
+	if err != nil {
+		return -1
+	}
+	s := strings.TrimSpace(string(out))
+	switch s {
+	case "0":
+		return 0
+	case "1":
+		return 1
+	}
+	return -1
+}
+
 // IsWorkingPanelZoomed reports whether the main window is currently zoomed.
 func IsWorkingPanelZoomed() bool {
 	out, err := exec.Command("tmux", "display-message",
@@ -644,16 +664,48 @@ func GetWindowOption(dirName, key string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// ListDirectoryWindows returns directory names (without "wt-" prefix) of all active directory windows.
-func ListDirectoryWindows() []string {
+// SessionKind is a bitmask of active session types for a given worktree.
+type SessionKind uint8
+
+const (
+	SessionAI   SessionKind = 1 << iota // wt-<name> window
+	SessionTerm                         // term-<name> window
+)
+
+func (k SessionKind) HasAI() bool   { return k&SessionAI != 0 }
+func (k SessionKind) HasTerm() bool { return k&SessionTerm != 0 }
+
+// ListActiveSessions returns per-directory kind flags by inspecting live tmux windows.
+// Keys are directory names (without the wt-/term- prefix); values are bitmasks of
+// kinds that currently have a window. Directories with no active session are
+// omitted. One tmux call, shared by ListDirectoryWindows.
+func ListActiveSessions() map[string]SessionKind {
 	out, err := exec.Command("tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
 	if err != nil {
 		return nil
 	}
-	var result []string
+	result := make(map[string]SessionKind)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.HasPrefix(line, "wt-") {
-			result = append(result, strings.TrimPrefix(line, "wt-"))
+		switch {
+		case strings.HasPrefix(line, "wt-"):
+			name := strings.TrimPrefix(line, "wt-")
+			result[name] |= SessionAI
+		case strings.HasPrefix(line, "term-"):
+			name := strings.TrimPrefix(line, "term-")
+			result[name] |= SessionTerm
+		}
+	}
+	return result
+}
+
+// ListDirectoryWindows returns directory names (without "wt-" prefix) of all active AI
+// directory windows. Kept for callers that only care about AI sessions.
+func ListDirectoryWindows() []string {
+	kinds := ListActiveSessions()
+	var result []string
+	for name, k := range kinds {
+		if k.HasAI() {
+			result = append(result, name)
 		}
 	}
 	return result

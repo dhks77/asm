@@ -1,6 +1,9 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+	asmtmux "github.com/nhn/asm/tmux"
+)
 
 var (
 	// Colors
@@ -75,4 +78,51 @@ var (
 
 	// Completion flash (busy→idle transition)
 	CompletionFlashStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+
+	// Session kind badge ([a] / [t] / [a+t])
+	kindAIColor    = lipgloss.Color("141") // purple — AI
+	kindTermColor  = lipgloss.Color("215") // orange — terminal
+	kindAIStyle    = lipgloss.NewStyle().Foreground(kindAIColor)
+	kindTermStyle  = lipgloss.NewStyle().Foreground(kindTermColor)
+	kindBraceStyle = lipgloss.NewStyle().Foreground(dimColor)
 )
+
+// KindBadgeMaxWidth is the visible-column width of the longest possible badge
+// ("[a+t]"). Used by callers that reserve a fixed column for the badge.
+const KindBadgeMaxWidth = 5
+
+// renderKindBadge renders a lipgloss-styled session kind badge.
+// Returns "" when kind is 0.
+func renderKindBadge(kind asmtmux.SessionKind) string {
+	if kind == 0 {
+		return ""
+	}
+	inner := ""
+	switch {
+	case kind.HasAI() && kind.HasTerm():
+		inner = kindAIStyle.Render("a") + kindBraceStyle.Render("+") + kindTermStyle.Render("t")
+	case kind.HasAI():
+		inner = kindAIStyle.Render("a")
+	case kind.HasTerm():
+		inner = kindTermStyle.Render("t")
+	}
+	return kindBraceStyle.Render("[") + inner + kindBraceStyle.Render("]")
+}
+
+// renderKindBadgeTmux renders the same badge as a tmux format string (uses
+// #[fg=…] codes rather than ANSI), for the status bar.
+func renderKindBadgeTmux(kind asmtmux.SessionKind) string {
+	if kind == 0 {
+		return ""
+	}
+	var inner string
+	switch {
+	case kind.HasAI() && kind.HasTerm():
+		inner = "#[fg=colour141]a#[fg=colour245]+#[fg=colour215]t"
+	case kind.HasAI():
+		inner = "#[fg=colour141]a"
+	case kind.HasTerm():
+		inner = "#[fg=colour215]t"
+	}
+	return "#[fg=colour245][" + inner + "#[fg=colour245]]#[default]"
+}
