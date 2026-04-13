@@ -1187,7 +1187,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 
 func waitForTermExitCmd(dirName string) tea.Cmd {
 	return func() tea.Msg {
-		exec.Command("tmux", "wait-for", asmtmux.TermExitSignalName(dirName)).Run()
+		_ = asmtmux.WaitForTermExit(dirName)
 		return terminalExitedMsg{dirName: dirName}
 	}
 }

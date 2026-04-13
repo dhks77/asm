@@ -1,9 +1,16 @@
 package notification
 
 import (
+	"context"
 	"os/exec"
 	"runtime"
+	"time"
 )
+
+// notifyTimeout bounds each native notification invocation so a hung
+// notification daemon (Notification Center, dbus, etc) can't leak the
+// goroutine fired by Send.
+const notifyTimeout = 5 * time.Second
 
 // Send sends a desktop notification. Best-effort: errors are silently ignored.
 func Send(title, body string) {
@@ -18,12 +25,16 @@ func Send(title, body string) {
 }
 
 func sendDarwin(title, body string) {
+	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+	defer cancel()
 	script := `display notification "` + escapeAppleScript(body) + `" with title "` + escapeAppleScript(title) + `"`
-	exec.Command("osascript", "-e", script).Run() //nolint:errcheck
+	_ = exec.CommandContext(ctx, "osascript", "-e", script).Run()
 }
 
 func sendLinux(title, body string) {
-	exec.Command("notify-send", "-u", "normal", "-t", "5000", title, body).Run() //nolint:errcheck
+	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "notify-send", "-u", "normal", "-t", "5000", title, body).Run()
 }
 
 func sendWindows(title, body string) {
@@ -45,7 +56,9 @@ $xdoc.LoadXml($xml)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xdoc)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("ASM").Show($toast)
 `
-	exec.Command("powershell", "-NoProfile", "-Command", script).Run() //nolint:errcheck
+	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", script).Run()
 }
 
 func escapeAppleScript(s string) string {
