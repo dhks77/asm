@@ -316,39 +316,50 @@ func UnzoomWorkingPanel() error {
 //   line 2: keyboard shortcuts hint
 // Content is set via SetStatusLines / SetShortcutsLine.
 func EnableStatusBar() {
-	exec.Command("tmux", "set-option", "-t", SessionName, "status", "3").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-position", "bottom").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-style", "bg=colour236,fg=colour252").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-left-length", "500").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-right", "").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[0]", "").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[1]", "").Run()
-	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[2]", "").Run()
+	runTmux("set-option", "-t", SessionName, "status", "3")
+	runTmux("set-option", "-t", SessionName, "status-position", "bottom")
+	runTmux("set-option", "-t", SessionName, "status-style", "bg=colour236,fg=colour252")
+	runTmux("set-option", "-t", SessionName, "status-left-length", "500")
+	runTmux("set-option", "-t", SessionName, "status-right", "")
+	runTmux("set-option", "-t", SessionName, "status-format[0]", "")
+	runTmux("set-option", "-t", SessionName, "status-format[1]", "")
+	runTmux("set-option", "-t", SessionName, "status-format[2]", "")
 }
 
 // SetStatusLines writes the two summary lines (current + other sessions).
 // Both accept tmux format strings (e.g. "#[fg=cyan,bold]...#[default]").
 func SetStatusLines(line1, line2 string) {
-	exec.Command("tmux", "set-option", "-t", SessionName,
+	runTmux("set-option", "-t", SessionName,
 		"status-format[0]", "#[align=left]"+line1,
-	).Run()
-	exec.Command("tmux", "set-option", "-t", SessionName,
+	)
+	runTmux("set-option", "-t", SessionName,
 		"status-format[1]", "#[align=left]"+line2,
-	).Run()
+	)
 }
 
 // SetShortcutsLine writes the keyboard shortcuts line (bottom of the status
 // area, full terminal width).
 func SetShortcutsLine(line string) {
-	exec.Command("tmux", "set-option", "-t", SessionName,
+	runTmux("set-option", "-t", SessionName,
 		"status-format[2]", "#[align=left,bg=colour236,fg=colour244]"+line,
-	).Run()
+	)
+}
+
+// runTmux is a best-effort tmux invocation guarded by tmuxCallTimeout so a
+// stuck tmux server can't leak the calling goroutine. Errors are ignored —
+// all current callers are fire-and-forget UI state writes.
+func runTmux(args ...string) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "tmux", args...).Run()
 }
 
 // TerminalWidth returns the attached client's terminal width in columns.
 // Falls back to 120 if it can't be queried.
 func TerminalWidth() int {
-	out, err := exec.Command("tmux", "display-message", "-t", SessionName,
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", SessionName,
 		"-p", "#{client_width}").Output()
 	if err != nil {
 		return 120
@@ -548,7 +559,9 @@ func CapturePaneHistory(dirName string, isDisplayed bool, lines int) (string, er
 	} else {
 		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
 	}
-	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p",
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p",
 		"-S", fmt.Sprintf("-%d", lines)).Output()
 	if err != nil {
 		return "", err
@@ -682,7 +695,9 @@ func SetWindowOption(dirName, key, value string) error {
 // GetWindowOption reads a tmux window option from a directory's window.
 func GetWindowOption(dirName, key string) string {
 	winName := WindowName(dirName)
-	out, err := exec.Command("tmux", "show-option", "-w", "-v",
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "show-option", "-w", "-v",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 		"@"+key,
 	).Output()
@@ -708,7 +723,9 @@ func (k SessionKind) HasTerm() bool { return k&SessionTerm != 0 }
 // kinds that currently have a window. Directories with no active session are
 // omitted. One tmux call, shared by ListDirectoryWindows.
 func ListActiveSessions() map[string]SessionKind {
-	out, err := exec.Command("tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
 	if err != nil {
 		return nil
 	}
