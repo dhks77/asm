@@ -70,6 +70,7 @@ type PickerModel struct {
 	worktreeProviders  map[string]string // worktree name -> provider name
 	registry           *provider.Registry
 	sessionStartTimes  map[string]time.Time
+	terminalStartTimes map[string]time.Time
 	flashItems         map[string]time.Time
 	spinnerFrame       int
 	scrollTick     int
@@ -103,6 +104,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		worktreeProviders:  make(map[string]string),
 		registry:           registry,
 		sessionStartTimes:  make(map[string]time.Time),
+		terminalStartTimes: make(map[string]time.Time),
 		flashItems:         make(map[string]time.Time),
 		selectedItems:  make(map[string]bool),
 		batchConfirm:     NewBatchConfirmModel(),
@@ -112,7 +114,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 }
 
 // filteredDirectories returns indices into m.directories matching the current search query.
-// Active sessions (AI window open) are sorted first, preserving original order within each group.
+// Active sessions (AI or terminal window open) are sorted first, preserving original order within each group.
 func (m *PickerModel) filteredDirectories() []int {
 	var matched []int
 	if m.searchQuery == "" {
@@ -142,14 +144,11 @@ func (m *PickerModel) filteredDirectories() []int {
 		}
 	}
 
-	// Partition: active sessions first, inactive after. Preserves internal order.
-	activeSet := make(map[string]bool)
-	for _, name := range asmtmux.ListDirectoryWindows() {
-		activeSet[name] = true
-	}
+	// Partition: active sessions (AI or terminal) first, inactive after. Preserves internal order.
+	activeKinds := asmtmux.ListActiveSessions()
 	var active, inactive []int
 	for _, i := range matched {
-		if activeSet[m.directories[i].Name] {
+		if activeKinds[m.directories[i].Name] != 0 {
 			active = append(active, i)
 		} else {
 			inactive = append(inactive, i)
@@ -211,13 +210,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		var cmds []tea.Cmd
-		activeWindows := asmtmux.ListDirectoryWindows()
-		activeSet := make(map[string]bool)
-		for _, name := range activeWindows {
-			activeSet[name] = true
-		}
+		activeKinds := asmtmux.ListActiveSessions()
 		for _, wt := range m.directories {
-			if activeSet[wt.Name] {
+			kind := activeKinds[wt.Name]
+			if kind.HasAI() {
 				if _, tracked := m.sessionStartTimes[wt.Name]; !tracked {
 					m.sessionStartTimes[wt.Name] = time.Now()
 				}
@@ -231,6 +227,11 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				cmds = append(cmds, m.fetchProviderState(wt.Name))
+			}
+			if kind.HasTerm() {
+				if _, tracked := m.terminalStartTimes[wt.Name]; !tracked {
+					m.terminalStartTimes[wt.Name] = time.Now()
+				}
 			}
 		}
 		m.stabilizeCursor(cursorWT)
@@ -341,6 +342,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if asmtmux.WindowExists(termWinName) {
 			asmtmux.KillTerminalWindow(wt.Name)
 		}
+		delete(m.terminalStartTimes, wt.Name)
 		return m, m.removeDirectory(wt)
 
 	case BatchConfirmedMsg:
@@ -454,6 +456,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.termDir = ""
 		}
 		asmtmux.KillTerminalWindow(msg.dirName)
+		delete(m.terminalStartTimes, msg.dirName)
 		if isDisplayed {
 			// Show AI session for this directory if it exists
 			winName := asmtmux.WindowName(msg.dirName)
@@ -505,13 +508,25 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.startSession(wt, m.registry.Default().Name())
 		}
 
-	case "f12": // Ctrl+t: toggle terminal
-		if m.workingDir != "" || m.termDir != "" {
-			return m, m.toggleTerminal()
+	case "f12": // Ctrl+t: open / focus / toggle terminal.
+		// Source-pane aware:
+		//   - picker pane: target = cursor's worktree
+		//   - working pane: target = whatever session owns the working panel
+		// When target == current working panel session → toggle AI↔Term.
+		// Otherwise → switch the working panel to target's terminal.
+		if asmtmux.ActivePaneIndex() == 1 {
+			// From the working pane: act on the session currently fronted.
+			if m.workingDir != "" || m.termDir != "" {
+				return m, m.toggleTerminal()
+			}
+			// Nothing in working panel — fall through to cursor behavior.
 		}
 		wt := m.selectedDirectory()
 		if wt == nil {
 			return m, nil
+		}
+		if m.workingDir == wt.Name || m.termDir == wt.Name {
+			return m, m.toggleTerminal()
 		}
 		return m, m.switchToTerminal(wt)
 
@@ -737,6 +752,7 @@ func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
 			}
 			asmtmux.KillTerminalWindow(name)
 		}
+		delete(m.terminalStartTimes, name)
 	}
 
 	var toRemove []worktree.Worktree
@@ -933,6 +949,7 @@ func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	termWin := asmtmux.TerminalWindowName(wt.Name)
 	if !asmtmux.WindowExists(termWin) {
 		asmtmux.CreateTerminalWindow(wt.Name, wt.Path)
+		m.terminalStartTimes[wt.Name] = time.Now()
 		cmd = waitForTermExitCmd(wt.Name)
 	}
 
@@ -964,6 +981,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		termWin := asmtmux.TerminalWindowName(wtName)
 		if !asmtmux.WindowExists(termWin) {
 			asmtmux.CreateTerminalWindow(wtName, wtPath)
+			m.terminalStartTimes[wtName] = time.Now()
 			cmd = waitForTermExitCmd(wtName)
 		}
 		asmtmux.SwapTermToWorkingPanel(wtName)
@@ -1123,25 +1141,23 @@ func (m *PickerModel) rotateSession(delta int) tea.Cmd {
 const (
 	statusLine2NameWidth  = 20 // worktree/task name in the all-sessions row
 	statusLine2StateWidth = 10 // state label column
+	statusLine2KindWidth  = 5  // " [a+t]" badge column (width of "[a+t]")
 	statusLine1NameWidth  = 24 // folder name on the current-session line
 	// Task name width is computed dynamically based on terminal width; this
 	// is the minimum fallback used when we can't query tmux.
 	statusLine1TaskMinWidth = 60
-	// Fixed chrome cost on line 1 (icon, separators, state, elapsed, padding).
-	statusLine1ChromeWidth = 50
+	// Fixed chrome cost on line 1 (icon, separators, state, elapsed, badge, padding).
+	statusLine1ChromeWidth = 58
 )
 
 // refreshStatusSummary rebuilds the three-line bottom-bar (summary + shortcuts)
 // and pushes it to tmux. Called on scrollTick (200ms). Skips the tmux write if
 // the rendered strings haven't changed.
 func (m *PickerModel) refreshStatusSummary() {
-	activeSet := make(map[string]bool)
-	for _, n := range asmtmux.ListDirectoryWindows() {
-		activeSet[n] = true
-	}
+	activeKinds := asmtmux.ListActiveSessions()
 
-	line1 := m.buildLine1(activeSet)
-	line2 := m.buildLine2(activeSet)
+	line1, line1Target := m.buildLine1(activeKinds)
+	line2 := m.buildLine2(activeKinds, line1Target)
 	shortcuts := renderShortcutsPlain(len(m.selectedItems))
 
 	combined := line1 + "\x00" + line2 + "\x00" + shortcuts
@@ -1168,22 +1184,40 @@ func renderShortcutsPlain(selectedCount int) string {
 	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
 }
 
-// buildLine1 returns the detailed line for the currently displayed session.
-// If nothing is in the working panel, falls back to the first active session.
-func (m *PickerModel) buildLine1(activeSet map[string]bool) string {
-	target := m.workingDir
-	if target == "" || !activeSet[target] {
-		// Fall back to first active in scan order
+// buildLine1 returns the detailed line for the currently displayed session and
+// the resolved target name (so line2 can skip it). Resolution order:
+//  1. m.workingDir (AI currently in working panel)
+//  2. m.termDir    (terminal currently in working panel)
+//  3. first active session in scan order (AI preferred, then terminal)
+func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (string, string) {
+	target := ""
+	var targetKind asmtmux.SessionKind
+	switch {
+	case m.workingDir != "" && activeKinds[m.workingDir] != 0:
+		target = m.workingDir
+	case m.termDir != "" && activeKinds[m.termDir] != 0:
+		target = m.termDir
+	default:
+		// Fallback: first active AI, else first active terminal, in scan order
 		for _, wt := range m.directories {
-			if activeSet[wt.Name] {
+			if activeKinds[wt.Name].HasAI() {
 				target = wt.Name
 				break
 			}
 		}
+		if target == "" {
+			for _, wt := range m.directories {
+				if activeKinds[wt.Name].HasTerm() {
+					target = wt.Name
+					break
+				}
+			}
+		}
 	}
 	if target == "" {
-		return ""
+		return "", ""
 	}
+	targetKind = activeKinds[target]
 
 	var wt *worktree.Worktree
 	for i := range m.directories {
@@ -1193,8 +1227,14 @@ func (m *PickerModel) buildLine1(activeSet map[string]bool) string {
 		}
 	}
 	if wt == nil {
-		return ""
+		return "", ""
 	}
+
+	// What is displayed determines which columns we fill. If working panel has the
+	// AI session (or no panel selection and an AI exists), show AI state. Otherwise
+	// the terminal is what the user sees: no task/state, but badge still reflects
+	// the full kind (so a worktree with a+t shows "[a+t]" even when term is fronted).
+	displayingTerm := (m.workingDir == "" && m.termDir == target) || !targetKind.HasAI()
 
 	// Compute the task-name column width to fill the available terminal width.
 	taskWidth := asmtmux.TerminalWidth() - statusLine1ChromeWidth - statusLine1NameWidth
@@ -1205,7 +1245,12 @@ func (m *PickerModel) buildLine1(activeSet map[string]bool) string {
 	// Folder name (fixed width, scrolled if longer)
 	folder := padToWidth(tmuxEscape(scrollText(wt.Name, statusLine1NameWidth, m.scrollTick)), statusLine1NameWidth)
 
+	// Kind badge (padded to fixed width to avoid jitter)
+	badge := padToWidth(renderKindBadgeTmux(targetKind), statusLine2KindWidth)
+
 	// Task name (dynamic width, scrolled if longer). Empty if not resolved.
+	// Task metadata belongs to the worktree, so we show it regardless of which
+	// session (AI vs terminal) is currently fronted.
 	taskRaw := ""
 	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
 		taskRaw = info.Name
@@ -1217,36 +1262,48 @@ func (m *PickerModel) buildLine1(activeSet map[string]bool) string {
 		taskPart = padToWidth("", taskWidth)
 	}
 
-	// State + color
-	stateLabel, stateColor := m.stateLabelColor(wt.Name)
+	// State + color (blank when terminal is displayed — terminal has no provider state)
+	stateLabel, stateColor := "", "colour244"
+	if !displayingTerm {
+		stateLabel, stateColor = m.stateLabelColor(wt.Name)
+	}
 	statePart := padToWidth(stateLabel, statusLine2StateWidth)
 
-	// Elapsed
+	// Elapsed — AI session time when AI is displayed, else terminal open time.
 	elapsed := ""
-	if t, ok := m.sessionStartTimes[wt.Name]; ok {
-		elapsed = formatElapsed(time.Since(t))
+	if displayingTerm {
+		if t, ok := m.terminalStartTimes[wt.Name]; ok {
+			elapsed = formatElapsed(time.Since(t))
+		}
+	} else {
+		if t, ok := m.sessionStartTimes[wt.Name]; ok {
+			elapsed = formatElapsed(time.Since(t))
+		}
 	}
 	elapsedPart := padToWidth(elapsed, 6)
 
 	// Render with tmux format codes
 	icon := "#[fg=colour81,bold]▶#[default]"
 	sep := "#[fg=colour240]│#[default]"
-	return fmt.Sprintf(" %s #[fg=colour252,bold]%s#[default] %s #[fg=colour141]%s#[default] %s #[fg=%s,bold]%s#[default] #[fg=colour244]%s#[default] ",
-		icon, folder, sep, taskPart, sep, stateColor, statePart, elapsedPart)
+	return fmt.Sprintf(" %s #[fg=colour252,bold]%s#[default] %s %s #[fg=colour141]%s#[default] %s #[fg=%s,bold]%s#[default] #[fg=colour244]%s#[default] ",
+		icon, folder, badge, sep, taskPart, sep, stateColor, statePart, elapsedPart), target
 }
 
 // buildLine2 returns the other-active-sessions overview (excludes the session
-// shown on line 1 to avoid duplication) with fixed-width items.
-func (m *PickerModel) buildLine2(activeSet map[string]bool) string {
+// shown on line 1 to avoid duplication) with fixed-width items. One row per
+// worktree: a worktree with both AI and terminal collapses into a single
+// "[a+t]" item.
+func (m *PickerModel) buildLine2(activeKinds map[string]asmtmux.SessionKind, line1Target string) string {
 	var items []string
 	for _, wt := range m.directories {
-		if !activeSet[wt.Name] {
+		kind := activeKinds[wt.Name]
+		if kind == 0 {
 			continue
 		}
-		if wt.Name == m.workingDir {
+		if wt.Name == line1Target {
 			continue
 		}
-		items = append(items, m.renderStatusItem(wt))
+		items = append(items, m.renderStatusItem(wt, kind))
 	}
 	if len(items) == 0 {
 		return ""
@@ -1256,7 +1313,9 @@ func (m *PickerModel) buildLine2(activeSet map[string]bool) string {
 }
 
 // renderStatusItem renders one active session as a fixed-width tmux format string.
-func (m *PickerModel) renderStatusItem(wt worktree.Worktree) string {
+// kind is the full bitmask for the worktree; used to render the [a]/[t]/[a+t] badge.
+// Provider state is shown only when the worktree has an AI session.
+func (m *PickerModel) renderStatusItem(wt worktree.Worktree, kind asmtmux.SessionKind) string {
 	// Name: task name if resolved, otherwise folder name
 	rawName := wt.Name
 	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
@@ -1266,22 +1325,20 @@ func (m *PickerModel) renderStatusItem(wt worktree.Worktree) string {
 	displayName = tmuxEscape(displayName)
 	displayName = padToWidth(displayName, statusLine2NameWidth)
 
-	stateLabel, stateColor := m.stateLabelColor(wt.Name)
+	// State only meaningful for AI sessions; terminal-only rows leave it blank.
+	stateLabel, stateColor := "", "colour244"
+	if kind.HasAI() {
+		stateLabel, stateColor = m.stateLabelColor(wt.Name)
+	}
 	statePadded := padToWidth(stateLabel, statusLine2StateWidth)
 
-	// Icon + name style: current session gets highlight
-	isCurrent := wt.Name == m.workingDir
-	var iconPart, nameColor string
-	if isCurrent {
-		iconPart = "#[fg=colour81,bold]▶#[default]"
-		nameColor = "colour252,bold"
-	} else {
-		iconPart = "#[fg=colour42]●#[default]"
-		nameColor = "colour252"
-	}
+	badge := padToWidth(renderKindBadgeTmux(kind), statusLine2KindWidth)
 
-	return fmt.Sprintf("%s #[fg=%s]%s#[default] #[fg=%s]%s#[default]",
-		iconPart, nameColor, displayName, stateColor, statePadded)
+	iconPart := "#[fg=colour42]●#[default]"
+	nameColor := "colour252"
+
+	return fmt.Sprintf("%s #[fg=%s]%s#[default] %s #[fg=%s]%s#[default]",
+		iconPart, nameColor, displayName, badge, stateColor, statePadded)
 }
 
 // stateLabelColor returns the provider-state label and tmux color code for a session.
@@ -1378,11 +1435,7 @@ func (m PickerModel) View() string {
 		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
 	}
 
-	activeWindows := asmtmux.ListDirectoryWindows()
-	activeSet := make(map[string]bool)
-	for _, name := range activeWindows {
-		activeSet[name] = true
-	}
+	activeKinds := asmtmux.ListActiveSessions()
 
 	filtered := m.filteredDirectories()
 
@@ -1394,7 +1447,7 @@ func (m PickerModel) View() string {
 	items := make([]renderedItem, len(filtered))
 	for fi, wi := range filtered {
 		wt := m.directories[wi]
-		text := m.renderItem(fi, wt, activeSet[wt.Name])
+		text := m.renderItem(fi, wt, activeKinds[wt.Name])
 		items[fi] = renderedItem{text: text, lineCount: strings.Count(text, "\n") + 1}
 	}
 
@@ -1458,8 +1511,9 @@ func (m PickerModel) View() string {
 	return view
 }
 
-func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool) string {
+func (m PickerModel) renderItem(index int, wt worktree.Worktree, kind asmtmux.SessionKind) string {
 	isSelected := index == m.cursor
+	hasSession := kind != 0
 
 	dimmed := !m.focused && !isSelected
 
@@ -1509,12 +1563,19 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 		}
 	}
 
+	// Kind badge is rendered on the state sub-line (see below), not on the
+	// primary name line, to keep the name row uncluttered.
+	kindBadge := renderKindBadge(kind)
+
 	// Calculate available width for primary name
 	prefixWidth := 2 // indicator(1) + space(1)
 	if inSelectionMode {
 		prefixWidth += 2 // checkbox(1) + space(1)
 	}
 	maxNameWidth := m.width - prefixWidth
+	if maxNameWidth < 1 {
+		maxNameWidth = 1
+	}
 
 	var rawName string
 	if hasTask {
@@ -1532,7 +1593,8 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 
 	// State as sub-line (prepend to subLines)
 	var stateLine string
-	if hasSession {
+	switch {
+	case kind.HasAI():
 		if _, flashing := m.flashItems[wt.Name]; flashing {
 			stateLine = CompletionFlashStyle.Render("✓ done!")
 		} else if state, ok := m.providerStates[wt.Name]; ok {
@@ -1547,8 +1609,20 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, hasSession bool
 				stateLine = badge
 			}
 		}
-	} else {
+	case kind.HasTerm():
+		// Terminal-only session: show elapsed time from terminal open.
+		if startTime, ok := m.terminalStartTimes[wt.Name]; ok {
+			stateLine = ElapsedTimeStyle.Render(formatElapsed(time.Since(startTime)))
+		}
+	default:
 		stateLine = ClosedStateStyle.Render("closed")
+	}
+	if kindBadge != "" {
+		if stateLine != "" {
+			stateLine = kindBadge + " " + stateLine
+		} else {
+			stateLine = kindBadge
+		}
 	}
 	if stateLine != "" {
 		subLines = append([]string{stateLine}, subLines...)
