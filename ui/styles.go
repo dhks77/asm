@@ -12,6 +12,10 @@ var (
 	activeColor    = lipgloss.Color("42")  // green
 	dimColor       = lipgloss.Color("245")
 	whiteColor     = lipgloss.Color("255")
+	dangerColor    = lipgloss.Color("196") // red — errors, destructive actions
+	warnColor      = lipgloss.Color("220") // yellow — warnings, busy state
+	dialogBgColor  = lipgloss.Color("236") // dark grey — footer bar background
+	dialogFgColor  = lipgloss.Color("252") // light grey — footer bar text
 
 	// Panel borders
 	activeBorderStyle = lipgloss.NewStyle().

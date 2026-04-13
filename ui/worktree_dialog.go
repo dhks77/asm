@@ -489,7 +489,7 @@ func (m WorktreeRunnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m WorktreeRunnerModel) View() string {
 	if m.err != "" {
-		title := renderDialogTitle("Error", lipgloss.Color("196"))
+		title := renderDialogTitle("Error", dangerColor)
 
 		body := lipgloss.NewStyle().
 			Padding(0, 2).
@@ -556,7 +556,7 @@ func (m WorktreeDialogModel) renderFullScreen(title, subtitle, filterLine string
 func (m WorktreeDialogModel) viewSelectBranch() string {
 	var rows []string
 	if m.err != "" {
-		rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err))
+		rows = append(rows, lipgloss.NewStyle().Foreground(dangerColor).Render(m.err))
 	} else if len(m.branches) == 0 {
 		rows = append(rows, lipgloss.NewStyle().Foreground(dimColor).Render("Loading branches..."))
 	} else if len(m.filtered) == 0 {

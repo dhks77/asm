@@ -103,7 +103,7 @@ func (m BatchConfirmModel) View() string {
 
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("196")).
+		Foreground(dangerColor).
 		Render(titleText)
 
 	var body strings.Builder
@@ -131,7 +131,7 @@ func (m BatchConfirmModel) View() string {
 		style := lipgloss.NewStyle().Padding(0, 2)
 		if i == m.cursor {
 			style = style.
-				Background(lipgloss.Color("196")).
+				Background(dangerColor).
 				Foreground(lipgloss.Color("0")).
 				Bold(true)
 		} else {
@@ -147,7 +147,7 @@ func (m BatchConfirmModel) View() string {
 
 	dialogStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("196")).
+		BorderForeground(dangerColor).
 		Padding(1, 2).
 		Width(min(50, m.width-4))
 

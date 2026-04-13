@@ -645,11 +645,7 @@ func (m SettingsModel) save() tea.Cmd {
 }
 
 func (m SettingsModel) View() string {
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		Padding(1, 2).
-		Render("Settings")
+	title := renderDialogTitle("Settings", primaryColor)
 
 	itemIdx := 0
 	var sections []string
@@ -737,7 +733,7 @@ func (m SettingsModel) View() string {
 	content := title + "\n\n" + strings.Join(sections, "\n")
 
 	if m.err != "" {
-		content += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("196")).Render(m.err)
+		content += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dangerColor).Render(m.err)
 	}
 
 	content = padToHeight(content, m.height-3)

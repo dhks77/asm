@@ -66,9 +66,6 @@ func (m DeleteModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m DeleteModel) View() string {
-	dangerColor := lipgloss.Color("196")
-	warnColor := lipgloss.Color("220")
-
 	title := renderDialogTitle("Remove Directory", dangerColor)
 
 	var info string

@@ -14,8 +14,8 @@ func RenderStatusBar(width int, focused bool, selectedCount int) string {
 		keys = " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
 	}
 
-	bg := lipgloss.Color("236")
-	fg := lipgloss.Color("252")
+	bg := dialogBgColor
+	fg := dialogFgColor
 	if !focused {
 		fg = lipgloss.Color("240")
 	}
