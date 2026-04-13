@@ -321,7 +321,8 @@ func runIDESelect(ides []ide.IDE) {
 func runSettings(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
 	plugins := collectConfigurablePlugins(registry, t)
 	trackerNames := append(tracker.BuiltinNames(), tracker.ListNames(config.TrackerDir())...)
-	model := ui.NewSettingsModel(cfg, rootPath, registry.Names(), trackerNames, plugins)
+	ideNames := ide.Names(buildIDEs(cfg))
+	model := ui.NewSettingsModel(cfg, rootPath, registry.Names(), trackerNames, ideNames, plugins)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

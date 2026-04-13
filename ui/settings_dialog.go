@@ -44,7 +44,12 @@ const (
 	fieldTracker     = "tracker"
 	fieldAutoZoom    = "autoZoom"
 	fieldPickerWidth = "pickerWidth"
+	fieldIDE         = "ide"
 )
+
+// ideNoneLabel is the sentinel shown at index 0 of the Default IDE
+// select, meaning "don't pick a default — always show the selector".
+const ideNoneLabel = "(none)"
 
 type SettingsModel struct {
 	userCfg    *config.Config // user-level raw config
@@ -55,8 +60,12 @@ type SettingsModel struct {
 
 	providerNames    []string
 	trackerNames     []string
+	// ideNames is the display list for Default IDE. Index 0 is always
+	// ideNoneLabel; indices 1.. are the configured IDEs in order.
+	ideNames         []string
 	selectedProvider int
 	selectedTracker  int
+	selectedIDE      int    // 0 = none, 1+ = ideNames[i]
 	autoZoomIdx      int    // 0=on, 1=off
 	pickerWidthStr   string // free-form percentage input (e.g. "22")
 
@@ -73,7 +82,7 @@ type SettingsModel struct {
 	err    string
 }
 
-func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string, trackerNames []string, plugins []plugincfg.Entry) SettingsModel {
+func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string, trackerNames []string, ideNames []string, plugins []plugincfg.Entry) SettingsModel {
 	userCfg, _ := config.LoadScope(config.ScopeUser, rootPath)
 	projectCfg, _ := config.LoadScope(config.ScopeProject, rootPath)
 
@@ -82,6 +91,10 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 		entries[i] = settingsEntry{entry: p}
 	}
 
+	// Prepend "(none)" so the user can explicitly choose "no default" and
+	// always see the IDE selector.
+	displayIDEs := append([]string{ideNoneLabel}, ideNames...)
+
 	m := SettingsModel{
 		userCfg:       userCfg,
 		projectCfg:    projectCfg,
@@ -89,11 +102,13 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 		entries:       entries,
 		providerNames: providerNames,
 		trackerNames:  trackerNames,
+		ideNames:      displayIDEs,
 		projectOverrides: map[string]bool{
 			fieldProvider:    projectCfg.DefaultProvider != "",
 			fieldTracker:     projectCfg.DefaultTracker != "",
 			fieldAutoZoom:    projectCfg.AutoZoom != nil,
 			fieldPickerWidth: projectCfg.PickerWidth != 0,
+			fieldIDE:         projectCfg.DefaultIDE != "",
 		},
 	}
 	// Default to project scope when a project context exists so overrides
@@ -137,6 +152,20 @@ func (m *SettingsModel) loadGeneralFromScope() {
 		}
 	}
 
+	ideName := m.projectCfg.DefaultIDE
+	if !isProject || !m.projectOverrides[fieldIDE] {
+		ideName = m.userCfg.DefaultIDE
+	}
+	m.selectedIDE = 0 // default to "(none)"
+	if ideName != "" {
+		for i, n := range m.ideNames {
+			if n == ideName {
+				m.selectedIDE = i
+				break
+			}
+		}
+	}
+
 	azEnabled := m.userCfg.IsAutoZoomEnabled()
 	if isProject && m.projectOverrides[fieldAutoZoom] {
 		azEnabled = m.projectCfg.IsAutoZoomEnabled()
@@ -172,6 +201,11 @@ func (m *SettingsModel) persistGeneralToScope() {
 		} else {
 			cfg.DefaultTracker = ""
 		}
+		if m.projectOverrides[fieldIDE] && m.selectedIDE > 0 {
+			cfg.DefaultIDE = m.ideNames[m.selectedIDE]
+		} else {
+			cfg.DefaultIDE = ""
+		}
 		if m.projectOverrides[fieldAutoZoom] {
 			azOn := m.autoZoomIdx == 0
 			cfg.AutoZoom = &azOn
@@ -193,6 +227,11 @@ func (m *SettingsModel) persistGeneralToScope() {
 		}
 		if len(m.trackerNames) > 0 {
 			cfg.DefaultTracker = m.trackerNames[m.selectedTracker]
+		}
+		if m.selectedIDE > 0 {
+			cfg.DefaultIDE = m.ideNames[m.selectedIDE]
+		} else {
+			cfg.DefaultIDE = ""
 		}
 		azOn := m.autoZoomIdx == 0
 		cfg.AutoZoom = &azOn
@@ -242,6 +281,8 @@ func (m *SettingsModel) markGeneralOverride(fieldIdx int) {
 		m.projectOverrides[fieldAutoZoom] = true
 	case 3:
 		m.projectOverrides[fieldPickerWidth] = true
+	case 4:
+		m.projectOverrides[fieldIDE] = true
 	}
 }
 
@@ -265,6 +306,8 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 		key = fieldAutoZoom
 	case 3:
 		key = fieldPickerWidth
+	case 4:
+		key = fieldIDE
 	}
 	if key == "" {
 		return ""
@@ -287,6 +330,12 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 		}
 	case 3:
 		userVal = fmt.Sprintf("%d%%", m.userCfg.GetPickerWidth())
+	case 4:
+		if m.userCfg.DefaultIDE != "" {
+			userVal = m.userCfg.DefaultIDE
+		} else {
+			userVal = ideNoneLabel
+		}
 	}
 	suffix := "  ○ inherit"
 	if userVal != "" {
@@ -348,6 +397,11 @@ func (m *SettingsModel) rebuildItems() {
 	}
 	if len(m.trackerNames) > 0 {
 		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 1})
+	}
+	// Default IDE — (none) at index 0 disables the default and always
+	// shows the selector on Ctrl+e.
+	if len(m.ideNames) > 1 {
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 4})
 	}
 	// Auto zoom toggle
 	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 2})
@@ -512,6 +566,12 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					} else {
 						m.autoZoomIdx = (m.autoZoomIdx - 1 + len(autoZoomOptions)) % len(autoZoomOptions)
 					}
+				} else if item.fieldIdx == 4 && len(m.ideNames) > 0 {
+					if key == "right" {
+						m.selectedIDE = (m.selectedIDE + 1) % len(m.ideNames)
+					} else {
+						m.selectedIDE = (m.selectedIDE - 1 + len(m.ideNames)) % len(m.ideNames)
+					}
 				}
 				m.markGeneralOverride(item.fieldIdx)
 			} else if item.kind == "number" && item.section == -1 && item.fieldIdx == 3 {
@@ -552,6 +612,8 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.projectOverrides[fieldAutoZoom] = false
 			case 3:
 				m.projectOverrides[fieldPickerWidth] = false
+			case 4:
+				m.projectOverrides[fieldIDE] = false
 			}
 			m.loadGeneralFromScope()
 		} else if item.kind == "text" {
@@ -668,6 +730,10 @@ func (m SettingsModel) View() string {
 		}
 		if len(m.trackerNames) > 0 {
 			sections = append(sections, m.renderSelectField(itemIdx, "Default Tracker", m.trackerNames, m.selectedTracker)+m.generalStateMarker(1))
+			itemIdx++
+		}
+		if len(m.ideNames) > 1 {
+			sections = append(sections, m.renderSelectField(itemIdx, "Default IDE", m.ideNames, m.selectedIDE)+m.generalStateMarker(4))
 			itemIdx++
 		}
 		sections = append(sections, m.renderSelectField(itemIdx, "Auto Zoom", autoZoomOptions, m.autoZoomIdx)+m.generalStateMarker(2))
