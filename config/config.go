@@ -21,6 +21,12 @@ type ProviderConfig struct {
 	Args    []string `toml:"args"`
 }
 
+// IDEConfig overrides a built-in IDE launcher or registers a new one.
+type IDEConfig struct {
+	Command string   `toml:"command"`
+	Args    []string `toml:"args"`
+}
+
 type Config struct {
 	DefaultPath          string                       `toml:"default_path"`
 	GitRefreshInterval   int                          `toml:"git_refresh_interval"`
@@ -31,6 +37,9 @@ type Config struct {
 	DefaultTracker       string                       `toml:"default_tracker"`
 	Providers            map[string]ProviderConfig    `toml:"providers"`
 	Trackers             map[string]map[string]string `toml:"trackers"`
+	IDEs                 map[string]IDEConfig         `toml:"ides"`
+	// DefaultIDE, if set, skips the IDE selector and opens directly.
+	DefaultIDE string `toml:"default_ide"`
 }
 
 func homeDir() string {
@@ -137,6 +146,9 @@ func merge(base, overlay *Config) {
 	if overlay.DefaultTracker != "" {
 		base.DefaultTracker = overlay.DefaultTracker
 	}
+	if overlay.DefaultIDE != "" {
+		base.DefaultIDE = overlay.DefaultIDE
+	}
 
 	// Merge Providers (wholesale per key)
 	if len(overlay.Providers) > 0 {
@@ -145,6 +157,16 @@ func merge(base, overlay *Config) {
 		}
 		for k, v := range overlay.Providers {
 			base.Providers[k] = v
+		}
+	}
+
+	// Merge IDEs (wholesale per key)
+	if len(overlay.IDEs) > 0 {
+		if base.IDEs == nil {
+			base.IDEs = make(map[string]IDEConfig)
+		}
+		for k, v := range overlay.IDEs {
+			base.IDEs[k] = v
 		}
 	}
 

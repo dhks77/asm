@@ -142,6 +142,11 @@ func CreateSession(pickerCmd string) error {
 		"send-keys", "-t", target, "F1",
 	).Run()
 
+	// Ctrl+e: open cursor worktree in an IDE (sends F2 to picker).
+	exec.Command("tmux", "bind-key", "-T", "root", "C-e",
+		"send-keys", "-t", target, "F2",
+	).Run()
+
 	// Enable focus events so Bubble Tea can detect pane focus/blur
 	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()
 

@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/notification"
 	"github.com/nhn/asm/provider"
 	"github.com/nhn/asm/tracker"
@@ -87,6 +88,7 @@ type PickerModel struct {
 	termDir        string // directory shown in working panel (terminal)
 	tracker        tracker.Tracker
 	taskCache      *tracker.PathCache
+	ides           []ide.IDE
 	// cachedBranches tracks the branch each seeded taskInfo was observed
 	// under; we invalidate the seed when GitStatus reveals a different branch.
 	cachedBranches map[string]string
@@ -104,7 +106,7 @@ type PickerModel struct {
 	statusBarEnabled  bool
 }
 
-func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache) PickerModel {
+func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) PickerModel {
 	return PickerModel{
 		cfg:            cfg,
 		rootPath:       rootPath,
@@ -122,6 +124,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		tracker:           t,
 		taskCache:        taskCache,
 		cachedBranches:    make(map[string]string),
+		ides:              ides,
 		focused:        true,
 	}
 }
@@ -373,6 +376,12 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case BatchCancelledMsg:
 		return m, nil
+
+	case ideSelectDoneMsg:
+		if msg.IDEName == "" || msg.Path == "" {
+			return m, nil
+		}
+		return m, m.openWorktreeInIDE(msg.Path, msg.IDEName)
 
 	case providerSelectDoneMsg:
 		if msg.ProviderName == "" {
@@ -665,6 +674,23 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f1": // Ctrl+] : rotate to next active session (cyclic)
 		return m, m.rotateSession(+1)
 
+	case "f2": // Ctrl+e: open cursor worktree in an IDE (shows selector)
+		wt := m.contextDirectory()
+		if wt == nil || len(m.ides) == 0 {
+			return m, nil
+		}
+		// If only one IDE is configured, skip the selector entirely.
+		if len(m.ides) == 1 {
+			return m, m.openWorktreeInIDE(wt.Path, m.ides[0].Name)
+		}
+		// If DefaultIDE is set and matches a known IDE, skip selector.
+		if m.cfg != nil && m.cfg.DefaultIDE != "" {
+			if found := ide.Find(m.ides, m.cfg.DefaultIDE); found != nil {
+				return m, m.openWorktreeInIDE(wt.Path, found.Name)
+			}
+		}
+		return m, m.openIDESelect(wt.Path)
+
 	case "f3", "o": // Ctrl+o / o: Open task URL in browser
 		if key == "o" && len(m.selectedItems) > 0 {
 			break // fall through to search in selection mode
@@ -951,6 +977,41 @@ func (m *PickerModel) openProviderSelect() tea.Cmd {
 		}
 		return providerSelectDoneMsg{}
 	})
+}
+
+// openIDESelect runs the IDE selector in the working panel. The selected
+// IDE name comes back via a tmux session option and is wired through
+// ideSelectDoneMsg — which carries the worktree path so the handler can
+// launch the IDE against it.
+func (m *PickerModel) openIDESelect(wtPath string) tea.Cmd {
+	selectCmd := m.runDialogInWorkingPanel("asm-ide-select", "--ide-select", func(exitCode int) tea.Msg {
+		if exitCode == 0 {
+			return ideSelectDoneMsg{
+				IDEName: asmtmux.GetSessionOption("asm-selected-ide"),
+				Path:    wtPath,
+			}
+		}
+		return ideSelectDoneMsg{Path: wtPath}
+	})
+	return selectCmd
+}
+
+// openWorktreeInIDE launches the named IDE against the given path,
+// detached. Returns a tea.Cmd so errors can surface via IDEOpenFailedMsg.
+func (m *PickerModel) openWorktreeInIDE(wtPath, ideName string) tea.Cmd {
+	entry := ide.Find(m.ides, ideName)
+	if entry == nil {
+		return func() tea.Msg {
+			return WorktreeErrorMsg{Err: fmt.Sprintf("unknown IDE: %s", ideName)}
+		}
+	}
+	e := *entry
+	return func() tea.Msg {
+		if err := e.Open(wtPath); err != nil {
+			return WorktreeErrorMsg{Err: fmt.Sprintf("open %s failed: %v", e.Name, err)}
+		}
+		return nil
+	}
 }
 
 func (m *PickerModel) openSettings() tea.Cmd {
@@ -1249,7 +1310,7 @@ func renderShortcutsPlain(selectedCount int) string {
 	if selectedCount > 0 {
 		return fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
 	}
-	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
+	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
 }
 
 // buildLine1 returns the detailed line for the currently displayed session and

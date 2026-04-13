@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/plugincfg"
 	"github.com/nhn/asm/provider"
 	"github.com/nhn/asm/tracker"
@@ -28,6 +29,7 @@ func main() {
 	worktreeCreate := flag.Bool("worktree-create", false, "Run worktree creation dialog")
 	worktreeDir := flag.String("worktree-dir", "", "Directory path for worktree operations")
 	providerSelect := flag.Bool("provider-select", false, "Run provider selection dialog")
+	ideSelect := flag.Bool("ide-select", false, "Run IDE selection dialog")
 	flag.Parse()
 
 	// Load user config first to get DefaultPath
@@ -83,12 +85,14 @@ func main() {
 		runWorktreeCreate(rootPath, *worktreeDir, t)
 	} else if *providerSelect {
 		runProviderSelect(registry)
+	} else if *ideSelect {
+		runIDESelect(buildIDEs(cfg))
 	} else if *settingsMode {
 		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
-		runPicker(cfg, rootPath, registry, t, taskCache)
+		runPicker(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg))
 	} else {
-		runOrchestrator(cfg, rootPath, registry, t, taskCache)
+		runOrchestrator(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg))
 	}
 }
 
@@ -185,7 +189,7 @@ func saveDoorayConfig(dc *tracker.DoorayConfig, scope config.Scope, rootPath str
 	return config.SaveScope(cfg, scope, rootPath)
 }
 
-func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache) {
+func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
 	if !asmtmux.IsAvailable() {
 		fmt.Fprintln(os.Stderr, "Error: tmux is required. Install it with: brew install tmux")
 		os.Exit(1)
@@ -193,7 +197,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 
 	// If already inside the asm tmux session, run picker directly
 	if asmtmux.IsInsideTmux() && asmtmux.SessionExists() {
-		runPicker(cfg, rootPath, registry, t, taskCache)
+		runPicker(cfg, rootPath, registry, t, taskCache, ides)
 		return
 	}
 
@@ -289,6 +293,31 @@ func runProviderSelect(registry *provider.Registry) {
 	os.Exit(1)
 }
 
+// buildIDEs merges the built-in IDE list with any config overrides.
+func buildIDEs(cfg *config.Config) []ide.IDE {
+	overrides := make(map[string]ide.Override, len(cfg.IDEs))
+	for name, c := range cfg.IDEs {
+		overrides[name] = ide.Override{Command: c.Command, Args: c.Args}
+	}
+	return ide.Builtins(overrides)
+}
+
+func runIDESelect(ides []ide.IDE) {
+	model := ui.NewIDESelectModel(ide.Names(ides))
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	result, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if m, ok := result.(ui.IDESelectModel); ok && m.Selected != "" {
+		asmtmux.SetSessionOption("asm-selected-ide", m.Selected)
+		os.Exit(0)
+	}
+	os.Exit(1)
+}
+
 func runSettings(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
 	plugins := collectConfigurablePlugins(registry, t)
 	trackerNames := append(tracker.BuiltinNames(), tracker.ListNames(config.TrackerDir())...)
@@ -341,8 +370,8 @@ func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) 
 	return entries
 }
 
-func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache) {
-	model := ui.NewPickerModel(cfg, rootPath, registry, t, taskCache)
+func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
+	model := ui.NewPickerModel(cfg, rootPath, registry, t, taskCache, ides)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {
