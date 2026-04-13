@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/nhn/asm/config"
+	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/tracker"
 	"github.com/nhn/asm/worktree"
 )
@@ -34,8 +36,10 @@ type BranchesLoadedMsg struct {
 }
 
 type WorktreeCreatedMsg struct {
-	Name string
-	Path string
+	Name             string
+	Path             string
+	TemplateCopied   int      // number of files copied from the template
+	TemplateWarnings []string // non-fatal warnings from template application
 }
 
 type WorktreeCancelledMsg struct{}
@@ -316,8 +320,9 @@ func (m WorktreeDialogModel) handleSelectBranchKey(msg tea.KeyMsg) (WorktreeDial
 		selected := m.filtered[m.cursor]
 		repoDir := m.repoDir
 		rootPath := m.rootPath
+		repoName := m.repoName
 		m.Hide()
-		return m, createWorktreeFromBranchCmd(repoDir, rootPath, selected.Name)
+		return m, createWorktreeFromBranchCmd(repoDir, rootPath, repoName, selected.Name)
 
 	case "tab":
 		m.mode = wtModeSelectBase
@@ -422,9 +427,10 @@ func (m WorktreeDialogModel) handleNewBranchKey(msg tea.KeyMsg) (WorktreeDialogM
 		}
 		repoDir := m.repoDir
 		rootPath := m.rootPath
+		repoName := m.repoName
 		baseBranch := m.baseBranch
 		m.Hide()
-		return m, createWorktreeNewBranchCmd(repoDir, rootPath, name, baseBranch)
+		return m, createWorktreeNewBranchCmd(repoDir, rootPath, repoName, name, baseBranch)
 
 	case "backspace":
 		if m.newBranchName != "" {
@@ -460,30 +466,57 @@ func (m WorktreeDialogModel) fetchTaskName(branch string) tea.Cmd {
 	}
 }
 
-func createWorktreeFromBranchCmd(repoDir, rootPath, branch string) tea.Cmd {
+func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea.Cmd {
 	return func() tea.Msg {
 		folderName := worktree.BranchToFolderName(branch)
 		targetPath := filepath.Join(rootPath, folderName)
 
-		err := worktree.CreateWorktreeFromBranch(repoDir, targetPath, branch)
-		if err != nil {
+		if err := worktree.CreateWorktreeFromBranch(repoDir, targetPath, branch); err != nil {
 			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree add failed: %v", err)}
 		}
-		return WorktreeCreatedMsg{Name: folderName, Path: targetPath}
+		copied, warnings := applyTemplateBestEffort(rootPath, repoName, targetPath)
+		return WorktreeCreatedMsg{
+			Name:             folderName,
+			Path:             targetPath,
+			TemplateCopied:   copied,
+			TemplateWarnings: warnings,
+		}
 	}
 }
 
-func createWorktreeNewBranchCmd(repoDir, rootPath, newBranch, baseBranch string) tea.Cmd {
+func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
 		folderName := worktree.BranchToFolderName(newBranch)
 		targetPath := filepath.Join(rootPath, folderName)
 
-		err := worktree.CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch)
-		if err != nil {
+		if err := worktree.CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch); err != nil {
 			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree add failed: %v", err)}
 		}
-		return WorktreeCreatedMsg{Name: folderName, Path: targetPath}
+		copied, warnings := applyTemplateBestEffort(rootPath, repoName, targetPath)
+		return WorktreeCreatedMsg{
+			Name:             folderName,
+			Path:             targetPath,
+			TemplateCopied:   copied,
+			TemplateWarnings: warnings,
+		}
 	}
+}
+
+// applyTemplateBestEffort copies files from the per-repo template directory
+// into the new worktree. Any failure is surfaced as a warning — template copy
+// never aborts worktree creation.
+func applyTemplateBestEffort(rootPath, repoName, targetPath string) (int, []string) {
+	cfg, err := config.LoadMerged(rootPath)
+	if err != nil || cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	policy := worktree.ConflictPolicy(cfg.TemplateConflictPolicy())
+	res, err := worktree.ApplyTemplate(rootPath, repoName, targetPath, policy)
+	warnings := res.Warnings
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("template copy error: %v", err))
+	}
+	return res.Copied, warnings
 }
 
 // WorktreeRunnerModel wraps WorktreeDialogModel for standalone use in the working panel.
@@ -515,6 +548,12 @@ func (m WorktreeRunnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case WorktreeCreatedMsg:
 		m.Created = true
+		// Forward template-copy result to the parent picker via tmux session
+		// options. The picker reads these when it handles worktreeExitedMsg.
+		// Errors from tmux calls are intentionally ignored — template copy
+		// feedback is best-effort.
+		_ = asmtmux.SetSessionOption("asm-worktree-copied", fmt.Sprintf("%d", msg.TemplateCopied))
+		_ = asmtmux.SetSessionOption("asm-worktree-warnings", strings.Join(msg.TemplateWarnings, "\n"))
 		return m, tea.Quit
 	case WorktreeCancelledMsg:
 		return m, tea.Quit

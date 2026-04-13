@@ -27,6 +27,15 @@ type IDEConfig struct {
 	Args    []string `toml:"args"`
 }
 
+// WorktreeTemplateConfig controls post-create file templating.
+// Files under {projectRoot}/.asm/templates/{repo}/ are copied into a new
+// worktree at the same relative paths. OnConflict decides what happens when a
+// destination file already exists; valid values are "skip" (default) and
+// "overwrite".
+type WorktreeTemplateConfig struct {
+	OnConflict string `toml:"on_conflict"`
+}
+
 type Config struct {
 	DefaultPath          string                       `toml:"default_path"`
 	GitRefreshInterval   int                          `toml:"git_refresh_interval"`
@@ -39,7 +48,8 @@ type Config struct {
 	Trackers             map[string]map[string]string `toml:"trackers"`
 	IDEs                 map[string]IDEConfig         `toml:"ides"`
 	// DefaultIDE, if set, skips the IDE selector and opens directly.
-	DefaultIDE string `toml:"default_ide"`
+	DefaultIDE       string                 `toml:"default_ide"`
+	WorktreeTemplate WorktreeTemplateConfig `toml:"worktree_template"`
 }
 
 func homeDir() string {
@@ -149,6 +159,9 @@ func merge(base, overlay *Config) {
 	if overlay.DefaultIDE != "" {
 		base.DefaultIDE = overlay.DefaultIDE
 	}
+	if overlay.WorktreeTemplate.OnConflict != "" {
+		base.WorktreeTemplate.OnConflict = overlay.WorktreeTemplate.OnConflict
+	}
 
 	// Merge Providers (wholesale per key)
 	if len(overlay.Providers) > 0 {
@@ -238,6 +251,15 @@ func (c *Config) IsAutoZoomEnabled() bool {
 		return true // default: enabled
 	}
 	return *c.AutoZoom
+}
+
+// TemplateConflictPolicy returns the configured conflict policy for worktree
+// template copying. Defaults to "skip".
+func (c *Config) TemplateConflictPolicy() string {
+	if c.WorktreeTemplate.OnConflict == "overwrite" {
+		return "overwrite"
+	}
+	return "skip"
 }
 
 // GetPickerWidth returns the picker pane width in percent, clamped to a

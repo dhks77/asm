@@ -10,6 +10,7 @@ import (
 	"github.com/nhn/asm/config"
 	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/plugincfg"
+	"github.com/nhn/asm/worktree"
 )
 
 type SettingsSavedMsg struct{}
@@ -34,24 +35,26 @@ type settingsEntry struct {
 //	  index into m.ideEntries.
 //	"ide-add" — a single trailing row. Enter appends a new ideEditEntry.
 type flatItem struct {
-	kind     string // "scope", "select", "text", "number", "ide-name", "ide-cmd", "ide-args", "ide-add"
+	kind     string // "scope", "select", "text", "number", "action", "ide-name", "ide-cmd", "ide-args", "ide-add"
 	section  int    // -1 for general, >=0 for plugin index (or IDE index when kind starts with "ide-")
 	fieldIdx int
 }
 
 var scopeOptions = []string{"user", "project"}
 var autoZoomOptions = []string{"on", "off"}
+var templateConflictOptions = []string{"skip", "overwrite"}
 
 const pickerWidthMin = 10
 const pickerWidthMax = 50
 
 // General field keys used for per-field project-override tracking.
 const (
-	fieldProvider    = "provider"
-	fieldTracker     = "tracker"
-	fieldAutoZoom    = "autoZoom"
-	fieldPickerWidth = "pickerWidth"
-	fieldIDE         = "ide"
+	fieldProvider         = "provider"
+	fieldTracker          = "tracker"
+	fieldAutoZoom         = "autoZoom"
+	fieldPickerWidth      = "pickerWidth"
+	fieldIDE              = "ide"
+	fieldTemplateConflict = "templateConflict"
 )
 
 // ideNoneLabel is the sentinel shown at index 0 of the Default IDE
@@ -74,11 +77,12 @@ type SettingsModel struct {
 	// ideNames is the display list for Default IDE. Index 0 is always
 	// ideNoneLabel; indices 1.. are the configured IDEs in order.
 	ideNames         []string
-	selectedProvider int
-	selectedTracker  int
-	selectedIDE      int    // 0 = none, 1+ = ideNames[i]
-	autoZoomIdx      int    // 0=on, 1=off
-	pickerWidthStr   string // free-form percentage input (e.g. "22")
+	selectedProvider    int
+	selectedTracker     int
+	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
+	autoZoomIdx         int    // 0=on, 1=off
+	pickerWidthStr      string // free-form percentage input (e.g. "22")
+	templateConflictIdx int    // 0=skip, 1=overwrite
 
 	// Per-field project-scope overrides. true = explicit value in project;
 	// false = inherits from user. Only consulted when scopeIdx == 1.
@@ -116,11 +120,12 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 		trackerNames:  trackerNames,
 		ideNames:      displayIDEs,
 		projectOverrides: map[string]bool{
-			fieldProvider:    projectCfg.DefaultProvider != "",
-			fieldTracker:     projectCfg.DefaultTracker != "",
-			fieldAutoZoom:    projectCfg.AutoZoom != nil,
-			fieldPickerWidth: projectCfg.PickerWidth != 0,
-			fieldIDE:         projectCfg.DefaultIDE != "",
+			fieldProvider:         projectCfg.DefaultProvider != "",
+			fieldTracker:          projectCfg.DefaultTracker != "",
+			fieldAutoZoom:         projectCfg.AutoZoom != nil,
+			fieldPickerWidth:      projectCfg.PickerWidth != 0,
+			fieldIDE:              projectCfg.DefaultIDE != "",
+			fieldTemplateConflict: projectCfg.WorktreeTemplate.OnConflict != "",
 		},
 	}
 	// Default to project scope when a project context exists so overrides
@@ -193,6 +198,18 @@ func (m *SettingsModel) loadGeneralFromScope() {
 		pw = m.projectCfg.GetPickerWidth()
 	}
 	m.pickerWidthStr = fmt.Sprintf("%d", pw)
+
+	tcPolicy := m.userCfg.TemplateConflictPolicy()
+	if isProject && m.projectOverrides[fieldTemplateConflict] {
+		tcPolicy = m.projectCfg.TemplateConflictPolicy()
+	}
+	m.templateConflictIdx = 0
+	for i, opt := range templateConflictOptions {
+		if opt == tcPolicy {
+			m.templateConflictIdx = i
+			break
+		}
+	}
 }
 
 // persistGeneralToScope writes the current UI state back into the currently
@@ -233,6 +250,11 @@ func (m *SettingsModel) persistGeneralToScope() {
 		} else {
 			cfg.PickerWidth = 0
 		}
+		if m.projectOverrides[fieldTemplateConflict] {
+			cfg.WorktreeTemplate.OnConflict = templateConflictOptions[m.templateConflictIdx]
+		} else {
+			cfg.WorktreeTemplate.OnConflict = ""
+		}
 	} else {
 		if len(m.providerNames) > 0 {
 			cfg.DefaultProvider = m.providerNames[m.selectedProvider]
@@ -250,6 +272,7 @@ func (m *SettingsModel) persistGeneralToScope() {
 		if w := parsePickerWidth(m.pickerWidthStr); w > 0 {
 			cfg.PickerWidth = w
 		}
+		cfg.WorktreeTemplate.OnConflict = templateConflictOptions[m.templateConflictIdx]
 	}
 
 	// Persist tracker-entry edits for built-in trackers into the scope's cfg.
@@ -295,6 +318,8 @@ func (m *SettingsModel) markGeneralOverride(fieldIdx int) {
 		m.projectOverrides[fieldPickerWidth] = true
 	case 4:
 		m.projectOverrides[fieldIDE] = true
+	case 5:
+		m.projectOverrides[fieldTemplateConflict] = true
 	}
 }
 
@@ -320,6 +345,8 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 		key = fieldPickerWidth
 	case 4:
 		key = fieldIDE
+	case 5:
+		key = fieldTemplateConflict
 	}
 	if key == "" {
 		return ""
@@ -348,6 +375,8 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 		} else {
 			userVal = ideNoneLabel
 		}
+	case 5:
+		userVal = m.userCfg.TemplateConflictPolicy()
 	}
 	suffix := "  ○ inherit"
 	if userVal != "" {
@@ -419,6 +448,10 @@ func (m *SettingsModel) rebuildItems() {
 	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 2})
 	// Picker width (free-form number input)
 	m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: 3})
+
+	// Worktree section
+	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 5})
+	m.items = append(m.items, flatItem{kind: "action", section: -1, fieldIdx: 6})
 
 	// Plugin fields
 	for ei, e := range m.entries {
@@ -600,6 +633,12 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					} else {
 						m.selectedIDE = (m.selectedIDE - 1 + len(m.ideNames)) % len(m.ideNames)
 					}
+				} else if item.fieldIdx == 5 {
+					if key == "right" {
+						m.templateConflictIdx = (m.templateConflictIdx + 1) % len(templateConflictOptions)
+					} else {
+						m.templateConflictIdx = (m.templateConflictIdx - 1 + len(templateConflictOptions)) % len(templateConflictOptions)
+					}
 				}
 				m.markGeneralOverride(item.fieldIdx)
 			} else if item.kind == "number" && item.section == -1 && item.fieldIdx == 3 {
@@ -624,6 +663,17 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.save()
 
 	case "enter":
+		// Enter on an "action" row invokes that action instead of saving.
+		if m.cursor < len(m.items) && m.items[m.cursor].kind == "action" {
+			item := m.items[m.cursor]
+			if item.section == -1 && item.fieldIdx == 6 {
+				m.err = ""
+				if _, err := worktree.OpenTemplatesDir(m.rootPath); err != nil {
+					m.err = fmt.Sprintf("open templates dir failed: %v", err)
+				}
+			}
+			return m, nil
+		}
 		// Enter on the "+ Add IDE" row appends a new editable entry;
 		// anywhere else it still saves.
 		if m.cursor < len(m.items) && m.items[m.cursor].kind == "ide-add" {
@@ -687,6 +737,8 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.projectOverrides[fieldPickerWidth] = false
 			case 4:
 				m.projectOverrides[fieldIDE] = false
+			case 5:
+				m.projectOverrides[fieldTemplateConflict] = false
 			}
 			m.loadGeneralFromScope()
 		} else if item.kind == "text" {
@@ -828,6 +880,20 @@ func (m SettingsModel) View() string {
 		sections = append(sections, m.renderSelectField(itemIdx, "Auto Zoom", autoZoomOptions, m.autoZoomIdx)+m.generalStateMarker(2))
 		itemIdx++
 		sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%")+m.generalStateMarker(3))
+		itemIdx++
+		sections = append(sections, "")
+	}
+
+	// Worktree section
+	{
+		header := lipgloss.NewStyle().Padding(0, 2).Render(
+			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("Worktree"),
+		)
+		sections = append(sections, header)
+
+		sections = append(sections, m.renderSelectField(itemIdx, "Template on Conflict", templateConflictOptions, m.templateConflictIdx)+m.generalStateMarker(5))
+		itemIdx++
+		sections = append(sections, m.renderActionField(itemIdx, "Open templates directory", worktree.TemplatesRoot(m.rootPath)))
 		itemIdx++
 		sections = append(sections, "")
 	}
@@ -974,6 +1040,21 @@ func (m SettingsModel) View() string {
 	statusBar := renderDialogHintBar(m.width,
 		" ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Ctrl+X: delete IDE  Enter: save/add  Esc: cancel")
 	return content + "\n" + statusBar
+}
+
+// renderActionField renders an "invokable" row: a label followed by a path or
+// descriptive suffix, activated with Enter. When highlighted it reads like a
+// button so users know it does something.
+func (m SettingsModel) renderActionField(itemIdx int, label, suffix string) string {
+	isCursor := itemIdx == m.cursor
+	indicator, labelStyle := fieldRowCursor(isCursor)
+	labelPart := labelStyle.Render(label)
+	suffixPart := lipgloss.NewStyle().Foreground(dimColor).Render("  " + suffix)
+	hint := ""
+	if isCursor {
+		hint = lipgloss.NewStyle().Foreground(primaryColor).Render("  [Enter]")
+	}
+	return "  " + indicator + labelPart + suffixPart + hint
 }
 
 // renderNumberField renders a free-form numeric input with a trailing unit suffix.
