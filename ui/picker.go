@@ -191,7 +191,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.batchConfirm.SetSize(msg.Width)
+		m.batchConfirm.SetSize(msg.Width, msg.Height)
 		firstReady := !m.ready
 		m.ready = true
 		// On initial render, fullscreen the picker so the right-hand working
@@ -1528,6 +1528,12 @@ func (m PickerModel) View() string {
 		return "Loading..."
 	}
 
+	// Batch confirm takes over the full pane (like the worktree/settings
+	// dialogs) instead of overlaying a small centered box on the picker.
+	if m.batchConfirm.IsVisible() {
+		return m.batchConfirm.View()
+	}
+
 	var title string
 	if m.focused {
 		title = headerStyle.Render(filepath.Base(m.rootPath))
@@ -1602,10 +1608,6 @@ func (m PickerModel) View() string {
 					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
 					statusBarStyle.Render("Press any key to dismiss"))
 		view = m.overlayCenter(view, errDialog)
-	}
-
-	if m.batchConfirm.IsVisible() {
-		view = m.overlayCenter(view, m.batchConfirm.View())
 	}
 
 	return view
