@@ -84,78 +84,55 @@ func CreateSession(pickerCmd string) error {
 		return err
 	}
 
-	target := fmt.Sprintf("%s:%s.0", SessionName, MainWindow)
+	// Key bindings are installed in the tmux root table, which is SERVER-WIDE.
+	// Multiple asm instances (one per project root) therefore can't each own
+	// their own hardcoded target session — whichever started last would
+	// clobber earlier bindings and route every keystroke to its own picker.
+	//
+	// Instead, the bindings below target the CURRENT session's `main.0`
+	// (asm's picker pane) and are gated by `#{m:asm-*,#{session_name}}` so
+	// they only fire when the user is actually inside an asm-managed
+	// session. In any other tmux session (plain shell, unrelated work) the
+	// key is passed through unchanged. Result: every asm session handles
+	// its own keys without cross-talk, and non-asm sessions aren't affected.
+	const inAsm = "#{m:asm-*,#{session_name}}"
 
-	// Ctrl+t: toggle terminal/AI (sends F12 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-t",
-		"send-keys", "-t", target, "F12",
+	// Simple routed key: inside asm session, deliver an F-key to the
+	// picker (main.0); outside, pass the key through unchanged.
+	bindRouted := func(key, fkey string) {
+		_ = exec.Command("tmux", "bind-key", "-T", "root", key,
+			"if-shell", "-F", inAsm,
+			"send-keys -t main.0 "+fkey,
+			"send-keys "+key,
+		).Run()
+	}
+
+	bindRouted("C-t", "F12") // toggle terminal/AI
+	bindRouted("C-n", "F10") // new AI session
+	bindRouted("C-s", "F9")  // settings
+	bindRouted("C-q", "F8")  // quit
+	bindRouted("C-w", "F7")  // create worktree
+	bindRouted("C-d", "F6")  // delete directory
+	bindRouted("C-p", "F4")  // provider selection
+	bindRouted("C-k", "F3")  // open task URL
+	bindRouted("C-]", "F1")  // rotate to next active session
+	bindRouted("C-e", "F2")  // open worktree in IDE
+
+	// Ctrl+g: toggle pane focus — more complex, pane-index dependent.
+	//   working panel (pane 1) → select picker (main.0)
+	//   picking panel (pane 0) → send F11 so the picker can focus-or-start
+	_ = exec.Command("tmux", "bind-key", "-T", "root", "C-g",
+		"if-shell", "-F", inAsm,
+		"if-shell -F '#{==:#{pane_index},1}' 'select-pane -t main.0' 'send-keys -t main.0 F11'",
+		"send-keys C-g",
 	).Run()
 
-	// Ctrl+g: toggle pane focus
-	//   working panel → focus picking panel
-	//   picking panel → focus working panel or start AI session (picker handles via F11)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-g",
-		"if-shell", "-F", "#{==:#{pane_index},1}",
-		fmt.Sprintf("select-pane -t %s", target),
-		fmt.Sprintf("send-keys -t %s F11", target),
-	).Run()
-
-	// Ctrl+n: new AI session (sends F10 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-n",
-		"send-keys", "-t", target, "F10",
-	).Run()
-
-	// Ctrl+s: settings (sends F9 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-s",
-		"send-keys", "-t", target, "F9",
-	).Run()
-
-	// Ctrl+q: quit (sends F8 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-q",
-		"send-keys", "-t", target, "F8",
-	).Run()
-
-	// Ctrl+w: create worktree (sends F7 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-w",
-		"send-keys", "-t", target, "F7",
-	).Run()
-
-	// Ctrl+d: delete directory (sends F6 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-d",
-		"send-keys", "-t", target, "F6",
-	).Run()
-
-	// Ctrl+x: toggle batch selection (picker-only). Pane-aware — when
-	// the working pane is focused (settings dialog, worktree dialog,
-	// etc.) we pass the key through so those UIs can use Ctrl+X for
-	// their own actions (e.g. deleting an IDE entry in settings).
-	exec.Command("tmux", "bind-key", "-T", "root", "C-x",
-		"if-shell", "-F", "#{==:#{pane_index},0}",
-		fmt.Sprintf("send-keys -t %s F5", target),
+	// Ctrl+x: toggle batch selection. Picker-only — when working pane is
+	// focused (dialogs use Ctrl+X for their own actions) pass through.
+	_ = exec.Command("tmux", "bind-key", "-T", "root", "C-x",
+		"if-shell", "-F", inAsm,
+		"if-shell -F '#{==:#{pane_index},0}' 'send-keys -t main.0 F5' 'send-keys C-x'",
 		"send-keys C-x",
-	).Run()
-
-	// Ctrl+p: provider selection (sends F4 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-p",
-		"send-keys", "-t", target, "F4",
-	).Run()
-
-	// Ctrl+k: open task URL (sends F3 to picker from either pane)
-	exec.Command("tmux", "bind-key", "-T", "root", "C-k",
-		"send-keys", "-t", target, "F3",
-	).Run()
-
-	// Ctrl+] : rotate to next active session (F1). Single direction — cycles
-	// back to the first session after the last. ASCII control code 0x1D is
-	// forwarded by every terminal. tmux only recognises F1–F12 as named keys
-	// (F13+ is sent as literal text), so we reuse a free F-key slot.
-	exec.Command("tmux", "bind-key", "-T", "root", "C-]",
-		"send-keys", "-t", target, "F1",
-	).Run()
-
-	// Ctrl+e: open cursor worktree in an IDE (sends F2 to picker).
-	exec.Command("tmux", "bind-key", "-T", "root", "C-e",
-		"send-keys", "-t", target, "F2",
 	).Run()
 
 	// Enable focus events so Bubble Tea can detect pane focus/blur
