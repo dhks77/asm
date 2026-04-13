@@ -62,6 +62,16 @@ type terminalWidthResolvedMsg struct{ width int }
 // next scrollTick can issue another write.
 type statusSummaryWrittenMsg struct{}
 
+// sessionHealthTickMsg fires periodically to trigger a background
+// "is my tmux session still alive?" probe.
+type sessionHealthTickMsg time.Time
+
+// sessionHealthResultMsg carries the outcome of that probe. On a negative
+// result the picker exits — a dangling picker process whose pane has been
+// torn down does nothing useful and can fast-spin on failing tmux execs
+// (classic orphan-picker leak that piled up to 100+MB RSS in the field).
+type sessionHealthResultMsg struct{ alive bool }
+
 type sessionExitedMsg struct {
 	DirName string
 }
@@ -204,7 +214,7 @@ func (m *PickerModel) filteredDirectories() []int {
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanDirectories(), providerStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
+	return tea.Batch(m.scanDirectories(), providerStateTickCmd(), spinnerTickCmd(), scrollTickCmd(), sessionHealthTickCmd())
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -245,6 +255,22 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusSummaryWrittenMsg:
 		m.statusSummaryWriting = false
 		return m, nil
+
+	case sessionHealthTickMsg:
+		// Dispatch the probe in a goroutine so SessionExists (3s timeout)
+		// never parks Update.
+		return m, func() tea.Msg {
+			return sessionHealthResultMsg{alive: asmtmux.SessionExists()}
+		}
+
+	case sessionHealthResultMsg:
+		if !msg.alive {
+			// Our tmux session is gone — nothing left to drive. Exiting
+			// releases any leaked goroutines and clears the way for a
+			// fresh asm run to take over.
+			return m, tea.Quit
+		}
+		return m, sessionHealthTickCmd()
 
 	case tea.FocusMsg:
 		m.focused = true
@@ -2135,6 +2161,15 @@ func spinnerTickCmd() tea.Cmd {
 func scrollTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return scrollTickMsg(t)
+	})
+}
+
+// sessionHealthTickCmd schedules the next tmux-session liveness probe. 5s is
+// frequent enough to catch an orphaned picker quickly, cheap enough that the
+// extra tmux exec is negligible.
+func sessionHealthTickCmd() tea.Cmd {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return sessionHealthTickMsg(t)
 	})
 }
 
