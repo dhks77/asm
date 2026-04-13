@@ -53,6 +53,10 @@ type ProviderStateUpdatedMsg struct {
 type spinnerTickMsg time.Time
 type scrollTickMsg time.Time
 
+// terminalWidthResolvedMsg delivers the tmux client width measured off the
+// Update goroutine. Dispatched on WindowSizeMsg.
+type terminalWidthResolvedMsg struct{ width int }
+
 type sessionExitedMsg struct {
 	DirName string
 }
@@ -84,7 +88,15 @@ type PickerModel struct {
 	// current cycle. The next detect-state tick is only scheduled once
 	// this reaches zero, so slow providers/tmux never cause fan-out.
 	providerStatePending int
-	spinnerFrame         int
+	// activeKinds caches the last tmux-derived session map (per worktree)
+	// so the hot scrollTick status-bar render can run without blocking
+	// Update on a tmux exec. Refreshed every providerStateTick (1s).
+	activeKinds map[string]asmtmux.SessionKind
+	// terminalWidth caches the tmux client width so status-bar layout
+	// computations don't call tmux synchronously from Update. Refreshed
+	// on WindowSizeMsg via an async tea.Cmd.
+	terminalWidth int
+	spinnerFrame  int
 	scrollTick     int
 	cursor         int
 	viewTop        int    // first visible item index for scrolling
@@ -123,7 +135,9 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		sessionStartTimes:  make(map[string]time.Time),
 		terminalStartTimes: make(map[string]time.Time),
 		flashItems:         make(map[string]time.Time),
-		selectedItems:  make(map[string]bool),
+		activeKinds:        make(map[string]asmtmux.SessionKind),
+		terminalWidth:      120, // sane default until the first tmux query lands
+		selectedItems:      make(map[string]bool),
 		batchConfirm:     NewBatchConfirmModel(),
 		tracker:           t,
 		taskCache:        taskCache,
@@ -165,7 +179,9 @@ func (m *PickerModel) filteredDirectories() []int {
 	}
 
 	// Partition: active sessions (AI or terminal) first, inactive after. Preserves internal order.
-	activeKinds := asmtmux.ListActiveSessions()
+	// Read the cached map populated by the 1s providerStateTick; the picker sort
+	// runs on every View() so we must not trigger a synchronous tmux exec here.
+	activeKinds := m.activeKinds
 	var active, inactive []int
 	for _, i := range matched {
 		if activeKinds[m.directories[i].Name] != 0 {
@@ -206,6 +222,14 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if firstReady {
 			m.applyAutoZoomPicker()
 		}
+		// Terminal width governs the status-bar layout and rarely changes —
+		// refresh it off the Update goroutine so a slow tmux can't stall us.
+		return m, fetchTerminalWidthCmd()
+
+	case terminalWidthResolvedMsg:
+		if msg.width > 0 {
+			m.terminalWidth = msg.width
+		}
 		return m, nil
 
 	case tea.FocusMsg:
@@ -233,6 +257,9 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		pending := 0
 		activeKinds := asmtmux.ListActiveSessions()
+		// Publish the snapshot so the scrollTick status-bar render can
+		// read it without triggering its own tmux exec.
+		m.activeKinds = activeKinds
 		for _, wt := range m.directories {
 			kind := activeKinds[wt.Name]
 			if kind.HasAI() {
@@ -322,8 +349,11 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scrollTickMsg:
 		m.scrollTick++
-		m.refreshStatusSummary()
-		return m, scrollTickCmd()
+		writeCmd := m.refreshStatusSummary()
+		if writeCmd == nil {
+			return m, scrollTickCmd()
+		}
+		return m, tea.Batch(scrollTickCmd(), writeCmd)
 
 	case sessionExitedMsg:
 		m.cleanupSessionState(msg.DirName)
@@ -1321,27 +1351,46 @@ const (
 )
 
 // refreshStatusSummary rebuilds the three-line bottom-bar (summary + shortcuts)
-// and pushes it to tmux. Called on scrollTick (200ms). Skips the tmux write if
-// the rendered strings haven't changed.
-func (m *PickerModel) refreshStatusSummary() {
-	activeKinds := asmtmux.ListActiveSessions()
-
-	line1, line1Target := m.buildLine1(activeKinds)
-	line2 := m.buildLine2(activeKinds, line1Target)
+// and schedules the tmux writes in the background. Called on scrollTick
+// (200ms) — it must be allocation-cheap and never trigger a synchronous tmux
+// exec, which would block the Bubble Tea event loop.
+//
+// Reads come from cached state (m.activeKinds, m.terminalWidth) populated on
+// slower cadences. Writes are dispatched as a fire-and-forget tea.Cmd only
+// when the rendered output actually changed.
+func (m *PickerModel) refreshStatusSummary() tea.Cmd {
+	line1, line1Target := m.buildLine1(m.activeKinds)
+	line2 := m.buildLine2(m.activeKinds, line1Target)
 	shortcuts := renderShortcutsPlain(len(m.selectedItems))
 
 	combined := line1 + "\x00" + line2 + "\x00" + shortcuts
 
-	// Always enable the status bar — it hosts the shortcuts hint even when no
-	// AI session is running.
-	if !m.statusBarEnabled {
-		asmtmux.EnableStatusBar()
+	enable := !m.statusBarEnabled
+	changed := combined != m.lastStatusSummary
+	if enable {
 		m.statusBarEnabled = true
 	}
-	if combined != m.lastStatusSummary {
-		asmtmux.SetStatusLines(line1, line2)
-		asmtmux.SetShortcutsLine(shortcuts)
+	if changed {
 		m.lastStatusSummary = combined
+	}
+	if !enable && !changed {
+		return nil
+	}
+	return writeStatusSummaryCmd(enable, changed, line1, line2, shortcuts)
+}
+
+// writeStatusSummaryCmd pushes the three status-bar lines to tmux in a
+// goroutine so Update never blocks on the set-option execs.
+func writeStatusSummaryCmd(enable, changed bool, line1, line2, shortcuts string) tea.Cmd {
+	return func() tea.Msg {
+		if enable {
+			asmtmux.EnableStatusBar()
+		}
+		if changed {
+			asmtmux.SetStatusLines(line1, line2)
+			asmtmux.SetShortcutsLine(shortcuts)
+		}
+		return nil
 	}
 }
 
@@ -1407,7 +1456,7 @@ func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (st
 	displayingTerm := (m.workingDir == "" && m.termDir == target) || !targetKind.HasAI()
 
 	// Compute the task-name column width to fill the available terminal width.
-	taskWidth := asmtmux.TerminalWidth() - statusLine1ChromeWidth - statusLine1NameWidth
+	taskWidth := m.terminalWidth - statusLine1ChromeWidth - statusLine1NameWidth
 	if taskWidth < statusLine1TaskMinWidth {
 		taskWidth = statusLine1TaskMinWidth
 	}
@@ -1479,7 +1528,7 @@ func (m *PickerModel) buildLine2(activeKinds map[string]asmtmux.SessionKind, lin
 	// How many items fit on a single row of the current terminal.
 	// Solve: itemWidth*p + sepWidth*(p-1) + chrome <= termWidth
 	//     => p <= (termWidth - chrome + sepWidth) / (itemWidth + sepWidth)
-	termWidth := asmtmux.TerminalWidth()
+	termWidth := m.terminalWidth
 	perPage := (termWidth - statusLine2ChromeWidth + statusLine2SepWidth) /
 		(statusLine2ItemWidth + statusLine2SepWidth)
 	if perPage < 1 {
@@ -1643,7 +1692,9 @@ func (m PickerModel) View() string {
 		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
 	}
 
-	activeKinds := asmtmux.ListActiveSessions()
+	// View() is re-entered for every terminal repaint; read the cached map
+	// rather than spawning a tmux exec on each render.
+	activeKinds := m.activeKinds
 
 	filtered := m.filteredDirectories()
 
@@ -2059,6 +2110,15 @@ func scrollTickCmd() tea.Cmd {
 	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return scrollTickMsg(t)
 	})
+}
+
+// fetchTerminalWidthCmd measures the tmux client width in a goroutine. The
+// tmux call has its own timeout via CommandContext; on failure width is 0 and
+// the model keeps its previous value.
+func fetchTerminalWidthCmd() tea.Cmd {
+	return func() tea.Msg {
+		return terminalWidthResolvedMsg{width: asmtmux.TerminalWidth()}
+	}
 }
 
 func formatElapsed(d time.Duration) string {
