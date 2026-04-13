@@ -2,13 +2,39 @@ package tmux
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
-const SessionName = "asm"
+// SessionName is the active tmux session name. Defaults to "asm" but is
+// expected to be reassigned via SetSessionName so multiple asm instances on
+// different root paths can coexist.
+var SessionName = "asm"
+
 const MainWindow = "main"
+
+// SetSessionName derives a per-rootPath tmux session name. Same rootPath
+// always yields the same name (hash-stable), different rootPaths get
+// distinct names. Safe to call repeatedly.
+func SetSessionName(rootPath string) {
+	base := filepath.Base(rootPath)
+	sanitized := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		}
+		return '-'
+	}, base)
+	if sanitized == "" {
+		sanitized = "root"
+	}
+	h := fnv.New32a()
+	h.Write([]byte(rootPath))
+	SessionName = fmt.Sprintf("asm-%s-%06x", sanitized, h.Sum32()&0xffffff)
+}
 
 func IsAvailable() bool {
 	_, err := exec.LookPath("tmux")
@@ -108,6 +134,14 @@ func CreateSession(pickerCmd string) error {
 		"send-keys", "-t", target, "F3",
 	).Run()
 
+	// Ctrl+] : rotate to next active session (F1). Single direction — cycles
+	// back to the first session after the last. ASCII control code 0x1D is
+	// forwarded by every terminal. tmux only recognises F1–F12 as named keys
+	// (F13+ is sent as literal text), so we reuse a free F-key slot.
+	exec.Command("tmux", "bind-key", "-T", "root", "C-]",
+		"send-keys", "-t", target, "F1",
+	).Run()
+
 	// Enable focus events so Bubble Tea can detect pane focus/blur
 	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()
 
@@ -141,6 +175,23 @@ func SplitWorkingPanel(percentage int) error {
 	).Run()
 }
 
+// ResizePickerPanel sets the picker pane (pane 0) width to the given percent
+// of the terminal width. Applied immediately to a running session.
+func ResizePickerPanel(pickerPct int) error {
+	if pickerPct <= 0 {
+		return nil
+	}
+	w := TerminalWidth()
+	cells := w * pickerPct / 100
+	if cells < 10 {
+		cells = 10
+	}
+	return exec.Command("tmux", "resize-pane",
+		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
+		"-x", fmt.Sprintf("%d", cells),
+	).Run()
+}
+
 // WorkingPanelExists checks if the working panel (pane 1) exists.
 func WorkingPanelExists() bool {
 	out, err := exec.Command("tmux", "list-panes",
@@ -166,10 +217,109 @@ func EnsureWorkingPanel() {
 }
 
 // FocusPickingPanel focuses the picking panel (picker).
+// Unzooms the main window first since zoom hides pane 0.
 func FocusPickingPanel() error {
+	UnzoomWorkingPanel()
 	return exec.Command("tmux", "select-pane",
 		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
 	).Run()
+}
+
+// IsWorkingPanelZoomed reports whether the main window is currently zoomed.
+func IsWorkingPanelZoomed() bool {
+	out, err := exec.Command("tmux", "display-message",
+		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
+		"-p", "#{window_zoomed_flag}",
+	).Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+// ZoomWorkingPanel zooms the working pane (pane 1) to fullscreen.
+// No-op if already zoomed. Selects the working pane first so zoom targets it.
+func ZoomWorkingPanel() error {
+	exec.Command("tmux", "select-pane",
+		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+	).Run()
+	if IsWorkingPanelZoomed() {
+		return nil
+	}
+	return exec.Command("tmux", "resize-pane",
+		"-Z", "-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
+	).Run()
+}
+
+// UnzoomWorkingPanel removes zoom if currently zoomed. Safe to call always.
+func UnzoomWorkingPanel() error {
+	if !IsWorkingPanelZoomed() {
+		return nil
+	}
+	return exec.Command("tmux", "resize-pane",
+		"-Z", "-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
+	).Run()
+}
+
+// EnableStatusBar turns on a three-line status bar at the bottom of the
+// terminal, spanning full width.
+//   line 0: current session detail
+//   line 1: other active sessions
+//   line 2: keyboard shortcuts hint
+// Content is set via SetStatusLines / SetShortcutsLine.
+func EnableStatusBar() {
+	exec.Command("tmux", "set-option", "-t", SessionName, "status", "3").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-position", "bottom").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-style", "bg=colour236,fg=colour252").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-left-length", "500").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-right", "").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[0]", "").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[1]", "").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "status-format[2]", "").Run()
+}
+
+// DisableStatusBar hides the tmux status line entirely.
+func DisableStatusBar() {
+	exec.Command("tmux", "set-option", "-t", SessionName, "status", "off").Run()
+}
+
+// Back-compat aliases (deprecated names).
+func EnableTopStatusBar()  { EnableStatusBar() }
+func DisableTopStatusBar() { DisableStatusBar() }
+
+// SetStatusLines writes the two summary lines (current + other sessions).
+// Both accept tmux format strings (e.g. "#[fg=cyan,bold]...#[default]").
+func SetStatusLines(line1, line2 string) {
+	exec.Command("tmux", "set-option", "-t", SessionName,
+		"status-format[0]", "#[align=left]"+line1,
+	).Run()
+	exec.Command("tmux", "set-option", "-t", SessionName,
+		"status-format[1]", "#[align=left]"+line2,
+	).Run()
+}
+
+// SetShortcutsLine writes the keyboard shortcuts line (bottom of the status
+// area, full terminal width).
+func SetShortcutsLine(line string) {
+	exec.Command("tmux", "set-option", "-t", SessionName,
+		"status-format[2]", "#[align=left,bg=colour236,fg=colour244]"+line,
+	).Run()
+}
+
+// TerminalWidth returns the attached client's terminal width in columns.
+// Falls back to 120 if it can't be queried.
+func TerminalWidth() int {
+	out, err := exec.Command("tmux", "display-message", "-t", SessionName,
+		"-p", "#{client_width}").Output()
+	if err != nil {
+		return 120
+	}
+	var w int
+	_, err = fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &w)
+	if err != nil || w <= 0 {
+		return 120
+	}
+	return w
 }
 
 // FocusWorkingPanel focuses the working panel (session).
@@ -336,6 +486,24 @@ func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
 	}
 	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// CapturePaneHistory captures the last `lines` of scrollback plus the visible
+// pane content. Useful when the visible area is full of UI chrome and the
+// actual response has scrolled above.
+func CapturePaneHistory(dirName string, isDisplayed bool, lines int) (string, error) {
+	var target string
+	if isDisplayed {
+		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+	} else {
+		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
+	}
+	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p",
+		"-S", fmt.Sprintf("-%d", lines)).Output()
 	if err != nil {
 		return "", err
 	}

@@ -69,6 +69,10 @@ func main() {
 		cfg = mergedCfg
 	}
 
+	// Derive per-path tmux session name so multiple asm instances (one per
+	// root path) can run concurrently without stomping on each other.
+	asmtmux.SetSessionName(rootPath)
+
 	registry := buildRegistry(cfg)
 	t := buildTracker(cfg, rootPath)
 
@@ -217,8 +221,10 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 		os.Exit(1)
 	}
 
-	// Create the working panel (placeholder - 'cat' keeps it alive)
-	if err := asmtmux.SplitWorkingPanel(70); err != nil {
+	// Create the working panel (placeholder - 'cat' keeps it alive).
+	// Working panel width = 100% - picker width.
+	workingWidth := 100 - cfg.GetPickerWidth()
+	if err := asmtmux.SplitWorkingPanel(workingWidth); err != nil {
 		fmt.Fprintf(os.Stderr, "Error splitting pane: %v\n", err)
 		os.Exit(1)
 	}

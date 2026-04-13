@@ -86,6 +86,10 @@ type PickerModel struct {
 	searchQuery    string
 	selectedItems    map[string]bool
 	batchConfirm     BatchConfirmModel
+
+	// Top status bar (summary of all active sessions)
+	lastStatusSummary string
+	statusBarEnabled  bool
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) PickerModel {
@@ -108,36 +112,50 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 }
 
 // filteredDirectories returns indices into m.directories matching the current search query.
+// Active sessions (AI window open) are sorted first, preserving original order within each group.
 func (m *PickerModel) filteredDirectories() []int {
+	var matched []int
 	if m.searchQuery == "" {
-		indices := make([]int, len(m.directories))
+		matched = make([]int, len(m.directories))
 		for i := range m.directories {
-			indices[i] = i
+			matched[i] = i
 		}
-		return indices
+	} else {
+		query := strings.ToLower(m.searchQuery)
+		for i, wt := range m.directories {
+			if strings.Contains(strings.ToLower(wt.Name), query) {
+				matched = append(matched, i)
+				continue
+			}
+			if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
+				if strings.Contains(strings.ToLower(info.Name), query) {
+					matched = append(matched, i)
+					continue
+				}
+			}
+			if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
+				if strings.Contains(strings.ToLower(gs.Branch), query) {
+					matched = append(matched, i)
+					continue
+				}
+			}
+		}
 	}
 
-	query := strings.ToLower(m.searchQuery)
-	var indices []int
-	for i, wt := range m.directories {
-		if strings.Contains(strings.ToLower(wt.Name), query) {
-			indices = append(indices, i)
-			continue
-		}
-		if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
-			if strings.Contains(strings.ToLower(info.Name), query) {
-				indices = append(indices, i)
-				continue
-			}
-		}
-		if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
-			if strings.Contains(strings.ToLower(gs.Branch), query) {
-				indices = append(indices, i)
-				continue
-			}
+	// Partition: active sessions first, inactive after. Preserves internal order.
+	activeSet := make(map[string]bool)
+	for _, name := range asmtmux.ListDirectoryWindows() {
+		activeSet[name] = true
+	}
+	var active, inactive []int
+	for _, i := range matched {
+		if activeSet[m.directories[i].Name] {
+			active = append(active, i)
+		} else {
+			inactive = append(inactive, i)
 		}
 	}
-	return indices
+	return append(active, inactive...)
 }
 
 func (m PickerModel) Init() tea.Cmd {
@@ -186,6 +204,12 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case providerStateTickMsg:
+		// Remember the worktree under cursor so sort changes don't shift selection.
+		cursorWT := ""
+		if wt := m.selectedDirectory(); wt != nil {
+			cursorWT = wt.Name
+		}
+
 		var cmds []tea.Cmd
 		activeWindows := asmtmux.ListDirectoryWindows()
 		activeSet := make(map[string]bool)
@@ -209,6 +233,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.fetchProviderState(wt.Name))
 			}
 		}
+		m.stabilizeCursor(cursorWT)
 		cmds = append(cmds, providerStateTickCmd())
 		return m, tea.Batch(cmds...)
 
@@ -224,7 +249,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmds []tea.Cmd
 				cmds = append(cmds, flashExpireCmd(msg.Name, now, 3*time.Second))
 				if m.cfg.IsDesktopNotificationsEnabled() {
-					cmds = append(cmds, notifyCompletionCmd(msg.Name, m.workingDir))
+					displayName := msg.Name
+					for _, wt := range m.directories {
+						if wt.Name == msg.Name {
+							if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
+								displayName = info.Name
+							}
+							break
+						}
+					}
+					cmds = append(cmds, notifyCompletionCmd(msg.Name, displayName, m.workingDir))
 				}
 				return m, tea.Batch(cmds...)
 			}
@@ -245,6 +279,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scrollTickMsg:
 		m.scrollTick++
+		m.refreshStatusSummary()
 		return m, scrollTickCmd()
 
 	case sessionExitedMsg:
@@ -404,6 +439,11 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				defaultName = provider.DefaultProviderName
 			}
 			m.registry.SetDefault(defaultName)
+			// Apply picker width immediately — only if not zoomed (resize is
+			// ignored on zoomed panes and would confuse the state otherwise).
+			if !asmtmux.IsWorkingPanelZoomed() {
+				asmtmux.ResizePickerPanel(newCfg.GetPickerWidth())
+			}
 		}
 		return m, nil
 
@@ -484,6 +524,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.workingDir != "" || m.termDir != "" {
 			asmtmux.FocusWorkingPanel()
+			m.applyAutoZoom()
 		} else {
 			wt := m.selectedDirectory()
 			if wt == nil {
@@ -551,6 +592,9 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selectedItems[wt.Name] = true
 			}
 		}
+
+	case "f1": // Ctrl+] : rotate to next active session (cyclic)
+		return m, m.rotateSession(+1)
 
 	case "f3", "o": // Ctrl+o / o: Open task URL in browser
 		if key == "o" && len(m.selectedItems) > 0 {
@@ -877,6 +921,7 @@ func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	// Already showing this terminal
 	if m.termDir == wt.Name {
 		asmtmux.FocusWorkingPanel()
+		m.applyAutoZoom()
 		return nil
 	}
 
@@ -894,6 +939,7 @@ func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	asmtmux.SwapTermToWorkingPanel(wt.Name)
 	m.termDir = wt.Name
 	asmtmux.FocusWorkingPanel()
+	m.applyAutoZoom()
 	return cmd
 }
 
@@ -923,6 +969,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 		asmtmux.SwapTermToWorkingPanel(wtName)
 		m.termDir = wtName
 		asmtmux.FocusWorkingPanel()
+		m.applyAutoZoom()
 		return cmd
 	} else if m.termDir != "" {
 		// Terminal is displayed → switch to AI session (if exists)
@@ -935,6 +982,7 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 			asmtmux.SwapToWorkingPanel(wtName)
 			m.workingDir = wtName
 			asmtmux.FocusWorkingPanel()
+			m.applyAutoZoom()
 		}
 	}
 	return nil
@@ -951,6 +999,7 @@ func waitForTermExitCmd(dirName string) tea.Cmd {
 func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 	if m.workingDir == wt.Name {
 		asmtmux.FocusWorkingPanel()
+		m.applyAutoZoom()
 		return
 	}
 	// Recreate working panel if it was lost
@@ -965,6 +1014,15 @@ func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 	asmtmux.SwapToWorkingPanel(wt.Name)
 	m.workingDir = wt.Name
 	asmtmux.FocusWorkingPanel()
+	m.applyAutoZoom()
+}
+
+// applyAutoZoom zooms the working pane if config's auto_zoom is enabled.
+// No-op otherwise (keeps the split view).
+func (m *PickerModel) applyAutoZoom() {
+	if m.cfg != nil && m.cfg.IsAutoZoomEnabled() {
+		asmtmux.ZoomWorkingPanel()
+	}
 }
 
 func (m *PickerModel) itemHeight(wi int) int {
@@ -988,7 +1046,7 @@ func (m *PickerModel) adjustViewTop() {
 		return
 	}
 	filtered := m.filteredDirectories()
-	maxListLines := m.height - 4
+	maxListLines := m.height - 2
 	if m.searchQuery != "" {
 		maxListLines-- // search bar takes one line
 	}
@@ -1005,6 +1063,281 @@ func (m *PickerModel) adjustViewTop() {
 	for linesUsed > maxListLines && m.viewTop < m.cursor {
 		linesUsed -= m.itemHeight(filtered[m.viewTop])
 		m.viewTop++
+	}
+}
+
+// rotateSession cycles the working panel through active sessions (delta=+1 next, -1 prev).
+// Preserves zoom state. No-op if fewer than 2 active sessions.
+func (m *PickerModel) rotateSession(delta int) tea.Cmd {
+	activeSet := make(map[string]bool)
+	for _, n := range asmtmux.ListDirectoryWindows() {
+		activeSet[n] = true
+	}
+
+	// Build ordered list of active worktrees (scan order).
+	var active []*worktree.Worktree
+	for i := range m.directories {
+		if activeSet[m.directories[i].Name] {
+			active = append(active, &m.directories[i])
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+
+	// Find current position. If nothing is shown, jump to first/last.
+	idx := -1
+	for i, wt := range active {
+		if wt.Name == m.workingDir {
+			idx = i
+			break
+		}
+	}
+	var next *worktree.Worktree
+	if idx < 0 {
+		if delta >= 0 {
+			next = active[0]
+		} else {
+			next = active[len(active)-1]
+		}
+	} else {
+		if len(active) < 2 {
+			// Only session is already shown — just focus/zoom.
+			asmtmux.FocusWorkingPanel()
+			m.applyAutoZoom()
+			return nil
+		}
+		ni := (idx + delta) % len(active)
+		if ni < 0 {
+			ni += len(active)
+		}
+		next = active[ni]
+	}
+
+	m.showInWorkingPanel(next)
+	return nil
+}
+
+// Fixed widths (columns) for status bar items. All items are padded to these
+// widths so neighboring items don't jitter as names scroll.
+const (
+	statusLine2NameWidth  = 20 // worktree/task name in the all-sessions row
+	statusLine2StateWidth = 10 // state label column
+	statusLine1NameWidth  = 24 // folder name on the current-session line
+	// Task name width is computed dynamically based on terminal width; this
+	// is the minimum fallback used when we can't query tmux.
+	statusLine1TaskMinWidth = 60
+	// Fixed chrome cost on line 1 (icon, separators, state, elapsed, padding).
+	statusLine1ChromeWidth = 50
+)
+
+// refreshStatusSummary rebuilds the three-line bottom-bar (summary + shortcuts)
+// and pushes it to tmux. Called on scrollTick (200ms). Skips the tmux write if
+// the rendered strings haven't changed.
+func (m *PickerModel) refreshStatusSummary() {
+	activeSet := make(map[string]bool)
+	for _, n := range asmtmux.ListDirectoryWindows() {
+		activeSet[n] = true
+	}
+
+	line1 := m.buildLine1(activeSet)
+	line2 := m.buildLine2(activeSet)
+	shortcuts := renderShortcutsPlain(len(m.selectedItems))
+
+	combined := line1 + "\x00" + line2 + "\x00" + shortcuts
+
+	// Always enable the status bar — it hosts the shortcuts hint even when no
+	// AI session is running.
+	if !m.statusBarEnabled {
+		asmtmux.EnableStatusBar()
+		m.statusBarEnabled = true
+	}
+	if combined != m.lastStatusSummary {
+		asmtmux.SetStatusLines(line1, line2)
+		asmtmux.SetShortcutsLine(shortcuts)
+		m.lastStatusSummary = combined
+	}
+}
+
+// renderShortcutsPlain returns the shortcuts hint as a plain tmux format string
+// (no ANSI, just `#[...]` style markers if needed).
+func renderShortcutsPlain(selectedCount int) string {
+	if selectedCount > 0 {
+		return fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
+	}
+	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
+}
+
+// buildLine1 returns the detailed line for the currently displayed session.
+// If nothing is in the working panel, falls back to the first active session.
+func (m *PickerModel) buildLine1(activeSet map[string]bool) string {
+	target := m.workingDir
+	if target == "" || !activeSet[target] {
+		// Fall back to first active in scan order
+		for _, wt := range m.directories {
+			if activeSet[wt.Name] {
+				target = wt.Name
+				break
+			}
+		}
+	}
+	if target == "" {
+		return ""
+	}
+
+	var wt *worktree.Worktree
+	for i := range m.directories {
+		if m.directories[i].Name == target {
+			wt = &m.directories[i]
+			break
+		}
+	}
+	if wt == nil {
+		return ""
+	}
+
+	// Compute the task-name column width to fill the available terminal width.
+	taskWidth := asmtmux.TerminalWidth() - statusLine1ChromeWidth - statusLine1NameWidth
+	if taskWidth < statusLine1TaskMinWidth {
+		taskWidth = statusLine1TaskMinWidth
+	}
+
+	// Folder name (fixed width, scrolled if longer)
+	folder := padToWidth(tmuxEscape(scrollText(wt.Name, statusLine1NameWidth, m.scrollTick)), statusLine1NameWidth)
+
+	// Task name (dynamic width, scrolled if longer). Empty if not resolved.
+	taskRaw := ""
+	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
+		taskRaw = info.Name
+	}
+	var taskPart string
+	if taskRaw != "" {
+		taskPart = padToWidth(tmuxEscape(scrollText(taskRaw, taskWidth, m.scrollTick)), taskWidth)
+	} else {
+		taskPart = padToWidth("", taskWidth)
+	}
+
+	// State + color
+	stateLabel, stateColor := m.stateLabelColor(wt.Name)
+	statePart := padToWidth(stateLabel, statusLine2StateWidth)
+
+	// Elapsed
+	elapsed := ""
+	if t, ok := m.sessionStartTimes[wt.Name]; ok {
+		elapsed = formatElapsed(time.Since(t))
+	}
+	elapsedPart := padToWidth(elapsed, 6)
+
+	// Render with tmux format codes
+	icon := "#[fg=colour81,bold]▶#[default]"
+	sep := "#[fg=colour240]│#[default]"
+	return fmt.Sprintf(" %s #[fg=colour252,bold]%s#[default] %s #[fg=colour141]%s#[default] %s #[fg=%s,bold]%s#[default] #[fg=colour244]%s#[default] ",
+		icon, folder, sep, taskPart, sep, stateColor, statePart, elapsedPart)
+}
+
+// buildLine2 returns the other-active-sessions overview (excludes the session
+// shown on line 1 to avoid duplication) with fixed-width items.
+func (m *PickerModel) buildLine2(activeSet map[string]bool) string {
+	var items []string
+	for _, wt := range m.directories {
+		if !activeSet[wt.Name] {
+			continue
+		}
+		if wt.Name == m.workingDir {
+			continue
+		}
+		items = append(items, m.renderStatusItem(wt))
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	sep := "#[fg=colour240] │ #[default]"
+	return " " + strings.Join(items, sep) + " "
+}
+
+// renderStatusItem renders one active session as a fixed-width tmux format string.
+func (m *PickerModel) renderStatusItem(wt worktree.Worktree) string {
+	// Name: task name if resolved, otherwise folder name
+	rawName := wt.Name
+	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
+		rawName = info.Name
+	}
+	displayName := scrollText(rawName, statusLine2NameWidth, m.scrollTick)
+	displayName = tmuxEscape(displayName)
+	displayName = padToWidth(displayName, statusLine2NameWidth)
+
+	stateLabel, stateColor := m.stateLabelColor(wt.Name)
+	statePadded := padToWidth(stateLabel, statusLine2StateWidth)
+
+	// Icon + name style: current session gets highlight
+	isCurrent := wt.Name == m.workingDir
+	var iconPart, nameColor string
+	if isCurrent {
+		iconPart = "#[fg=colour81,bold]▶#[default]"
+		nameColor = "colour252,bold"
+	} else {
+		iconPart = "#[fg=colour42]●#[default]"
+		nameColor = "colour252"
+	}
+
+	return fmt.Sprintf("%s #[fg=%s]%s#[default] #[fg=%s]%s#[default]",
+		iconPart, nameColor, displayName, stateColor, statePadded)
+}
+
+// stateLabelColor returns the provider-state label and tmux color code for a session.
+func (m *PickerModel) stateLabelColor(dirName string) (string, string) {
+	if _, flashing := m.flashItems[dirName]; flashing {
+		return "done", "colour42"
+	}
+	st, ok := m.providerStates[dirName]
+	if !ok {
+		return "", "colour244"
+	}
+	switch st {
+	case provider.StateThinking:
+		return st.Label(), "colour220"
+	case provider.StateResponding:
+		return st.Label(), "colour114"
+	case provider.StateToolUse:
+		return st.Label(), "colour81"
+	case provider.StateBusy:
+		return st.Label(), "colour220"
+	case provider.StateIdle:
+		return st.Label(), "colour244"
+	}
+	return st.Label(), "colour244"
+}
+
+// tmuxEscape doubles '#' so tmux format parser treats it as a literal.
+func tmuxEscape(s string) string {
+	return strings.ReplaceAll(s, "#", "##")
+}
+
+// padToWidth right-pads s with spaces to reach the given visual width (in columns).
+// Uses lipgloss.Width which handles CJK full-width characters.
+func padToWidth(s string, w int) string {
+	vw := lipgloss.Width(s)
+	if vw >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-vw)
+}
+
+// stabilizeCursor repositions m.cursor onto the given worktree name after a sort change.
+// No-op if name is empty or not found.
+func (m *PickerModel) stabilizeCursor(wtName string) {
+	if wtName == "" {
+		return
+	}
+	filtered := m.filteredDirectories()
+	for fi, wi := range filtered {
+		if m.directories[wi].Name == wtName {
+			if m.cursor != fi {
+				m.cursor = fi
+				m.adjustViewTop()
+			}
+			return
+		}
 	}
 }
 
@@ -1065,8 +1398,9 @@ func (m PickerModel) View() string {
 		items[fi] = renderedItem{text: text, lineCount: strings.Count(text, "\n") + 1}
 	}
 
-	// Available lines for the list (height - title - status bar - margin)
-	maxListLines := m.height - 4
+	// Available lines for the list (height - title - margin). Shortcuts bar is
+	// rendered by tmux at the bottom of the terminal, outside this pane.
+	maxListLines := m.height - 2
 	if m.searchQuery != "" {
 		maxListLines-- // search bar takes one line
 	}
@@ -1085,7 +1419,7 @@ func (m PickerModel) View() string {
 		usedLines += items[i].lineCount
 	}
 
-	// Build view: title (fixed) + search bar + list + padding + status bar
+	// Build view: title (fixed) + search bar + list + padding
 	var viewLines []string
 	viewLines = append(viewLines, title)
 	if m.searchQuery != "" {
@@ -1095,15 +1429,13 @@ func (m PickerModel) View() string {
 	for _, row := range visibleRows {
 		viewLines = append(viewLines, strings.Split(row, "\n")...)
 	}
-	targetLines := m.height - 3
-	statusBar := RenderStatusBar(m.width, m.focused, len(m.selectedItems))
+	targetLines := m.height
 	for len(viewLines) < targetLines {
 		viewLines = append(viewLines, "")
 	}
 	if len(viewLines) > targetLines {
 		viewLines = viewLines[:targetLines]
 	}
-	viewLines = append(viewLines, statusBar)
 	view := strings.Join(viewLines, "\n")
 
 	if m.err != "" {
@@ -1284,70 +1616,126 @@ func flashExpireCmd(dirName string, startedAt time.Time, after time.Duration) te
 	})
 }
 
-func notifyCompletionCmd(dirName string, currentWorkingDir string) tea.Cmd {
+// notifyCompletionCmd sends a desktop notification when an AI session finishes.
+// displayName is the resolved title (task name preferred, falling back to folder).
+func notifyCompletionCmd(dirName, displayName, currentWorkingDir string) tea.Cmd {
 	return func() tea.Msg {
 		isDisplayed := currentWorkingDir == dirName
-		content, err := asmtmux.CapturePaneContent(dirName, isDisplayed)
+		content, err := asmtmux.CapturePaneHistory(dirName, isDisplayed, 80)
 		if err != nil {
-			notification.Send("ASM", dirName+" done")
+			notification.Send("ASM – "+displayName, "done")
 			return nil
 		}
 		snippet := extractLastResponse(content)
+		title := "ASM – " + displayName
 		if snippet != "" {
-			notification.Send("ASM – "+dirName, snippet)
+			notification.Send(title, snippet)
 		} else {
-			notification.Send("ASM", dirName+" done")
+			notification.Send(title, "done")
 		}
 		return nil
 	}
 }
 
-// extractLastResponse extracts the last meaningful text from pane content for notification.
+// extractLastResponse extracts a short snippet of the last meaningful AI
+// response text from pane content, stripping UI chrome (box borders, prompt
+// indicators, Claude CLI footer banners, etc.).
 func extractLastResponse(content string) string {
 	lines := strings.Split(content, "\n")
 
+	// Walk from the bottom up, skipping noise and the user-input box, collecting
+	// meaningful lines from the last AI response.
 	var meaningful []string
-	for i := len(lines) - 1; i >= 0 && len(meaningful) < 5; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
+	for i := len(lines) - 1; i >= 0 && len(meaningful) < 8; i-- {
+		stripped := stripBoxBorders(lines[i])
+		if stripped == "" {
 			continue
 		}
-		if isNoiseeLine(line) {
+		if isNoiseeLine(stripped) {
 			continue
 		}
-		meaningful = append(meaningful, line)
+		meaningful = append(meaningful, stripped)
 	}
 
 	if len(meaningful) == 0 {
 		return ""
 	}
 
-	// Take up to 2 lines, reverse back to original order
-	take := min(2, len(meaningful))
+	// Take up to 3 lines (more = richer preview), reverse back to original order.
+	take := min(3, len(meaningful))
 	var result []string
 	for i := take - 1; i >= 0; i-- {
 		result = append(result, meaningful[i])
 	}
 
-	text := strings.Join(result, "\n")
+	text := strings.Join(result, " ")
+	text = strings.Join(strings.Fields(text), " ") // collapse whitespace
 
 	runes := []rune(text)
-	if len(runes) > 120 {
-		return string(runes[:120]) + "…"
+	if len(runes) > 140 {
+		return string(runes[:140]) + "…"
 	}
 	return text
 }
 
-// isNoiseeLine returns true if the line is a prompt, separator, or UI decoration.
+// stripBoxBorders trims whitespace and removes leading/trailing box-drawing
+// chars (`│`, `┃`, `|`) and a leading `●` bullet used by Claude for AI
+// messages. Keeps the inner text so it can be evaluated as content.
+func stripBoxBorders(line string) string {
+	line = strings.TrimSpace(line)
+	for {
+		runes := []rune(line)
+		if len(runes) == 0 {
+			return ""
+		}
+		first := runes[0]
+		if first == '│' || first == '┃' || first == '|' || first == '●' || first == '•' || first == '>' {
+			line = strings.TrimSpace(string(runes[1:]))
+			continue
+		}
+		break
+	}
+	for {
+		runes := []rune(line)
+		if len(runes) == 0 {
+			return ""
+		}
+		last := runes[len(runes)-1]
+		if last == '│' || last == '┃' || last == '|' {
+			line = strings.TrimSpace(string(runes[:len(runes)-1]))
+			continue
+		}
+		break
+	}
+	return line
+}
+
+// isNoiseeLine returns true if the line is a prompt, separator, banner, or UI
+// decoration with no useful content.
 func isNoiseeLine(line string) bool {
-	// Single-char prompts and indicators
-	if len([]rune(line)) <= 2 {
+	trimmed := strings.TrimSpace(line)
+	if len([]rune(trimmed)) <= 2 {
 		return true
 	}
-	// Lines made entirely of box-drawing, dashes, or decorative chars
-	for _, r := range line {
-		if r != '─' && r != '━' && r != '—' && r != '-' && r != '=' && r != '~' &&
-			r != '╌' && r != '┄' && r != ' ' {
+	lower := strings.ToLower(trimmed)
+	// Claude CLI footer / status banners
+	if strings.Contains(trimmed, "⏵") ||
+		strings.Contains(lower, "bypass permissions") ||
+		strings.Contains(lower, "for shortcuts") ||
+		strings.Contains(lower, "esc to interrupt") ||
+		strings.Contains(lower, "accept edits") ||
+		strings.Contains(lower, "plan mode") {
+		return true
+	}
+	// Lines made entirely of decorative chars (box-drawing, dashes, pipes, etc.)
+	for _, r := range trimmed {
+		switch r {
+		case '─', '━', '—', '-', '=', '~', '╌', '┄',
+			'╭', '╮', '╰', '╯', '│', '┃', '|',
+			'┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼',
+			' ':
+			continue
+		default:
 			return false
 		}
 	}
