@@ -74,7 +74,7 @@ worktree를 선택하면 해당 hidden window의 pane을 `tmux swap-pane`으로 
 - 폴더명 (예: `nc-dms-backend-3680`)
 - Dooray task 이름 (선택적, 설정 시)
 - AI 상태 + 경과 시간 (예: `Claude thinking… 12m`, `✓ done! 45m`, `idle 1h30m`)
-- Git 상태 (브랜치, ahead/behind, staged/unstaged/untracked)
+- 브랜치 이름 (worktree 스캔 시 1회 조회, 이후 변경 없음 — 재스캔 시에만 갱신)
 - 프로바이더가 2개 이상 활성일 때 AI 이름 표시
 
 ### 완료 알림
@@ -114,7 +114,7 @@ csm/
 ├── session/resume.go        # 세션 디렉토리 JSON 파일 스캔
 ├── worktree/
 │   ├── scanner.go           # 하위 디렉토리 스캔 (.git 감지)
-│   ├── git.go               # git status 조회 (브랜치, ahead/behind, 변경 수)
+│   ├── git.go               # 브랜치 조회 + HasChanges (delete 시 dirty 체크) — 모든 git 호출은 5s 타임아웃
 │   └── branch.go            # 브랜치 관리
 ├── integration/dooray.go    # Dooray API 클라이언트 (선택적)
 └── notification/notify.go   # 크로스 플랫폼 데스크톱 알림 (macOS/Linux/Windows)
@@ -124,7 +124,6 @@ csm/
 `~/.config/asm/config.toml` (fallback: `~/.config/csm/config.toml`):
 ```toml
 default_path = ""
-git_refresh_interval = 5
 desktop_notifications = true
 auto_zoom = true                      # working pane 자동 풀스크린
 default_provider = "claude"           # 기본 AI 프로바이더

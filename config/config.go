@@ -38,7 +38,6 @@ type WorktreeTemplateConfig struct {
 
 type Config struct {
 	DefaultPath          string                       `toml:"default_path"`
-	GitRefreshInterval   int                          `toml:"git_refresh_interval"`
 	DesktopNotifications *bool                        `toml:"desktop_notifications"`
 	AutoZoom             *bool                        `toml:"auto_zoom"`
 	PickerWidth          int                          `toml:"picker_width"` // picker pane width in %
@@ -61,9 +60,7 @@ func homeDir() string {
 }
 
 func DefaultConfig() *Config {
-	return &Config{
-		GitRefreshInterval: 5,
-	}
+	return &Config{}
 }
 
 // UserConfigDir returns the user-level config directory.
@@ -137,9 +134,6 @@ func LoadScope(scope Scope, rootPath string) (*Config, error) {
 func merge(base, overlay *Config) {
 	if overlay.DefaultPath != "" {
 		base.DefaultPath = overlay.DefaultPath
-	}
-	if overlay.GitRefreshInterval != 0 {
-		base.GitRefreshInterval = overlay.GitRefreshInterval
 	}
 	if overlay.DesktopNotifications != nil {
 		base.DesktopNotifications = overlay.DesktopNotifications

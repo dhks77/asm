@@ -26,13 +26,15 @@ type DirectoriesScannedMsg struct {
 	// trickle in over multiple renders. Keyed by worktree path.
 	CachedTasks map[string]tracker.TaskInfo
 	// CachedBranches records the branch each cached entry was observed
-	// under; used to invalidate stale names once GitStatus arrives.
+	// under; used to invalidate stale names once the branch is re-resolved.
 	CachedBranches map[string]string
 }
 
-type GitStatusUpdatedMsg struct {
+// BranchResolvedMsg is emitted after a one-off per-worktree branch lookup.
+// Branch is empty if the lookup failed or timed out.
+type BranchResolvedMsg struct {
 	Path   string
-	Status worktree.GitStatus
+	Branch string
 }
 
 type TaskResolvedMsg struct {
@@ -40,8 +42,6 @@ type TaskResolvedMsg struct {
 	Branch string
 	Info   tracker.TaskInfo
 }
-
-type tickMsg time.Time
 
 type providerStateTickMsg time.Time
 
@@ -71,7 +71,7 @@ type PickerModel struct {
 	cfg            *config.Config
 	rootPath       string
 	directories    []worktree.Worktree
-	gitStatus      map[string]worktree.GitStatus
+	branches       map[string]string // worktree path -> branch name (one-shot)
 	taskInfos      map[string]tracker.TaskInfo
 	providerStates     map[string]provider.State
 	prevProviderStates map[string]provider.State
@@ -90,7 +90,7 @@ type PickerModel struct {
 	taskCache      *tracker.PathCache
 	ides           []ide.IDE
 	// cachedBranches tracks the branch each seeded taskInfo was observed
-	// under; we invalidate the seed when GitStatus reveals a different branch.
+	// under; we invalidate the seed when the branch re-resolves differently.
 	cachedBranches map[string]string
 	focused        bool
 	width          int
@@ -110,7 +110,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 	return PickerModel{
 		cfg:            cfg,
 		rootPath:       rootPath,
-		gitStatus:      make(map[string]worktree.GitStatus),
+		branches:       make(map[string]string),
 		taskInfos:      make(map[string]tracker.TaskInfo),
 		providerStates:     make(map[string]provider.State),
 		prevProviderStates: make(map[string]provider.State),
@@ -151,8 +151,8 @@ func (m *PickerModel) filteredDirectories() []int {
 					continue
 				}
 			}
-			if gs, ok := m.gitStatus[wt.Path]; ok && gs.Branch != "" {
-				if strings.Contains(strings.ToLower(gs.Branch), query) {
+			if branch, ok := m.branches[wt.Path]; ok && branch != "" {
+				if strings.Contains(strings.ToLower(branch), query) {
 					matched = append(matched, i)
 					continue
 				}
@@ -174,7 +174,7 @@ func (m *PickerModel) filteredDirectories() []int {
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanDirectories(), tickCmd(), providerStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
+	return tea.Batch(m.scanDirectories(), providerStateTickCmd(), spinnerTickCmd(), scrollTickCmd())
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -218,14 +218,6 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		m.focused = false
 		return m, nil
-
-	case tickMsg:
-		var cmds []tea.Cmd
-		for _, wt := range m.directories {
-			cmds = append(cmds, m.fetchGitStatus(wt.Path))
-		}
-		cmds = append(cmds, tickCmd())
-		return m, tea.Batch(cmds...)
 
 	case providerStateTickMsg:
 		// Remember the worktree under cursor so sort changes don't shift selection.
@@ -428,7 +420,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.directories = msg.Directories
 		// Seed taskInfos from the persistent cache so the first render has
 		// task names filled in. Any entry with a branch mismatch when git
-		// status arrives will be invalidated by GitStatusUpdatedMsg below.
+		// branch re-resolves will be invalidated by BranchResolvedMsg below.
 		validPaths := make(map[string]bool, len(msg.Directories))
 		for _, wt := range msg.Directories {
 			validPaths[wt.Path] = true
@@ -463,17 +455,25 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewTop = 0
 		var cmds []tea.Cmd
 		for _, wt := range msg.Directories {
-			cmds = append(cmds, m.fetchGitStatus(wt.Path))
+			// Only resolve the branch for worktrees we haven't seen yet;
+			// a rescan after a session exits should not refetch branches
+			// that are already known.
+			if _, ok := m.branches[wt.Path]; !ok {
+				cmds = append(cmds, m.fetchBranch(wt.Path))
+			}
 		}
 		return m, tea.Batch(cmds...)
 
-	case GitStatusUpdatedMsg:
-		m.gitStatus[msg.Path] = msg.Status
-		if m.tracker != nil && msg.Status.Branch != "" {
+	case BranchResolvedMsg:
+		if msg.Branch == "" {
+			return m, nil
+		}
+		m.branches[msg.Path] = msg.Branch
+		if m.tracker != nil {
 			// Invalidate a seeded cache entry whose branch no longer matches
 			// what's actually checked out — otherwise a stale task name
 			// would stick until TTL expiry.
-			if seeded, ok := m.cachedBranches[msg.Path]; ok && seeded != msg.Status.Branch {
+			if seeded, ok := m.cachedBranches[msg.Path]; ok && seeded != msg.Branch {
 				delete(m.taskInfos, msg.Path)
 				delete(m.cachedBranches, msg.Path)
 				if m.taskCache != nil {
@@ -481,7 +481,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if _, ok := m.taskInfos[msg.Path]; !ok {
-				return m, m.fetchTaskName(msg.Path, msg.Status.Branch)
+				return m, m.fetchTaskName(msg.Path, msg.Branch)
 			}
 		}
 		return m, nil
@@ -1180,7 +1180,8 @@ func (m *PickerModel) itemHeight(wi int) int {
 	h := 1
 	taskInfo, hasTask := m.taskInfos[m.directories[wi].Path]
 	hasTask = hasTask && taskInfo.Name != ""
-	_, hasBranch := m.gitStatus[m.directories[wi].Path]
+	branch, hasBranch := m.branches[m.directories[wi].Path]
+	hasBranch = hasBranch && branch != ""
 	if hasTask {
 		h += 3
 	} else if hasBranch {
@@ -1720,7 +1721,8 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, kind asmtmux.Se
 	taskInfo, hasTask := m.taskInfos[wt.Path]
 	hasTask = hasTask && taskInfo.Name != ""
 	taskName := taskInfo.Name
-	gs, hasBranch := m.gitStatus[wt.Path]
+	branch, hasBranch := m.branches[wt.Path]
+	hasBranch = hasBranch && branch != ""
 
 	primaryStyle := taskNameStyle
 	if isSelected {
@@ -1760,11 +1762,11 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, kind asmtmux.Se
 		rawName = taskName
 		subLines = append(subLines, normalItemStyle.Render(wt.Name))
 		if hasBranch {
-			subLines = append(subLines, gitStatusStyle.Render(gs.Summary()))
+			subLines = append(subLines, gitStatusStyle.Render(branch))
 		}
 	} else if hasBranch {
 		rawName = wt.Name
-		subLines = append(subLines, gitStatusStyle.Render(gs.Summary()))
+		subLines = append(subLines, gitStatusStyle.Render(branch))
 	} else {
 		rawName = wt.Name
 	}
@@ -1864,10 +1866,9 @@ func (m PickerModel) scanDirectories() tea.Cmd {
 	}
 }
 
-func (m PickerModel) fetchGitStatus(path string) tea.Cmd {
+func (m PickerModel) fetchBranch(path string) tea.Cmd {
 	return func() tea.Msg {
-		gs := worktree.GetGitStatus(path)
-		return GitStatusUpdatedMsg{Path: path, Status: gs}
+		return BranchResolvedMsg{Path: path, Branch: worktree.CurrentBranch(path)}
 	}
 }
 
@@ -2009,12 +2010,6 @@ func isNoiseeLine(line string) bool {
 		}
 	}
 	return true
-}
-
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second*5, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
 }
 
 func providerStateTickCmd() tea.Cmd {
