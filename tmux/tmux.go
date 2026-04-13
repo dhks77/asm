@@ -1,12 +1,14 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // SessionName is the active tmux session name. Defaults to "asm" but is
@@ -514,6 +516,11 @@ func WaitAndCleanupWorkingPanel(windowName string) int {
 	return exitCode
 }
 
+// tmuxCallTimeout bounds individual tmux CLI calls used on hot paths (pane
+// title/content poll) so a stuck tmux server can't park goroutines and
+// snowball the per-second detect-state loop.
+const tmuxCallTimeout = 3 * time.Second
+
 // CapturePaneContent captures the visible content of a directory's pane.
 func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 	var target string
@@ -522,7 +529,9 @@ func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 	} else {
 		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
 	}
-	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "capture-pane", "-t", target, "-p").Output()
 	if err != nil {
 		return "", err
 	}
@@ -556,7 +565,9 @@ func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	} else {
 		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
 	}
-	out, err := exec.Command("tmux", "display-message", "-t", target, "-p", "#{pane_title}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", target, "-p", "#{pane_title}").Output()
 	if err != nil {
 		return "", err
 	}

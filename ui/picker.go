@@ -80,7 +80,11 @@ type PickerModel struct {
 	sessionStartTimes  map[string]time.Time
 	terminalStartTimes map[string]time.Time
 	flashItems         map[string]time.Time
-	spinnerFrame       int
+	// providerStatePending counts outstanding DetectState calls from the
+	// current cycle. The next detect-state tick is only scheduled once
+	// this reaches zero, so slow providers/tmux never cause fan-out.
+	providerStatePending int
+	spinnerFrame         int
 	scrollTick     int
 	cursor         int
 	viewTop        int    // first visible item index for scrolling
@@ -227,6 +231,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		var cmds []tea.Cmd
+		pending := 0
 		activeKinds := asmtmux.ListActiveSessions()
 		for _, wt := range m.directories {
 			kind := activeKinds[wt.Name]
@@ -243,7 +248,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.worktreeProviders[wt.Name] = m.registry.Default().Name()
 					}
 				}
-				cmds = append(cmds, m.fetchProviderState(wt.Name))
+				if cmd := m.fetchProviderState(wt.Name); cmd != nil {
+					cmds = append(cmds, cmd)
+					pending++
+				}
 			}
 			if kind.HasTerm() {
 				if _, tracked := m.terminalStartTimes[wt.Name]; !tracked {
@@ -252,10 +260,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.stabilizeCursor(cursorWT)
-		cmds = append(cmds, providerStateTickCmd())
+		if pending == 0 {
+			// Nothing to wait for — re-arm the tick directly so we keep
+			// polling once sessions come online.
+			return m, providerStateTickCmd()
+		}
+		m.providerStatePending = pending
 		return m, tea.Batch(cmds...)
 
 	case ProviderStateUpdatedMsg:
+		var extraCmds []tea.Cmd
 		if msg.State != provider.StateUnknown {
 			prevState := m.prevProviderStates[msg.Name]
 			m.providerStates[msg.Name] = msg.State
@@ -264,8 +278,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if prevState.IsBusy() && msg.State == provider.StateIdle {
 				now := time.Now()
 				m.flashItems[msg.Name] = now
-				var cmds []tea.Cmd
-				cmds = append(cmds, flashExpireCmd(msg.Name, now, 3*time.Second))
+				extraCmds = append(extraCmds, flashExpireCmd(msg.Name, now, 3*time.Second))
 				if m.cfg.IsDesktopNotificationsEnabled() {
 					displayName := msg.Name
 					for _, wt := range m.directories {
@@ -276,12 +289,24 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							break
 						}
 					}
-					cmds = append(cmds, notifyCompletionCmd(msg.Name, displayName, m.workingDir))
+					extraCmds = append(extraCmds, notifyCompletionCmd(msg.Name, displayName, m.workingDir))
 				}
-				return m, tea.Batch(cmds...)
 			}
 		}
-		return m, nil
+		// Count this response against the pending cycle and, once all
+		// responses are in, schedule the next detect-state tick. This is
+		// the "fixed delay after the previous cycle completes" model —
+		// never fan out faster than DetectState can drain.
+		if m.providerStatePending > 0 {
+			m.providerStatePending--
+			if m.providerStatePending == 0 {
+				extraCmds = append(extraCmds, providerStateTickCmd())
+			}
+		}
+		if len(extraCmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(extraCmds...)
 
 	case flashExpiredMsg:
 		if startedAt, ok := m.flashItems[msg.DirName]; ok {
@@ -2012,8 +2037,14 @@ func isNoiseeLine(line string) bool {
 	return true
 }
 
+// providerStateDelay is the fixed gap between a detect-state cycle finishing
+// and the next one starting. Using a post-completion delay (as opposed to a
+// pure tea.Tick every second) prevents fan-out when DetectState or tmux is
+// slow: a new cycle only begins after every in-flight probe has reported.
+const providerStateDelay = time.Second
+
 func providerStateTickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(providerStateDelay, func(t time.Time) tea.Msg {
 		return providerStateTickMsg(t)
 	})
 }
