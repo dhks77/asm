@@ -20,46 +20,53 @@ type pluginFieldsLoadedMsg struct {
 type settingsEntry struct {
 	entry  plugincfg.Entry
 	fields []plugincfg.Field
-	values map[string]string
+	values map[string]string // current UI values (user + scope changes)
 }
 
 // flatItem represents a navigable item in the settings UI.
 type flatItem struct {
-	kind     string // "select" or "text"
+	kind     string // "scope", "select", "text"
 	section  int    // -1 for general, >=0 for plugin index
 	fieldIdx int
 }
 
+var scopeOptions = []string{"user", "project"}
+
 type SettingsModel struct {
-	cfg     *config.Config
-	entries []settingsEntry
+	userCfg    *config.Config // user-level raw config
+	projectCfg *config.Config // project-level raw config
+	rootPath   string
 
-	// General settings
-	providerNames  []string
-	trackerNames   []string
-	selectedProvider int // index into providerNames
-	selectedTracker  int // index into trackerNames
+	entries []settingsEntry // plugin entries (user scope only)
 
-	items  []flatItem // built after fields load
+	providerNames    []string
+	trackerNames     []string
+	selectedProvider int
+	selectedTracker  int
+
+	scopeIdx int // 0=user, 1=project
+
+	items  []flatItem
 	cursor int
 	width  int
 	height int
 	err    string
 }
 
-func NewSettingsModel(cfg *config.Config, providerNames []string, trackerNames []string, plugins []plugincfg.Entry) SettingsModel {
-	// Find current selection indices
+func NewSettingsModel(mergedCfg *config.Config, rootPath string, providerNames []string, trackerNames []string, plugins []plugincfg.Entry) SettingsModel {
+	userCfg, _ := config.LoadScope(config.ScopeUser, rootPath)
+	projectCfg, _ := config.LoadScope(config.ScopeProject, rootPath)
+
 	selProvider := 0
 	for i, n := range providerNames {
-		if n == cfg.DefaultProvider {
+		if n == mergedCfg.DefaultProvider {
 			selProvider = i
 			break
 		}
 	}
-
 	selTracker := 0
 	for i, n := range trackerNames {
-		if n == cfg.DefaultTracker {
+		if n == mergedCfg.DefaultTracker {
 			selTracker = i
 			break
 		}
@@ -71,7 +78,9 @@ func NewSettingsModel(cfg *config.Config, providerNames []string, trackerNames [
 	}
 
 	m := SettingsModel{
-		cfg:              cfg,
+		userCfg:          userCfg,
+		projectCfg:       projectCfg,
+		rootPath:         rootPath,
 		entries:          entries,
 		providerNames:    providerNames,
 		trackerNames:     trackerNames,
@@ -82,14 +91,30 @@ func NewSettingsModel(cfg *config.Config, providerNames []string, trackerNames [
 	return m
 }
 
+func (m *SettingsModel) currentScope() config.Scope {
+	if m.scopeIdx == 1 {
+		return config.ScopeProject
+	}
+	return config.ScopeUser
+}
+
+func (m *SettingsModel) currentCfg() *config.Config {
+	if m.currentScope() == config.ScopeProject {
+		return m.projectCfg
+	}
+	return m.userCfg
+}
+
 func (m *SettingsModel) rebuildItems() {
 	m.items = nil
+
+	// Scope selector
+	m.items = append(m.items, flatItem{kind: "scope", section: -1, fieldIdx: -1})
 
 	// General: default provider
 	if len(m.providerNames) > 0 {
 		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 0})
 	}
-	// General: default tracker
 	if len(m.trackerNames) > 0 {
 		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 1})
 	}
@@ -102,16 +127,50 @@ func (m *SettingsModel) rebuildItems() {
 	}
 }
 
+// builtinValuesFromCfg returns the current scope's values for a built-in entry.
+func (m *SettingsModel) builtinValuesFromCfg(entry plugincfg.Entry) map[string]string {
+	cfg := m.currentCfg()
+	if entry.Category == "tracker" {
+		if v, ok := cfg.Trackers[entry.Name]; ok {
+			return copyMap(v)
+		}
+		// Also match "dooray" display
+		for name, fields := range cfg.Trackers {
+			if strings.EqualFold(name, entry.Name) {
+				return copyMap(fields)
+			}
+		}
+	}
+	return make(map[string]string)
+}
+
+func copyMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 func (m SettingsModel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	for i, e := range m.entries {
 		idx := i
 		entry := e.entry
-		cmds = append(cmds, func() tea.Msg {
+		// For built-in configurables, load values from current scope config
+		if entry.Source != nil {
+			values := m.builtinValuesFromCfg(entry)
 			fields := entry.GetFields()
-			values := entry.GetValues()
-			return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values}
-		})
+			cmds = append(cmds, func() tea.Msg {
+				return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values}
+			})
+		} else {
+			cmds = append(cmds, func() tea.Msg {
+				fields := entry.GetFields()
+				values := entry.GetValues()
+				return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values}
+			})
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -182,7 +241,19 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "left", "right":
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if item.kind == "select" && item.section == -1 {
+			if item.kind == "scope" {
+				delta := 1
+				if key == "left" {
+					delta = -1
+				}
+				m.scopeIdx = (m.scopeIdx + delta + len(scopeOptions)) % len(scopeOptions)
+				// Reload built-in entry values from new scope's config
+				for i := range m.entries {
+					if m.entries[i].entry.Source != nil {
+						m.entries[i].values = m.builtinValuesFromCfg(m.entries[i].entry)
+					}
+				}
+			} else if item.kind == "select" && item.section == -1 {
 				if item.fieldIdx == 0 && len(m.providerNames) > 0 {
 					if key == "right" {
 						m.selectedProvider = (m.selectedProvider + 1) % len(m.providerNames)
@@ -241,30 +312,48 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m SettingsModel) save() tea.Cmd {
-	// Update config
+	scope := m.currentScope()
+	targetCfg := m.currentCfg()
+
+	// Update general settings
 	if len(m.providerNames) > 0 {
-		m.cfg.DefaultProvider = m.providerNames[m.selectedProvider]
+		targetCfg.DefaultProvider = m.providerNames[m.selectedProvider]
 	}
 	if len(m.trackerNames) > 0 {
-		m.cfg.DefaultTracker = m.trackerNames[m.selectedTracker]
+		targetCfg.DefaultTracker = m.trackerNames[m.selectedTracker]
 	}
 
-	cfgCopy := *m.cfg
+	// Update built-in entries in the scope's config
+	if targetCfg.Trackers == nil {
+		targetCfg.Trackers = make(map[string]map[string]string)
+	}
+	for _, e := range m.entries {
+		if e.entry.Source == nil {
+			continue
+		}
+		if e.entry.Category == "tracker" {
+			targetCfg.Trackers[e.entry.Name] = copyMap(e.values)
+		}
+	}
+
+	cfgCopy := *targetCfg
+	rootPath := m.rootPath
 
 	type saveItem struct {
 		entry  plugincfg.Entry
 		values map[string]string
 	}
-	var items []saveItem
+	var pluginItems []saveItem
 	for _, e := range m.entries {
-		if len(e.fields) > 0 {
-			items = append(items, saveItem{entry: e.entry, values: e.values})
+		if e.entry.Source == nil && len(e.fields) > 0 {
+			pluginItems = append(pluginItems, saveItem{entry: e.entry, values: e.values})
 		}
 	}
 
 	return func() tea.Msg {
-		config.Save(&cfgCopy)
-		for _, item := range items {
+		config.SaveScope(&cfgCopy, scope, rootPath)
+		// Plugin configs are always user-scoped (plugin manages its own storage)
+		for _, item := range pluginItems {
 			item.entry.SetValues(item.values)
 		}
 		return SettingsSavedMsg{}
@@ -280,6 +369,11 @@ func (m SettingsModel) View() string {
 
 	itemIdx := 0
 	var sections []string
+
+	// Scope selector
+	sections = append(sections, m.renderSelectField(itemIdx, "Scope", scopeOptions, m.scopeIdx))
+	itemIdx++
+	sections = append(sections, "")
 
 	// General section
 	if len(m.providerNames) > 0 || len(m.trackerNames) > 0 {
@@ -299,7 +393,7 @@ func (m SettingsModel) View() string {
 		sections = append(sections, "")
 	}
 
-	// Plugin sections
+	// Plugin/built-in sections
 	for _, e := range m.entries {
 		if len(e.fields) == 0 {
 			continue

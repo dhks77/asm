@@ -83,7 +83,7 @@ asm --path ~/worktrees
 
 ### AI Provider
 
-`~/.config/asm/plugins/<name>` 에 실행파일 배치.
+`~/.asm/plugins/<name>` 에 실행파일 배치.
 
 ```bash
 # 메타정보 (시작 시 1회)
@@ -109,7 +109,7 @@ state: `unknown`, `idle`, `busy`, `thinking`, `tool_use`, `responding`
 
 **빌트인**: `dooray`. Settings(Ctrl+S)에서 토큰/프로젝트 ID 등 구성.
 
-**커스텀 플러그인**: `~/.config/asm/trackers/<name>` 에 실행파일 배치.
+**커스텀 플러그인**: `~/.asm/trackers/<name>` 에 실행파일 배치.
 
 ```bash
 # 브랜치명 -> 이슈 이름 + URL
@@ -122,7 +122,11 @@ state: `unknown`, `idle`, `busy`, `thinking`, `tool_use`, `responding`
 
 ## Config
 
-`~/.config/asm/config.toml`
+**User**: `~/.asm/config.toml` — 모든 프로젝트에서 공통 사용
+
+**Project**: `<rootPath>/.asm/config.toml` — 해당 프로젝트에서만 override (선택)
+
+runtime에서 project가 user를 override (map 필드는 per-key merge). Settings(Ctrl+S)에서 scope 선택해서 저장.
 
 ```toml
 default_path = ""

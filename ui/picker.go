@@ -396,8 +396,8 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case settingsExitedMsg:
-		// Reload config to pick up changed defaults
-		if newCfg, err := config.Load(); err == nil {
+		// Reload merged config (user + project) to pick up changed defaults
+		if newCfg, err := config.LoadMerged(m.rootPath); err == nil {
 			m.cfg = newCfg
 			defaultName := newCfg.DefaultProvider
 			if defaultName == "" {

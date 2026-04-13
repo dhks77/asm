@@ -30,11 +30,13 @@ func main() {
 	providerSelect := flag.Bool("provider-select", false, "Run provider selection dialog")
 	flag.Parse()
 
-	cfg, err := config.Load()
+	// Load user config first to get DefaultPath
+	userCfg, err := config.LoadScope(config.ScopeUser, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	cfg := userCfg
 
 	rootPath := *pathFlag
 	if rootPath == "" {
@@ -62,8 +64,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Now that we have rootPath, load merged config (user + project overlay)
+	if mergedCfg, err := config.LoadMerged(rootPath); err == nil {
+		cfg = mergedCfg
+	}
+
 	registry := buildRegistry(cfg)
-	t := buildTracker(cfg)
+	t := buildTracker(cfg, rootPath)
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
@@ -72,7 +79,7 @@ func main() {
 	} else if *providerSelect {
 		runProviderSelect(registry)
 	} else if *settingsMode {
-		runSettings(cfg, registry, t)
+		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
 		runPicker(cfg, rootPath, registry, t)
 	} else {
@@ -119,7 +126,7 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 }
 
 // buildTracker constructs the active tracker (built-in or plugin).
-func buildTracker(cfg *config.Config) tracker.Tracker {
+func buildTracker(cfg *config.Config, rootPath string) tracker.Tracker {
 	name := cfg.DefaultTracker
 
 	// Try plugin first if name is not a built-in
@@ -131,8 +138,11 @@ func buildTracker(cfg *config.Config) tracker.Tracker {
 
 	// Built-in Dooray
 	if name == "dooray" || name == "" {
-		cfg := loadDoorayConfig(cfg)
-		dt := tracker.NewDoorayTracker(cfg, saveDoorayConfig)
+		dc := loadDoorayConfig(cfg)
+		saveFn := func(dc *tracker.DoorayConfig) error {
+			return saveDoorayConfig(dc, config.ScopeUser, rootPath)
+		}
+		dt := tracker.NewDoorayTracker(dc, saveFn)
 		return tracker.NewCachedTracker(dt, time.Hour)
 	}
 
@@ -152,8 +162,8 @@ func loadDoorayConfig(cfg *config.Config) *tracker.DoorayConfig {
 	return dc
 }
 
-func saveDoorayConfig(dc *tracker.DoorayConfig) error {
-	cfg, err := config.Load()
+func saveDoorayConfig(dc *tracker.DoorayConfig, scope config.Scope, rootPath string) error {
+	cfg, err := config.LoadScope(scope, rootPath)
 	if err != nil {
 		return err
 	}
@@ -167,7 +177,7 @@ func saveDoorayConfig(dc *tracker.DoorayConfig) error {
 		"web_url":      dc.WebURL,
 		"task_pattern": dc.TaskPattern,
 	}
-	return config.Save(cfg)
+	return config.SaveScope(cfg, scope, rootPath)
 }
 
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
@@ -272,10 +282,10 @@ func runProviderSelect(registry *provider.Registry) {
 	os.Exit(1)
 }
 
-func runSettings(cfg *config.Config, registry *provider.Registry, t tracker.Tracker) {
+func runSettings(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
 	plugins := collectConfigurablePlugins(registry, t)
 	trackerNames := append(tracker.BuiltinNames(), tracker.ListNames(config.TrackerDir())...)
-	model := ui.NewSettingsModel(cfg, registry.Names(), trackerNames, plugins)
+	model := ui.NewSettingsModel(cfg, rootPath, registry.Names(), trackerNames, plugins)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
