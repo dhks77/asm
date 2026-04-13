@@ -19,9 +19,13 @@ type BatchConfirmModel struct {
 	visible bool
 	action  BatchAction
 	items   []string
-	dirty   int // number of items with uncommitted changes
-	cursor  int // 0=confirm, 1=cancel
-	width   int
+	// taskNames is a parallel slice to items (same length, empty string
+	// when a directory has no resolved task). Displayed beside the
+	// folder name so users can confirm by task identity, not just path.
+	taskNames []string
+	dirty     int // number of items with uncommitted changes
+	cursor    int // 0=confirm, 1=cancel
+	width     int
 }
 
 type BatchConfirmedMsg struct {
@@ -35,10 +39,11 @@ func NewBatchConfirmModel() BatchConfirmModel {
 	return BatchConfirmModel{}
 }
 
-func (m *BatchConfirmModel) Show(action BatchAction, items []string, dirtyCount int) {
+func (m *BatchConfirmModel) Show(action BatchAction, items, taskNames []string, dirtyCount int) {
 	m.visible = true
 	m.action = action
 	m.items = items
+	m.taskNames = taskNames
 	m.dirty = dirtyCount
 	m.cursor = 1 // default to Cancel for safety
 }
@@ -110,15 +115,25 @@ func (m BatchConfirmModel) View() string {
 	body.WriteString("\n")
 
 	maxShow := 5
-	showItems := m.items
-	if len(showItems) > maxShow {
-		showItems = showItems[:3]
+	shown := len(m.items)
+	if shown > maxShow {
+		shown = 3
 	}
-	for _, name := range showItems {
-		body.WriteString(fmt.Sprintf("  %s\n", name))
+	nameStyle := lipgloss.NewStyle().Foreground(dimColor)
+	for i := 0; i < shown; i++ {
+		name := m.items[i]
+		task := ""
+		if i < len(m.taskNames) {
+			task = m.taskNames[i]
+		}
+		if task != "" {
+			body.WriteString(fmt.Sprintf("  %s  %s\n", task, nameStyle.Render("("+name+")")))
+		} else {
+			body.WriteString(fmt.Sprintf("  %s\n", name))
+		}
 	}
 	if len(m.items) > maxShow {
-		body.WriteString(fmt.Sprintf("  … and %d more\n", len(m.items)-3))
+		body.WriteString(fmt.Sprintf("  … and %d more\n", len(m.items)-shown))
 	}
 
 	if m.dirty > 0 && m.action == BatchDeleteWorktrees {

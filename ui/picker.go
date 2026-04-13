@@ -745,7 +745,7 @@ func (m *PickerModel) selectedItemNames() []string {
 
 func (m *PickerModel) openBatchKill() tea.Cmd {
 	names := m.selectedItemNames()
-	m.batchConfirm.Show(BatchKillSessions, names, 0)
+	m.batchConfirm.Show(BatchKillSessions, names, m.taskNamesFor(names), 0)
 	return nil
 }
 
@@ -762,8 +762,26 @@ func (m *PickerModel) openBatchDelete() tea.Cmd {
 			}
 		}
 	}
-	m.batchConfirm.Show(BatchDeleteWorktrees, names, dirtyCount)
+	m.batchConfirm.Show(BatchDeleteWorktrees, names, m.taskNamesFor(names), dirtyCount)
 	return nil
+}
+
+// taskNamesFor returns a parallel slice of resolved task names for the
+// given worktree names (empty string when no info is cached). Used by the
+// batch-confirm dialog so users see task titles, not just folder names.
+func (m *PickerModel) taskNamesFor(names []string) []string {
+	out := make([]string, len(names))
+	for i, name := range names {
+		for _, wt := range m.directories {
+			if wt.Name == name {
+				if info, ok := m.taskInfos[wt.Path]; ok {
+					out[i] = info.Name
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (m *PickerModel) batchKillSessions(names []string) tea.Cmd {
