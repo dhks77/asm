@@ -1527,11 +1527,11 @@ func (m PickerModel) View() string {
 	if m.err != "" {
 		errDialog := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("196")).
+			BorderForeground(dangerColor).
 			Padding(1, 2).
 			Width(min(50, m.width-4)).
 			Render(
-				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("Error") + "\n\n" +
+				lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render("Error") + "\n\n" +
 					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
 					statusBarStyle.Render("Press any key to dismiss"))
 		view = m.overlayCenter(view, errDialog)

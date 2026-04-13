@@ -645,11 +645,7 @@ func (m SettingsModel) save() tea.Cmd {
 }
 
 func (m SettingsModel) View() string {
-	title := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(primaryColor).
-		Padding(1, 2).
-		Render("Settings")
+	title := renderDialogTitle("Settings", primaryColor)
 
 	itemIdx := 0
 	var sections []string
@@ -703,13 +699,7 @@ func (m SettingsModel) View() string {
 		for _, f := range e.fields {
 			isCursor := itemIdx == m.cursor
 			padding := strings.Repeat(" ", labelWidth-len(f.Label))
-
-			labelStyle := lipgloss.NewStyle().Foreground(dimColor)
-			indicator := "  "
-			if isCursor {
-				labelStyle = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
-				indicator = lipgloss.NewStyle().Foreground(primaryColor).Render("▸ ")
-			}
+			indicator, labelStyle := fieldRowCursor(isCursor)
 
 			value := e.values[f.Key]
 			valueStr := value
@@ -743,36 +733,19 @@ func (m SettingsModel) View() string {
 	content := title + "\n\n" + strings.Join(sections, "\n")
 
 	if m.err != "" {
-		content += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("196")).Render(m.err)
+		content += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dangerColor).Render(m.err)
 	}
 
-	lines := strings.Count(content, "\n") + 1
-	contentHeight := m.height - 3
-	for lines < contentHeight {
-		content += "\n"
-		lines++
-	}
-
-	hint := " ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Enter: save  Esc: cancel"
-	statusBar := statusBarStyle.
-		Width(m.width).
-		Background(lipgloss.Color("236")).
-		Foreground(lipgloss.Color("252")).
-		Render(hint)
-
+	content = padToHeight(content, m.height-3)
+	statusBar := renderDialogHintBar(m.width,
+		" ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Enter: save  Esc: cancel")
 	return content + "\n" + statusBar
 }
 
 // renderNumberField renders a free-form numeric input with a trailing unit suffix.
 func (m SettingsModel) renderNumberField(itemIdx int, label, value, unit string) string {
 	isCursor := itemIdx == m.cursor
-
-	labelStyle := lipgloss.NewStyle().Foreground(dimColor)
-	indicator := "  "
-	if isCursor {
-		labelStyle = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
-		indicator = lipgloss.NewStyle().Foreground(primaryColor).Render("▸ ")
-	}
+	indicator, labelStyle := fieldRowCursor(isCursor)
 
 	display := value
 	if display == "" {
@@ -815,13 +788,7 @@ func parsePickerWidth(s string) int {
 
 func (m SettingsModel) renderSelectField(itemIdx int, label string, options []string, selected int) string {
 	isCursor := itemIdx == m.cursor
-
-	labelStyle := lipgloss.NewStyle().Foreground(dimColor)
-	indicator := "  "
-	if isCursor {
-		labelStyle = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
-		indicator = lipgloss.NewStyle().Foreground(primaryColor).Render("▸ ")
-	}
+	indicator, labelStyle := fieldRowCursor(isCursor)
 
 	value := options[selected]
 	var valueStr string
