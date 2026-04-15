@@ -158,10 +158,28 @@ func CreateWorktreeFromBranch(repoDir, targetPath, branch string) error {
 	return err
 }
 
-// CreateWorktreeNewBranch creates a new worktree with a new branch based on a base branch.
+// CreateWorktreeNewBranch creates a new worktree with a new branch based on a
+// base branch. When newBranch already exists locally, the existing branch is
+// checked out instead (baseBranch is ignored in that case) — the typical
+// cause is that the user forgot the branch was already created, and asm's
+// "new branch" dialog shouldn't become a dead end when the branch just
+// happens to exist without a live worktree. If the user needed to reset the
+// branch to baseBranch, they can do that explicitly in git.
 func CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch string) error {
+	if BranchExists(repoDir, newBranch) {
+		_, err := runGit(repoDir, "worktree", "add", targetPath, newBranch)
+		return err
+	}
 	_, err := runGit(repoDir, "worktree", "add", "-b", newBranch, targetPath, baseBranch)
 	return err
+}
+
+// BranchExists reports whether a local branch with the given name exists in
+// repoDir. Uses `git show-ref --verify --quiet` so there's no output to
+// parse: exit 0 means the ref resolved, exit 1 means it didn't.
+func BranchExists(repoDir, branch string) bool {
+	_, err := runGit(repoDir, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
 }
 
 // RemoveWorktree removes a git worktree by path, using --force if needed.
