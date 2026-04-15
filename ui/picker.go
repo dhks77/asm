@@ -218,12 +218,15 @@ func (m PickerModel) Init() tea.Cmd {
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Delegate to batch confirm dialog when visible
+	// Delegate to batch confirm dialog when visible. ONLY forward KeyMsgs —
+	// every other message (scrollTickMsg, providerStateTickMsg, spinnerTickMsg,
+	// sessionHealthTickMsg, statusSummaryWrittenMsg, …) must reach the main
+	// handler below so its tea.Tick chain stays armed. tea.Tick is a one-shot,
+	// so a tick that's consumed by batchConfirm (which ignores non-KeyMsgs and
+	// returns nil) dies on the spot — after the dialog closes the status bar,
+	// spinner, provider state, and session-health probe all remain frozen.
 	if m.batchConfirm.IsVisible() {
-		switch msg.(type) {
-		case tea.WindowSizeMsg:
-			// fall through to main handler
-		default:
+		if _, ok := msg.(tea.KeyMsg); ok {
 			var cmd tea.Cmd
 			m.batchConfirm, cmd = m.batchConfirm.Update(msg)
 			return m, cmd
