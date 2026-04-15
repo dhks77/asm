@@ -1,6 +1,9 @@
 package worktree
 
 import (
+	"context"
+	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -43,6 +46,29 @@ func FindMainRepo(dir string) (string, error) {
 		gitCommon = filepath.Join(dir, gitCommon)
 	}
 	return filepath.Dir(filepath.Clean(gitCommon)), nil
+}
+
+// FetchAllRemotes runs `git fetch --all --prune` so a subsequent ListBranches
+// call sees newly-pushed remote branches and drops stale ones. Uses the
+// fetch-specific timeout (30s) since it hits the network, and returns the
+// error so callers can decide whether to surface it — the worktree dialog
+// treats it as best-effort (cached branches are still useful offline).
+func FetchAllRemotes(repoDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), gitFetchTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "fetch", "--all", "--prune")
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("git fetch timed out after %s", gitFetchTimeout)
+		}
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return err
+	}
+	return nil
 }
 
 // ListBranches lists all branches (local + remote) from a git repo. When a

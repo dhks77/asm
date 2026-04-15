@@ -107,6 +107,11 @@ func (m *WorktreeDialogModel) Show(rootPath, dirPath string) tea.Cmd {
 
 	t := m.tracker
 	return func() tea.Msg {
+		// Refresh remotes before listing so newly-pushed branches appear
+		// without the user having to fetch in a shell first. Best-effort:
+		// offline / auth failure / slow remote shouldn't block opening
+		// the dialog — we fall through to the cached branch list.
+		_ = worktree.FetchAllRemotes(dirPath)
 		branches, err := worktree.ListBranches(dirPath)
 		if err != nil {
 			return BranchesLoadedMsg{Err: err}
