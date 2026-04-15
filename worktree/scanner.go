@@ -71,6 +71,12 @@ func Scan(root string) ([]Worktree, error) {
 // not just under repoPath. The main working tree is included as the first
 // entry; bare repo entries are skipped. Results are sorted by Name for stable
 // rendering.
+//
+// Stale entries (git metadata exists but the worktree directory has been
+// deleted on disk — e.g., removed with rm -rf or by an older asm/csm build
+// that bypassed `git worktree remove`) are filtered out. Git itself only
+// cleans these up on `git worktree prune`; asm stays read-only and just
+// hides them from the picker.
 func ScanRepo(repoPath string) ([]Worktree, error) {
 	entries, err := ListRepoWorktrees(repoPath)
 	if err != nil {
@@ -80,6 +86,9 @@ func ScanRepo(repoPath string) ([]Worktree, error) {
 	for _, e := range entries {
 		if e.Bare {
 			continue
+		}
+		if _, err := os.Stat(e.Path); err != nil {
+			continue // stale: git knows about it but the directory is gone
 		}
 		worktrees = append(worktrees, Worktree{
 			Name: filepath.Base(e.Path),
