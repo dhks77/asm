@@ -679,6 +679,30 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.adjustViewTop()
 		}
 
+	case "right":
+		// Descend into the cursor's directory. The new rootPath is re-
+		// detected (dir vs repo mode) so drilling from a collection view
+		// into a single repo naturally flips to repo mode.
+		wt := m.selectedDirectory()
+		if wt == nil {
+			return m, nil
+		}
+		info, err := os.Stat(wt.Path)
+		if err != nil || !info.IsDir() {
+			return m, nil
+		}
+		return m, m.navigateTo(wt.Path)
+
+	case "left":
+		// Ascend to the parent directory. filepath.Dir returns the same
+		// path when already at the filesystem root — use that to detect
+		// "no-op" and avoid navigating to nowhere.
+		parent := filepath.Dir(m.rootPath)
+		if parent == m.rootPath {
+			return m, nil
+		}
+		return m, m.navigateTo(parent)
+
 	case "enter":
 		wt := m.selectedDirectory()
 		if wt == nil {
@@ -894,6 +918,46 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 	m.sessionStartTimes[wt.Name] = time.Now()
 	m.showInWorkingPanel(wt)
 	return waitForExitCmd(wt.Name)
+}
+
+// navigateTo switches the picker's rootPath without rebuilding the tmux
+// session. The ←/→ handlers call this to drill into a subdirectory or pop
+// back up to the parent, re-detecting mode (dir vs repo) for the new path.
+//
+// State policy:
+//   - Path-keyed caches (branches, task infos) are cleared — stale entries
+//     belong to the old rootPath's entries and don't match the new scan.
+//   - Name-keyed session state (start times, provider map, provider states,
+//     flash timers, terminal start times) is preserved so an AI session
+//     that's still running remains consistent when the user navigates
+//     away and back. If two paths happen to expose same-named worktrees,
+//     the state will be misattributed — that's the same window-name
+//     collision asm already has today; navigation just makes it
+//     reachable.
+//   - activeKinds is cleared so the next providerStateTick repopulates it
+//     against the new listing cleanly.
+//   - workingDir/termDir are cleared only when their underlying tmux
+//     window is gone; a live session fronted in the working pane stays
+//     fronted through the navigation.
+func (m *PickerModel) navigateTo(newPath string) tea.Cmd {
+	m.rootPath = newPath
+	m.isRepoMode = worktree.IsRepoMode(newPath)
+	if newCfg, err := config.LoadMerged(newPath); err == nil {
+		m.cfg = newCfg
+	}
+
+	m.branches = make(map[string]string)
+	m.taskInfos = make(map[string]tracker.TaskInfo)
+	m.cachedBranches = make(map[string]string)
+	m.activeKinds = make(map[string]asmtmux.SessionKind)
+
+	m.cursor = 0
+	m.viewTop = 0
+	m.searchQuery = ""
+	m.selectedItems = make(map[string]bool)
+	m.err = ""
+
+	return m.scanDirectories()
 }
 
 func (m *PickerModel) clearSelection() {
@@ -1484,9 +1548,9 @@ func renderShortcutsPlain(selectedCount int, isRepoMode bool) string {
 		return fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
 	}
 	if isRepoMode {
-		return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
+		return " ↵: open  ←→: nav  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
 	}
-	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^d: remove  ^s: settings  ^q: quit"
+	return " ↵: open  ←→: nav  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^d: remove  ^s: settings  ^q: quit"
 }
 
 // buildLine1 returns the detailed line for the currently displayed session and
