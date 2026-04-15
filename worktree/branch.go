@@ -45,7 +45,11 @@ func FindMainRepo(dir string) (string, error) {
 	return filepath.Dir(filepath.Clean(gitCommon)), nil
 }
 
-// ListBranches lists all branches (local + remote) from a git repo.
+// ListBranches lists all branches (local + remote) from a git repo. When a
+// local branch and its origin/<same-name> counterpart both exist, the remote
+// entry is dropped — selecting it would only route through -b which fails if
+// the local ref is already there, and the local entry already represents the
+// same branch from the user's perspective.
 func ListBranches(repoDir string) ([]Branch, error) {
 	out, err := runGit(repoDir, "branch", "-a", "--format=%(refname:short)")
 	if err != nil {
@@ -58,15 +62,32 @@ func ListBranches(repoDir string) ([]Branch, error) {
 		wtBranches["origin/"+branch] = true
 	}
 
+	// First pass: collect all local branch names so we can filter out
+	// redundant origin/ entries in the second pass.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	localNames := make(map[string]bool)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "->") || strings.HasPrefix(line, "origin/") {
+			continue
+		}
+		localNames[line] = true
+	}
+
 	var branches []Branch
 	seen := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.Contains(line, "->") {
 			continue
 		}
 		if seen[line] {
 			continue
+		}
+		if strings.HasPrefix(line, "origin/") {
+			if localNames[strings.TrimPrefix(line, "origin/")] {
+				continue // local counterpart already listed
+			}
 		}
 		seen[line] = true
 		branches = append(branches, Branch{
@@ -147,11 +168,21 @@ func parseWorktreeListPorcelain(out string) []WorktreeListEntry {
 }
 
 // CreateWorktreeFromBranch creates a new worktree checking out an existing branch.
-// For remote branches (origin/...), it creates a local tracking branch automatically.
+// For remote branches (origin/...), it creates a local tracking branch
+// automatically — unless a local branch of the same name already exists, in
+// which case that local branch is checked out (its tip wins over the remote
+// tip; caller can reset/pull inside the worktree if they need origin).
 func CreateWorktreeFromBranch(repoDir, targetPath, branch string) error {
 	if strings.HasPrefix(branch, "origin/") {
 		localName := strings.TrimPrefix(branch, "origin/")
+		if BranchExists(repoDir, localName) {
+			_, err := runGit(repoDir, "worktree", "add", targetPath, localName)
+			return err
+		}
 		_, err := runGit(repoDir, "worktree", "add", "-b", localName, targetPath, branch)
+		if err != nil && strings.Contains(err.Error(), "already exists") {
+			_, err = runGit(repoDir, "worktree", "add", targetPath, localName)
+		}
 		return err
 	}
 	_, err := runGit(repoDir, "worktree", "add", targetPath, branch)
