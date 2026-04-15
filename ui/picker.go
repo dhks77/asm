@@ -884,7 +884,7 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 	}
 	args := p.Args()
 	if resume {
-		if extra := p.ResumeArgs(); len(extra) > 0 {
+		if extra := p.ResumeArgs(wt.Path); len(extra) > 0 {
 			args = append(append([]string(nil), extra...), args...)
 		}
 	}
