@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -241,8 +243,28 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	asmtmux.FocusPickingPanel()
 
 	// Attach to the session (blocks until session ends)
-	if err := asmtmux.Attach(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+	attachErr := asmtmux.Attach()
+
+	// The picker's ←/→ navigate writes a handoff file then kills the tmux
+	// session, which pops Attach. If the handoff is present, re-exec asm
+	// with the new --path so we end up in a fresh tmux session named after
+	// the new root. syscall.Exec replaces the current process image, so
+	// repeated navigations don't accumulate parent asm processes.
+	if data, err := os.ReadFile(asmtmux.HandoffFilePath()); err == nil {
+		os.Remove(asmtmux.HandoffFilePath())
+		next := strings.TrimSpace(string(data))
+		if next != "" {
+			self, err := os.Executable()
+			if err == nil {
+				// Preserve the original env so ~/.asm config, tmux,
+				// $SHELL etc. all carry through.
+				_ = syscall.Exec(self, []string{self, "--path", next}, os.Environ())
+			}
+		}
+	}
+
+	if attachErr != nil {
+		if exitErr, ok := attachErr.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
 	}

@@ -920,44 +920,26 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 	return waitForExitCmd(wt.Name)
 }
 
-// navigateTo switches the picker's rootPath without rebuilding the tmux
-// session. The ←/→ handlers call this to drill into a subdirectory or pop
-// back up to the parent, re-detecting mode (dir vs repo) for the new path.
+// navigateTo leaves a handoff file for the orchestrator and tears down the
+// current tmux session. The orchestrator, which is blocked on Attach, reads
+// the handoff after Attach returns and re-execs asm with --path=newPath.
 //
-// State policy:
-//   - Path-keyed caches (branches, task infos) are cleared — stale entries
-//     belong to the old rootPath's entries and don't match the new scan.
-//   - Name-keyed session state (start times, provider map, provider states,
-//     flash timers, terminal start times) is preserved so an AI session
-//     that's still running remains consistent when the user navigates
-//     away and back. If two paths happen to expose same-named worktrees,
-//     the state will be misattributed — that's the same window-name
-//     collision asm already has today; navigation just makes it
-//     reachable.
-//   - activeKinds is cleared so the next providerStateTick repopulates it
-//     against the new listing cleanly.
-//   - workingDir/termDir are cleared only when their underlying tmux
-//     window is gone; a live session fronted in the working pane stays
-//     fronted through the navigation.
+// Why restart instead of in-place rewrite of rootPath:
+//   - The tmux session name hashes rootPath; staying in-place leaves the
+//     session named after the ORIGINAL path forever, which is misleading.
+//   - Name-keyed per-session state (start times, providers) risks collision
+//     when two paths expose same-named worktrees. A fresh process avoids
+//     any carry-over.
+//   - All active AI/terminal sessions running in this tmux session die as
+//     a consequence. That's the stated trade-off — user chose clean
+//     restart semantics.
 func (m *PickerModel) navigateTo(newPath string) tea.Cmd {
-	m.rootPath = newPath
-	m.isRepoMode = worktree.IsRepoMode(newPath)
-	if newCfg, err := config.LoadMerged(newPath); err == nil {
-		m.cfg = newCfg
-	}
-
-	m.branches = make(map[string]string)
-	m.taskInfos = make(map[string]tracker.TaskInfo)
-	m.cachedBranches = make(map[string]string)
-	m.activeKinds = make(map[string]asmtmux.SessionKind)
-
-	m.cursor = 0
-	m.viewTop = 0
-	m.searchQuery = ""
-	m.selectedItems = make(map[string]bool)
-	m.err = ""
-
-	return m.scanDirectories()
+	// Write the handoff BEFORE killing the session. Best-effort: if this
+	// fails we still tear down, but the orchestrator will just exit
+	// instead of re-execing. Ctrl+Q behaviour.
+	_ = os.WriteFile(asmtmux.HandoffFilePath(), []byte(newPath), 0o644)
+	asmtmux.KillSession()
+	return tea.Quit
 }
 
 func (m *PickerModel) clearSelection() {

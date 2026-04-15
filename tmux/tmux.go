@@ -88,6 +88,15 @@ func SetSessionName(rootPath string) {
 	SessionName = fmt.Sprintf("asm-%s-%06x", sanitized, h.Sum32()&0xffffff)
 }
 
+// HandoffFilePath returns the path used by the picker to leave a "next
+// rootPath" for its orchestrator before killing the tmux session. The
+// picker writes it, the orchestrator reads it right after Attach returns,
+// and on non-empty content re-execs asm with the new --path. Keyed by
+// SessionName so concurrent asm instances don't clobber each other.
+func HandoffFilePath() string {
+	return filepath.Join(os.TempDir(), "asm-handoff-"+SessionName+".txt")
+}
+
 func IsAvailable() bool {
 	_, err := exec.LookPath("tmux")
 	return err == nil
