@@ -18,6 +18,56 @@ var SessionName = "asm"
 
 const MainWindow = "main"
 
+// paneBaseIndex caches the global pane-base-index so we don't query tmux
+// repeatedly. Populated lazily by PaneBase().
+var paneBaseIndex = -1
+
+// PaneBase returns the tmux pane-base-index (typically 0 or 1).
+func PaneBase() int {
+	if paneBaseIndex >= 0 {
+		return paneBaseIndex
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "show-options", "-gv", "pane-base-index").Output()
+	if err != nil {
+		paneBaseIndex = 0
+		return 0
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "1" {
+		paneBaseIndex = 1
+	} else {
+		paneBaseIndex = 0
+	}
+	return paneBaseIndex
+}
+
+// pickerPane returns the pane index string for the picker (first pane).
+func pickerPane() string {
+	return fmt.Sprintf("%d", PaneBase())
+}
+
+// workingPane returns the pane index string for the working panel (second pane).
+func workingPane() string {
+	return fmt.Sprintf("%d", PaneBase()+1)
+}
+
+// pickerTarget returns the tmux target for the picker pane in the main window.
+func pickerTarget() string {
+	return fmt.Sprintf("%s:%s.%s", SessionName, MainWindow, pickerPane())
+}
+
+// workingTarget returns the tmux target for the working pane in the main window.
+func workingTarget() string {
+	return fmt.Sprintf("%s:%s.%s", SessionName, MainWindow, workingPane())
+}
+
+// windowFirstPane returns the target for the first pane in a named window.
+func windowFirstPane(winName string) string {
+	return fmt.Sprintf("%s:%s.%s", SessionName, winName, pickerPane())
+}
+
 // SetSessionName derives a per-rootPath tmux session name. Same rootPath
 // always yields the same name (hash-stable), different rootPaths get
 // distinct names. Safe to call repeatedly.
@@ -75,11 +125,15 @@ func WindowName(dirName string) string {
 
 // CreateSession creates a new tmux session and sets up pane-switching key bindings.
 func CreateSession(pickerCmd string) error {
-	err := exec.Command("tmux", "new-session", "-d",
+	// Chain set-option atomically with new-session via ";" so that
+	// destroy-unattached is disabled before tmux's event loop can destroy
+	// the detached session.
+	err := runTmuxCmd("new-session", "-d",
 		"-s", SessionName,
 		"-n", MainWindow,
 		"-x", "200", "-y", "50",
-	).Run()
+		";", "set-option", "-t", SessionName, "destroy-unattached", "off",
+	)
 	if err != nil {
 		return err
 	}
@@ -98,11 +152,15 @@ func CreateSession(pickerCmd string) error {
 	const inAsm = "#{m:asm-*,#{session_name}}"
 
 	// Simple routed key: inside asm session, deliver an F-key to the
-	// picker (main.0); outside, pass the key through unchanged.
+	// picker pane; outside, pass the key through unchanged.
+	pp := pickerPane()
+	wp := workingPane()
+	pickerRef := "main." + pp
+
 	bindRouted := func(key, fkey string) {
 		_ = exec.Command("tmux", "bind-key", "-T", "root", key,
 			"if-shell", "-F", inAsm,
-			"send-keys -t main.0 "+fkey,
+			"send-keys -t "+pickerRef+" "+fkey,
 			"send-keys "+key,
 		).Run()
 	}
@@ -118,12 +176,12 @@ func CreateSession(pickerCmd string) error {
 	bindRouted("C-]", "F1")  // rotate to next active session
 	bindRouted("C-e", "F2")  // open worktree in IDE
 
-	// Ctrl+g: toggle pane focus — more complex, pane-index dependent.
-	//   working panel (pane 1) → select picker (main.0)
-	//   picking panel (pane 0) → send F11 so the picker can focus-or-start
+	// Ctrl+g: toggle pane focus — pane-index dependent.
+	//   working panel → select picker
+	//   picking panel → send F11 so the picker can focus-or-start
 	_ = exec.Command("tmux", "bind-key", "-T", "root", "C-g",
 		"if-shell", "-F", inAsm,
-		"if-shell -F '#{==:#{pane_index},1}' 'select-pane -t main.0' 'send-keys -t main.0 F11'",
+		fmt.Sprintf("if-shell -F '#{==:#{pane_index},%s}' 'select-pane -t %s' 'send-keys -t %s F11'", wp, pickerRef, pickerRef),
 		"send-keys C-g",
 	).Run()
 
@@ -131,7 +189,7 @@ func CreateSession(pickerCmd string) error {
 	// focused (dialogs use Ctrl+X for their own actions) pass through.
 	_ = exec.Command("tmux", "bind-key", "-T", "root", "C-x",
 		"if-shell", "-F", inAsm,
-		"if-shell -F '#{==:#{pane_index},0}' 'send-keys -t main.0 F5' 'send-keys C-x'",
+		fmt.Sprintf("if-shell -F '#{==:#{pane_index},%s}' 'send-keys -t %s F5' 'send-keys C-x'", pp, pickerRef),
 		"send-keys C-x",
 	).Run()
 
@@ -153,22 +211,22 @@ func CreateSession(pickerCmd string) error {
 
 // SendPickerCommand sends the picker command to the main window.
 func SendPickerCommand(pickerCmd string) error {
-	return exec.Command("tmux", "send-keys",
+	return runTmuxCmd("send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
 		pickerCmd, "Enter",
-	).Run()
+	)
 }
 
 // SplitWorkingPanel creates the working panel with a placeholder that stays alive.
 func SplitWorkingPanel(percentage int) error {
-	return exec.Command("tmux", "split-window", "-h", "-d",
+	return runTmuxCmd("split-window", "-h", "-d",
 		"-l", fmt.Sprintf("%d%%", percentage),
-		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
+		"-t", pickerTarget(),
 		"cat",
-	).Run()
+	)
 }
 
-// ResizePickerPanel sets the picker pane (pane 0) width to the given percent
+// ResizePickerPanel sets the picker pane width to the given percent
 // of the terminal width. Applied immediately to a running session.
 func ResizePickerPanel(pickerPct int) error {
 	if pickerPct <= 0 {
@@ -179,13 +237,13 @@ func ResizePickerPanel(pickerPct int) error {
 	if cells < 10 {
 		cells = 10
 	}
-	return exec.Command("tmux", "resize-pane",
-		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
+	return runTmuxCmd("resize-pane",
+		"-t", pickerTarget(),
 		"-x", fmt.Sprintf("%d", cells),
-	).Run()
+	)
 }
 
-// WorkingPanelExists checks if the working panel (pane 1) exists.
+// WorkingPanelExists checks if the working panel exists.
 func WorkingPanelExists() bool {
 	out, err := exec.Command("tmux", "list-panes",
 		"-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
@@ -194,8 +252,9 @@ func WorkingPanelExists() bool {
 	if err != nil {
 		return false
 	}
+	wp := workingPane()
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) == "1" {
+		if strings.TrimSpace(line) == wp {
 			return true
 		}
 	}
@@ -210,16 +269,16 @@ func EnsureWorkingPanel() {
 }
 
 // FocusPickingPanel focuses the picking panel (picker).
-// Unzooms the main window first since zoom hides pane 0.
+// Unzooms the main window first since zoom hides the picker.
 func FocusPickingPanel() error {
 	UnzoomWorkingPanel()
-	return exec.Command("tmux", "select-pane",
-		"-t", fmt.Sprintf("%s:%s.0", SessionName, MainWindow),
-	).Run()
+	return runTmuxCmd("select-pane",
+		"-t", pickerTarget(),
+	)
 }
 
-// ActivePaneIndex returns the index of the currently active pane in the main
-// window (0 = picker, 1 = working). Returns -1 on error.
+// ActivePaneIndex returns the logical index of the currently active pane in
+// the main window (0 = picker, 1 = working). Returns -1 on error.
 func ActivePaneIndex() int {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -231,10 +290,10 @@ func ActivePaneIndex() int {
 		return -1
 	}
 	s := strings.TrimSpace(string(out))
-	switch s {
-	case "0":
+	if s == pickerPane() {
 		return 0
-	case "1":
+	}
+	if s == workingPane() {
 		return 1
 	}
 	return -1
@@ -269,19 +328,25 @@ func ZoomPickingPanel() error {
 }
 
 // zoomPane is the shared implementation for ZoomWorkingPanel / ZoomPickingPanel.
+// idx is a logical index: 0 = picker, 1 = working.
 // tmux's zoom invariant: when a window is zoomed, the active pane IS the
 // zoomed pane. So we can detect "already zoomed on target" via
 // ActivePaneIndex() and skip the flash of unzoom + re-zoom in that case.
 func zoomPane(idx int) error {
-	target := fmt.Sprintf("%s:%s.%d", SessionName, MainWindow, idx)
+	var target string
+	if idx == 0 {
+		target = pickerTarget()
+	} else {
+		target = workingTarget()
+	}
 	if IsWorkingPanelZoomed() && ActivePaneIndex() == idx {
 		return nil
 	}
 	if IsWorkingPanelZoomed() {
 		UnzoomWorkingPanel()
 	}
-	exec.Command("tmux", "select-pane", "-t", target).Run()
-	return exec.Command("tmux", "resize-pane", "-Z", "-t", target).Run()
+	runTmuxCmd("select-pane", "-t", target)
+	return runTmuxCmd("resize-pane", "-Z", "-t", target)
 }
 
 // UnzoomWorkingPanel removes zoom if currently zoomed. Safe to call always.
@@ -289,9 +354,9 @@ func UnzoomWorkingPanel() error {
 	if !IsWorkingPanelZoomed() {
 		return nil
 	}
-	return exec.Command("tmux", "resize-pane",
+	return runTmuxCmd("resize-pane",
 		"-Z", "-t", fmt.Sprintf("%s:%s", SessionName, MainWindow),
-	).Run()
+	)
 }
 
 // EnableStatusBar turns on a three-line status bar at the bottom of the
@@ -359,9 +424,9 @@ func TerminalWidth() int {
 
 // FocusWorkingPanel focuses the working panel (session).
 func FocusWorkingPanel() error {
-	return exec.Command("tmux", "select-pane",
-		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-	).Run()
+	return runTmuxCmd("select-pane",
+		"-t", workingTarget(),
+	)
 }
 
 // Attach attaches to the asm tmux session (blocking).
@@ -379,11 +444,11 @@ func Attach() error {
 func CreateDirectoryWindow(dirName, dirPath, command string, args []string) error {
 	winName := WindowName(dirName)
 
-	err := exec.Command("tmux", "new-window", "-d",
+	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
 		"-n", winName,
 		"-c", dirPath,
-	).Run()
+	)
 	if err != nil {
 		return err
 	}
@@ -397,10 +462,10 @@ func CreateDirectoryWindow(dirName, dirPath, command string, args []string) erro
 	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(dirName))
 	fullCmd := aiCmd + " ; " + exitSignal
 
-	return exec.Command("tmux", "send-keys",
+	return runTmuxCmd("send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 		fullCmd, "Enter",
-	).Run()
+	)
 }
 
 // ExitSignalName returns the tmux wait-for signal name for a directory.
@@ -453,17 +518,17 @@ func CleanupExitedWindow(dirName string, isCurrentlyDisplayed bool) {
 }
 
 func swapPaneToWorking(winName string) error {
-	return exec.Command("tmux", "swap-pane",
-		"-s", fmt.Sprintf("%s:%s.0", SessionName, winName),
-		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-	).Run()
+	return runTmuxCmd("swap-pane",
+		"-s", windowFirstPane(winName),
+		"-t", workingTarget(),
+	)
 }
 
 func swapPaneFromWorking(winName string) error {
-	return exec.Command("tmux", "swap-pane",
-		"-s", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-		"-t", fmt.Sprintf("%s:%s.0", SessionName, winName),
-	).Run()
+	return runTmuxCmd("swap-pane",
+		"-s", workingTarget(),
+		"-t", windowFirstPane(winName),
+	)
 }
 
 // SwapToWorkingPanel swaps a directory's window pane into the main window's working panel.
@@ -479,9 +544,9 @@ func SwapBackFromWorkingPanel(dirName string) error {
 // KillDirectoryWindow kills a directory's tmux window.
 func KillDirectoryWindow(dirName string) error {
 	winName := WindowName(dirName)
-	return exec.Command("tmux", "kill-window",
+	return runTmuxCmd("kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
-	).Run()
+	)
 }
 
 // RunInWorkingPanel creates a hidden tmux window running cmd, swaps it into the
@@ -489,10 +554,10 @@ func KillDirectoryWindow(dirName string) error {
 // The exit code is stored in tmux variable @{windowName}-exit.
 func RunInWorkingPanel(windowName, cmd string) error {
 	EnsureWorkingPanel()
-	err := exec.Command("tmux", "new-window", "-d",
+	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
 		"-n", windowName,
-	).Run()
+	)
 	if err != nil {
 		return err
 	}
@@ -501,18 +566,18 @@ func RunInWorkingPanel(windowName, cmd string) error {
 	exitSignal := fmt.Sprintf("tmux set -t %s %s $? ; tmux wait-for -S %s", SessionName, exitVar, windowName)
 	fullCmd := cmd + " ; " + exitSignal
 
-	if err := exec.Command("tmux", "send-keys",
+	if err := runTmuxCmd("send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
 		fullCmd, "Enter",
-	).Run(); err != nil {
+	); err != nil {
 		return err
 	}
 
 	// Swap into working panel
-	return exec.Command("tmux", "swap-pane",
-		"-s", fmt.Sprintf("%s:%s.0", SessionName, windowName),
-		"-t", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-	).Run()
+	return runTmuxCmd("swap-pane",
+		"-s", windowFirstPane(windowName),
+		"-t", workingTarget(),
+	)
 }
 
 // WaitAndCleanupWorkingPanel blocks until the window's process exits,
@@ -534,13 +599,13 @@ func WaitAndCleanupWorkingPanel(windowName string) int {
 		}
 	}
 
-	exec.Command("tmux", "swap-pane",
-		"-s", fmt.Sprintf("%s:%s.1", SessionName, MainWindow),
-		"-t", fmt.Sprintf("%s:%s.0", SessionName, windowName),
-	).Run()
-	exec.Command("tmux", "kill-window",
+	runTmux("swap-pane",
+		"-s", workingTarget(),
+		"-t", windowFirstPane(windowName),
+	)
+	runTmux("kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
-	).Run()
+	)
 	FocusPickingPanel()
 	return exitCode
 }
@@ -550,13 +615,28 @@ func WaitAndCleanupWorkingPanel(windowName string) int {
 // snowball the per-second detect-state loop.
 const tmuxCallTimeout = 3 * time.Second
 
+// runTmuxCmd runs a tmux command and wraps the error with stderr output
+// so callers get actionable messages instead of bare "exit status 1".
+func runTmuxCmd(args ...string) error {
+	cmd := exec.Command("tmux", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return err
+	}
+	return nil
+}
+
 // CapturePaneContent captures the visible content of a directory's pane.
 func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
-		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+		target = workingTarget()
 	} else {
-		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
+		target = windowFirstPane(WindowName(dirName))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -573,9 +653,9 @@ func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 func CapturePaneHistory(dirName string, isDisplayed bool, lines int) (string, error) {
 	var target string
 	if isDisplayed {
-		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+		target = workingTarget()
 	} else {
-		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
+		target = windowFirstPane(WindowName(dirName))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -592,9 +672,9 @@ func CapturePaneHistory(dirName string, isDisplayed bool, lines int) (string, er
 func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
-		target = fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+		target = workingTarget()
 	} else {
-		target = fmt.Sprintf("%s:%s.0", SessionName, WindowName(dirName))
+		target = windowFirstPane(WindowName(dirName))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -621,14 +701,14 @@ func HasUtilityWindow() bool {
 // CloseUtilityPanel sends Escape twice to the working panel to gracefully close any utility dialog.
 // First Escape clears any active filter/input, second Escape closes the dialog.
 func CloseUtilityPanel() {
-	target := fmt.Sprintf("%s:%s.1", SessionName, MainWindow)
+	target := workingTarget()
 	exec.Command("tmux", "send-keys", "-t", target, "Escape").Run()
 	exec.Command("tmux", "send-keys", "-t", target, "Escape").Run()
 }
 
 // KillSession kills the entire asm tmux session.
 func KillSession() error {
-	return exec.Command("tmux", "kill-session", "-t", SessionName).Run()
+	return runTmuxCmd("kill-session", "-t", SessionName)
 }
 
 // TerminalWindowName returns the tmux window name for a directory's terminal.
@@ -653,11 +733,11 @@ func WaitForTermExit(dirName string) error {
 func CreateTerminalWindow(dirName, dirPath string) error {
 	winName := TerminalWindowName(dirName)
 
-	err := exec.Command("tmux", "new-window", "-d",
+	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
 		"-n", winName,
 		"-c", dirPath,
-	).Run()
+	)
 	if err != nil {
 		return err
 	}
@@ -670,10 +750,10 @@ func CreateTerminalWindow(dirName, dirPath string) error {
 	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(dirName))
 	fullCmd := shell + " ; " + exitSignal
 
-	return exec.Command("tmux", "send-keys",
+	return runTmuxCmd("send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 		fullCmd, "Enter",
-	).Run()
+	)
 }
 
 // SwapTermToWorkingPanel swaps a terminal window's pane into the main window's working panel.
@@ -689,14 +769,14 @@ func SwapTermBackFromWorkingPanel(dirName string) error {
 // KillTerminalWindow kills a terminal's tmux window.
 func KillTerminalWindow(dirName string) error {
 	winName := TerminalWindowName(dirName)
-	return exec.Command("tmux", "kill-window",
+	return runTmuxCmd("kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
-	).Run()
+	)
 }
 
 // SetSessionOption sets a tmux session-level option.
 func SetSessionOption(key, value string) error {
-	return exec.Command("tmux", "set-option", "-t", SessionName, "@"+key, value).Run()
+	return runTmuxCmd("set-option", "-t", SessionName, "@"+key, value)
 }
 
 // GetSessionOption reads a tmux session-level option.
@@ -711,10 +791,10 @@ func GetSessionOption(key string) string {
 // SetWindowOption sets a tmux window option on a directory's window.
 func SetWindowOption(dirName, key, value string) error {
 	winName := WindowName(dirName)
-	return exec.Command("tmux", "set-option", "-w",
+	return runTmuxCmd("set-option", "-w",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 		"@"+key, value,
-	).Run()
+	)
 }
 
 // GetWindowOption reads a tmux window option from a directory's window.

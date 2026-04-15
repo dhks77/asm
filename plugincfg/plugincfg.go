@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -94,5 +96,13 @@ func setPluginValues(pluginPath string, values map[string]string) error {
 	data, _ := json.Marshal(values)
 	cmd := exec.CommandContext(ctx, pluginPath, "config-set")
 	cmd.Stdin = bytes.NewReader(data)
-	return cmd.Run()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("%s: %w", msg, err)
+		}
+		return err
+	}
+	return nil
 }

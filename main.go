@@ -32,10 +32,13 @@ func main() {
 	ideSelect := flag.Bool("ide-select", false, "Run IDE selection dialog")
 	flag.Parse()
 
+	initLog()
+	defer closeLog()
+
 	// Load user config first to get DefaultPath
 	userCfg, err := config.LoadScope(config.ScopeUser, "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		logErr("Error loading config: %v\n", err)
 		os.Exit(1)
 	}
 	cfg := userCfg
@@ -47,7 +50,7 @@ func main() {
 	if rootPath == "" {
 		rootPath, err = os.Getwd()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
+			logErr("Error getting current directory: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -55,14 +58,14 @@ func main() {
 	// Resolve to absolute path
 	rootPath, err = filepath.Abs(rootPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
+		logErr("Error resolving path: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Verify path exists
 	info, err := os.Stat(rootPath)
 	if err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Error: %s is not a valid directory\n", rootPath)
+		logErr("Error: %s is not a valid directory\n", rootPath)
 		os.Exit(1)
 	}
 
@@ -118,7 +121,7 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 			pluginPath := filepath.Join(pluginDir, entry.Name())
 			p, err := provider.LoadPlugin(pluginPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to load plugin %q: %v\n", entry.Name(), err)
+				logErr("Warning: failed to load plugin %q: %v\n", entry.Name(), err)
 				continue
 			}
 			reg.Register(p)
@@ -191,7 +194,7 @@ func saveDoorayConfig(dc *tracker.DoorayConfig, scope config.Scope, rootPath str
 
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
 	if !asmtmux.IsAvailable() {
-		fmt.Fprintln(os.Stderr, "Error: tmux is required. Install it with: brew install tmux")
+		logErr("Error: tmux is required. Install it with: brew install tmux\n")
 		os.Exit(1)
 	}
 
@@ -209,20 +212,20 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	// Get current executable path for picker command
 	exe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error finding executable: %v\n", err)
+		logErr("Error finding executable: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Create tmux session (starts with default shell)
 	pickerCmd := fmt.Sprintf("%s --picker --path %s", exe, rootPath)
 	if err := asmtmux.CreateSession(pickerCmd); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating tmux session: %v\n", err)
+		logErr("Error creating tmux session: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Send the picker command to the main pane
 	if err := asmtmux.SendPickerCommand(pickerCmd); err != nil {
-		fmt.Fprintf(os.Stderr, "Error sending picker command: %v\n", err)
+		logErr("Error sending picker command: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -230,7 +233,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	// Working panel width = 100% - picker width.
 	workingWidth := 100 - cfg.GetPickerWidth()
 	if err := asmtmux.SplitWorkingPanel(workingWidth); err != nil {
-		fmt.Fprintf(os.Stderr, "Error splitting pane: %v\n", err)
+		logErr("Error splitting pane: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -251,7 +254,7 @@ func runDelete(dirName, taskName string, dirty, isWorktree bool) {
 
 	result, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		logErr("Error: %v\n", err)
 		os.Exit(1)
 	}
 	if m, ok := result.(ui.DeleteModel); ok && m.Confirmed {
@@ -266,7 +269,7 @@ func runWorktreeCreate(rootPath, dirPath string, t tracker.Tracker) {
 
 	result, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		logErr("Error: %v\n", err)
 		os.Exit(1)
 	}
 	if m, ok := result.(ui.WorktreeRunnerModel); ok && m.Created {
@@ -282,7 +285,7 @@ func runProviderSelect(registry *provider.Registry) {
 
 	result, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		logErr("Error: %v\n", err)
 		os.Exit(1)
 	}
 	if m, ok := result.(ui.ProviderSelectModel); ok && m.Selected != "" {
@@ -308,7 +311,7 @@ func runIDESelect(ides []ide.IDE) {
 
 	result, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		logErr("Error: %v\n", err)
 		os.Exit(1)
 	}
 	if m, ok := result.(ui.IDESelectModel); ok && m.Selected != "" {
@@ -326,7 +329,7 @@ func runSettings(cfg *config.Config, rootPath string, registry *provider.Registr
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		logErr("Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -376,7 +379,7 @@ func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry,
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		logErr("Error: %v\n", err)
 		os.Exit(1)
 	}
 }
