@@ -218,12 +218,15 @@ func (m PickerModel) Init() tea.Cmd {
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Delegate to batch confirm dialog when visible
+	// Delegate to batch confirm dialog when visible. ONLY forward KeyMsgs —
+	// every other message (scrollTickMsg, providerStateTickMsg, spinnerTickMsg,
+	// sessionHealthTickMsg, statusSummaryWrittenMsg, …) must reach the main
+	// handler below so its tea.Tick chain stays armed. tea.Tick is a one-shot,
+	// so a tick that's consumed by batchConfirm (which ignores non-KeyMsgs and
+	// returns nil) dies on the spot — after the dialog closes the status bar,
+	// spinner, provider state, and session-health probe all remain frozen.
 	if m.batchConfirm.IsVisible() {
-		switch msg.(type) {
-		case tea.WindowSizeMsg:
-			// fall through to main handler
-		default:
+		if _, ok := msg.(tea.KeyMsg); ok {
 			var cmd tea.Cmd
 			m.batchConfirm, cmd = m.batchConfirm.Update(msg)
 			return m, cmd
@@ -496,7 +499,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			asmtmux.KillDirectoryWindow(wt.Name)
 		}
 		m.cleanupSessionState(wt.Name)
-		return m, m.startSession(wt, msg.ProviderName)
+		return m, m.startSession(wt, msg.ProviderName, true)
 
 	case batchKillCompletedMsg:
 		return m, nil
@@ -678,7 +681,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if asmtmux.WindowExists(winName) {
 			m.showInWorkingPanel(wt)
 		} else {
-			return m, m.startSession(wt, m.registry.Default().Name())
+			return m, m.startSession(wt, m.registry.Default().Name(), true)
 		}
 
 	case "f12": // Ctrl+t: open / focus / toggle terminal.
@@ -721,7 +724,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// swaps the cursor's session into the working pane.
 			m.showInWorkingPanel(wt)
 		} else {
-			return m, m.startSession(wt, m.registry.Default().Name())
+			return m, m.startSession(wt, m.registry.Default().Name(), true)
 		}
 
 	case "f10": // Ctrl+n: new AI session
@@ -743,7 +746,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			asmtmux.KillDirectoryWindow(wt.Name)
 		}
-		return m, m.startSession(wt, providerName)
+		return m, m.startSession(wt, providerName, false)
 
 	case "f9": // Ctrl+s: settings
 		return m, m.openSettings()
@@ -854,12 +857,25 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string) tea.Cmd {
+// startSession launches the AI provider in a fresh tmux window for the given
+// worktree. When resume is true and the provider advertises ResumeArgs, those
+// args are prepended — asking the provider to continue its previous session
+// in this worktree's cwd. Ctrl+N is the only caller that passes resume=false
+// (explicit "start fresh"); every other entry point (Enter, Ctrl+G, provider
+// switch) defaults to resuming so closing + reopening a window doesn't lose
+// the conversation.
+func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, resume bool) tea.Cmd {
 	p := m.registry.Get(providerName)
 	if p == nil {
 		p = m.registry.Default()
 	}
-	asmtmux.CreateDirectoryWindow(wt.Name, wt.Path, p.Command(), p.Args())
+	args := p.Args()
+	if resume {
+		if extra := p.ResumeArgs(); len(extra) > 0 {
+			args = append(append([]string(nil), extra...), args...)
+		}
+	}
+	asmtmux.CreateDirectoryWindow(wt.Name, wt.Path, p.Command(), args)
 	asmtmux.SetWindowOption(wt.Name, "asm-provider", p.Name())
 	m.worktreeProviders[wt.Name] = p.Name()
 	m.sessionStartTimes[wt.Name] = time.Now()

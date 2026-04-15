@@ -15,7 +15,10 @@ type PluginInfo struct {
 	DisplayName   string   `json:"display_name"`
 	Command       string   `json:"command"`
 	Args          []string `json:"args"`
-	NeedsContent  bool     `json:"needs_content"`
+	// ResumeArgs is prepended to Args when asm wants to resume a prior
+	// session. Plugins that can't resume omit this field (stays nil).
+	ResumeArgs   []string `json:"resume_args,omitempty"`
+	NeedsContent bool     `json:"needs_content"`
 }
 
 type detectStateRequest struct {
@@ -66,6 +69,7 @@ func (p *PluginProvider) Name() string        { return p.info.Name }
 func (p *PluginProvider) DisplayName() string  { return p.info.DisplayName }
 func (p *PluginProvider) Command() string      { return p.info.Command }
 func (p *PluginProvider) Args() []string       { return p.info.Args }
+func (p *PluginProvider) ResumeArgs() []string { return p.info.ResumeArgs }
 func (p *PluginProvider) PluginPath() string   { return p.path }
 func (p *PluginProvider) NeedsContent(title string) bool {
 	return p.info.NeedsContent

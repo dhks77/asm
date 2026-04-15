@@ -23,6 +23,12 @@ func (p *CodexProvider) DisplayName() string  { return "Codex" }
 func (p *CodexProvider) Command() string      { return p.command }
 func (p *CodexProvider) Args() []string       { return p.args }
 
+// ResumeArgs returns nil — Codex CLI exposes resume via a separate
+// `codex resume` subcommand, not a flag, so it doesn't compose with
+// the existing Args-based launch flow. Ctrl+N behavior (fresh) is the
+// only path for now.
+func (p *CodexProvider) ResumeArgs() []string { return nil }
+
 // NeedsContent always returns true for Codex since detection is content-based.
 func (p *CodexProvider) NeedsContent(title string) bool {
 	return true

@@ -24,6 +24,13 @@ func (p *ClaudeProvider) DisplayName() string  { return "Claude" }
 func (p *ClaudeProvider) Command() string      { return p.command }
 func (p *ClaudeProvider) Args() []string       { return p.args }
 
+// ResumeArgs returns ["--continue"], which tells Claude Code to resume the
+// most recent conversation in the current working directory. Claude keys
+// conversations by project (CWD) so each worktree, launched with its own
+// cwd, gets its own resume target without asm tracking session IDs.
+// Safe when no prior conversation exists — Claude falls back to a new one.
+func (p *ClaudeProvider) ResumeArgs() []string { return []string{"--continue"} }
+
 // NeedsContent returns true when the pane title indicates busy state,
 // meaning content capture is needed to determine the specific busy detail.
 func (p *ClaudeProvider) NeedsContent(title string) bool {
