@@ -79,18 +79,71 @@ func ListBranches(repoDir string) ([]Branch, error) {
 }
 
 func listWorktreeBranches(repoDir string) map[string]bool {
-	out, err := runGit(repoDir, "worktree", "list", "--porcelain")
+	entries, err := ListRepoWorktrees(repoDir)
 	if err != nil {
 		return nil
 	}
 	result := make(map[string]bool)
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "branch refs/heads/") {
-			branch := strings.TrimPrefix(line, "branch refs/heads/")
-			result[branch] = true
+	for _, e := range entries {
+		if e.Branch != "" {
+			result[e.Branch] = true
 		}
 	}
 	return result
+}
+
+// WorktreeListEntry is one parsed entry from `git worktree list --porcelain`.
+// Branch is empty when the worktree is detached or bare.
+type WorktreeListEntry struct {
+	Path     string
+	Branch   string
+	Detached bool
+	Bare     bool
+}
+
+// ListRepoWorktrees runs `git worktree list --porcelain` from any worktree of
+// a repo (main or linked) and returns all entries registered with that repo.
+// The first entry is the main working tree; linked worktrees follow.
+func ListRepoWorktrees(repoDir string) ([]WorktreeListEntry, error) {
+	out, err := runGit(repoDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktreeListPorcelain(out), nil
+}
+
+// parseWorktreeListPorcelain parses the stanza-format output of
+// `git worktree list --porcelain` into WorktreeListEntry values. Entries are
+// separated by blank lines; each has a `worktree <path>` header plus optional
+// `branch refs/heads/<name>`, `detached`, or `bare` lines.
+func parseWorktreeListPorcelain(out string) []WorktreeListEntry {
+	var entries []WorktreeListEntry
+	var cur WorktreeListEntry
+	flush := func() {
+		if cur.Path != "" {
+			entries = append(entries, cur)
+		}
+		cur = WorktreeListEntry{}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			cur.Path = strings.TrimPrefix(line, "worktree ")
+		case strings.HasPrefix(line, "branch refs/heads/"):
+			cur.Branch = strings.TrimPrefix(line, "branch refs/heads/")
+		case line == "detached":
+			cur.Detached = true
+		case line == "bare":
+			cur.Bare = true
+		}
+	}
+	flush() // handle trailing entry with no blank-line terminator
+	return entries
 }
 
 // CreateWorktreeFromBranch creates a new worktree checking out an existing branch.

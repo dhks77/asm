@@ -22,6 +22,16 @@ func IsWorktree(dir string) bool {
 	return !info.IsDir()
 }
 
+// IsRepoMode reports whether path looks like a git working tree (main repo or
+// linked worktree). Used by asm to pick the listing strategy: when true, the
+// picker sources entries from `git worktree list`; when false, it falls back
+// to scanning subdirectories of path as a flat collection of unrelated
+// repos/worktrees.
+func IsRepoMode(path string) bool {
+	_, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
 // Scan returns all subdirectories under root that contain a .git file or directory
 // (git worktrees have a .git file pointing to the main repo).
 func Scan(root string) ([]Worktree, error) {
@@ -52,5 +62,32 @@ func Scan(root string) ([]Worktree, error) {
 		return worktrees[i].Name < worktrees[j].Name
 	})
 
+	return worktrees, nil
+}
+
+// ScanRepo returns worktrees registered with the repo that owns repoPath
+// (which may be the main repo or any linked worktree). Sources entries from
+// `git worktree list --porcelain`, so it finds worktrees anywhere on disk —
+// not just under repoPath. The main working tree is included as the first
+// entry; bare repo entries are skipped. Results are sorted by Name for stable
+// rendering.
+func ScanRepo(repoPath string) ([]Worktree, error) {
+	entries, err := ListRepoWorktrees(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	var worktrees []Worktree
+	for _, e := range entries {
+		if e.Bare {
+			continue
+		}
+		worktrees = append(worktrees, Worktree{
+			Name: filepath.Base(e.Path),
+			Path: e.Path,
+		})
+	}
+	sort.Slice(worktrees, func(i, j int) bool {
+		return worktrees[i].Name < worktrees[j].Name
+	})
 	return worktrees, nil
 }

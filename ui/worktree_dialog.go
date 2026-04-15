@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -469,7 +470,7 @@ func (m WorktreeDialogModel) fetchTaskName(branch string) tea.Cmd {
 func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea.Cmd {
 	return func() tea.Msg {
 		folderName := worktree.BranchToFolderName(branch)
-		targetPath := filepath.Join(rootPath, folderName)
+		targetPath := filepath.Join(resolveWorktreeBase(rootPath), folderName)
 
 		if err := worktree.CreateWorktreeFromBranch(repoDir, targetPath, branch); err != nil {
 			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree add failed: %v", err)}
@@ -487,7 +488,7 @@ func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea
 func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
 		folderName := worktree.BranchToFolderName(newBranch)
-		targetPath := filepath.Join(rootPath, folderName)
+		targetPath := filepath.Join(resolveWorktreeBase(rootPath), folderName)
 
 		if err := worktree.CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch); err != nil {
 			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree add failed: %v", err)}
@@ -500,6 +501,48 @@ func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBran
 			TemplateWarnings: warnings,
 		}
 	}
+}
+
+// resolveWorktreeBase decides where to create a new worktree. The picker only
+// opens this dialog in repo mode (F7 is gated), so rootPath is guaranteed to
+// be a git working tree — main repo or linked worktree.
+//
+// Resolution order:
+//  1. Parent directory of the most-recently-modified linked worktree (by mtime).
+//     Matches whatever layout the user is already using.
+//  2. Parent directory of the main repo. Standard git "sibling" convention.
+//  3. rootPath itself — unreachable in practice; safety net for the case where
+//     both ScanRepo and FindMainRepo fail.
+func resolveWorktreeBase(rootPath string) string {
+	entries, _ := worktree.ScanRepo(rootPath)
+	mainRepo, _ := worktree.FindMainRepo(rootPath)
+	mainClean := ""
+	if mainRepo != "" {
+		mainClean = filepath.Clean(mainRepo)
+	}
+
+	var best worktree.Worktree
+	var bestMtime time.Time
+	for _, wt := range entries {
+		if mainClean != "" && filepath.Clean(wt.Path) == mainClean {
+			continue // skip main repo — we want a linked-worktree parent
+		}
+		info, err := os.Stat(wt.Path)
+		if err != nil {
+			continue
+		}
+		if best.Path == "" || info.ModTime().After(bestMtime) {
+			best = wt
+			bestMtime = info.ModTime()
+		}
+	}
+	if best.Path != "" {
+		return filepath.Dir(best.Path)
+	}
+	if mainRepo != "" {
+		return filepath.Dir(mainRepo)
+	}
+	return rootPath
 }
 
 // applyTemplateBestEffort copies files from the per-repo template directory

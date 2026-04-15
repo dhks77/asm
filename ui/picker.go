@@ -140,6 +140,12 @@ type PickerModel struct {
 	// Top status bar (summary of all active sessions)
 	lastStatusSummary string
 	statusBarEnabled  bool
+
+	// isRepoMode = true when rootPath is itself a git working tree (main repo
+	// or linked worktree). Controls two things: the listing source
+	// (`git worktree list` vs directory scan) and whether Ctrl+W is usable.
+	// Computed once in NewPickerModel from rootPath.
+	isRepoMode bool
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) PickerModel {
@@ -164,6 +170,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		cachedBranches:    make(map[string]string),
 		ides:              ides,
 		focused:        true,
+		isRepoMode:     worktree.IsRepoMode(rootPath),
 	}
 }
 
@@ -756,6 +763,12 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "f7": // Ctrl+w: create worktree
+		// Repo-mode only: creating a worktree requires a single owning repo.
+		// In dir mode rootPath is an unrelated collection, so the intent is
+		// ambiguous — no-op and hide from the shortcut bar instead.
+		if !m.isRepoMode {
+			return m, nil
+		}
 		dir := m.selectedDirectory()
 		if dir == nil {
 			return m, nil
@@ -1426,7 +1439,7 @@ func (m *PickerModel) refreshStatusSummary() tea.Cmd {
 
 	line1, line1Target := m.buildLine1(m.activeKinds)
 	line2 := m.buildLine2(m.activeKinds, line1Target)
-	shortcuts := renderShortcutsPlain(len(m.selectedItems))
+	shortcuts := renderShortcutsPlain(len(m.selectedItems), m.isRepoMode)
 
 	combined := line1 + "\x00" + line2 + "\x00" + shortcuts
 
@@ -1463,12 +1476,17 @@ func writeStatusSummaryCmd(enable, changed bool, line1, line2, shortcuts string)
 }
 
 // renderShortcutsPlain returns the shortcuts hint as a plain tmux format string
-// (no ANSI, just `#[...]` style markers if needed).
-func renderShortcutsPlain(selectedCount int) string {
+// (no ANSI, just `#[...]` style markers if needed). When isRepoMode is false,
+// `^w: worktree` is omitted — the F7 handler no-ops in dir mode and advertising
+// an inert key leads users to hunt for broken UI.
+func renderShortcutsPlain(selectedCount int, isRepoMode bool) string {
 	if selectedCount > 0 {
 		return fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
 	}
-	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
+	if isRepoMode {
+		return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
+	}
+	return " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^e: IDE  ^p: AI  ^d: remove  ^s: settings  ^q: quit"
 }
 
 // buildLine1 returns the detailed line for the currently displayed session and
@@ -1988,8 +2006,23 @@ func (m PickerModel) overlayCenter(base, overlay string) string {
 
 func (m PickerModel) scanDirectories() tea.Cmd {
 	cache := m.taskCache
+	rootPath := m.rootPath
+	isRepoMode := m.isRepoMode
 	return func() tea.Msg {
-		wts, _ := worktree.Scan(m.rootPath)
+		var wts []worktree.Worktree
+		if isRepoMode {
+			// Source entries from `git worktree list` — finds worktrees
+			// anywhere on disk, and includes the main repo as the first
+			// entry. Falls through to the dir-mode Scan on error so a
+			// transient git hiccup doesn't wipe the picker.
+			if repoWts, err := worktree.ScanRepo(rootPath); err == nil {
+				wts = repoWts
+			} else {
+				wts, _ = worktree.Scan(rootPath)
+			}
+		} else {
+			wts, _ = worktree.Scan(rootPath)
+		}
 		var tasks map[string]tracker.TaskInfo
 		var branches map[string]string
 		if cache != nil {
