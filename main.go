@@ -250,6 +250,32 @@ func autoSeedWorktreeBasePath(rootPath string, cfg *config.Config) {
 	cfg.WorktreeBasePath = parent
 }
 
+// confirmRestartExistingSession prompts the user before we destroy an
+// existing asm tmux session for this rootPath. Returns true to proceed
+// with kill+restart, false to abort. If stdin isn't a TTY (piped, cron,
+// etc.) we can't prompt, so fall back to the old silent-kill behavior —
+// refusing would break non-interactive launchers.
+func confirmRestartExistingSession(rootPath string) bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return true
+	}
+	fmt.Printf("asm is already running for %s (tmux session: %s).\n", rootPath, asmtmux.SessionName)
+	fmt.Println("Closing it will kill every AI/terminal session inside.")
+	fmt.Print("Close existing session and start fresh? [y/N]: ")
+	var answer string
+	// Fscanln returns an error on empty input / EOF / ^C; treat all of
+	// those as "no" so the safe default (preserve the running session)
+	// wins whenever the user hesitates.
+	_, _ = fmt.Fscanln(os.Stdin, &answer)
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
 	if !asmtmux.IsAvailable() {
 		logErr("Error: tmux is required. Install it with: brew install tmux\n")
@@ -262,8 +288,23 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 		return
 	}
 
-	// Kill existing session if any
+	// Kill existing session if any — but warn first so a stray invocation
+	// doesn't wipe out AI sessions the user still cares about. The "inside
+	// tmux" branch above already handled the case where this instance IS
+	// that session, so reaching here means the session is attached (or
+	// detached) elsewhere and a silent kill is genuinely destructive.
+	//
+	// ASM_RESTART_CONFIRMED=1 is set by the picker's ←/→ re-exec path to
+	// skip re-asking — the picker already prompted and the user said yes.
+	// Unset after reading so it can't leak into child processes or a
+	// later in-place re-exec.
 	if asmtmux.SessionExists() {
+		if os.Getenv("ASM_RESTART_CONFIRMED") == "1" {
+			os.Unsetenv("ASM_RESTART_CONFIRMED")
+		} else if !confirmRestartExistingSession(rootPath) {
+			fmt.Println("Cancelled.")
+			return
+		}
 		asmtmux.KillSession()
 	}
 
@@ -312,9 +353,13 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 		if next != "" {
 			self, err := os.Executable()
 			if err == nil {
-				// Preserve the original env so ~/.asm config, tmux,
-				// $SHELL etc. all carry through.
-				_ = syscall.Exec(self, []string{self, "--path", next}, os.Environ())
+				// Mark the re-exec as user-confirmed so the new process
+				// doesn't re-ask "close existing session?" — the picker
+				// already surfaced that prompt before writing the handoff.
+				// Preserve the original env otherwise so ~/.asm config,
+				// tmux, $SHELL etc. carry through.
+				env := append(os.Environ(), "ASM_RESTART_CONFIRMED=1")
+				_ = syscall.Exec(self, []string{self, "--path", next}, env)
 			}
 		}
 	}

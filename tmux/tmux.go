@@ -68,10 +68,11 @@ func windowFirstPane(winName string) string {
 	return fmt.Sprintf("%s:%s.%s", SessionName, winName, pickerPane())
 }
 
-// SetSessionName derives a per-rootPath tmux session name. Same rootPath
-// always yields the same name (hash-stable), different rootPaths get
-// distinct names. Safe to call repeatedly.
-func SetSessionName(rootPath string) {
+// DeriveSessionName computes the tmux session name for a given rootPath
+// without mutating any global state. Pure and idempotent — callers that
+// need to check "would there be a session for this other path?" use this
+// together with SessionExistsNamed.
+func DeriveSessionName(rootPath string) string {
 	base := filepath.Base(rootPath)
 	sanitized := strings.Map(func(r rune) rune {
 		switch {
@@ -85,7 +86,14 @@ func SetSessionName(rootPath string) {
 	}
 	h := fnv.New32a()
 	h.Write([]byte(rootPath))
-	SessionName = fmt.Sprintf("asm-%s-%06x", sanitized, h.Sum32()&0xffffff)
+	return fmt.Sprintf("asm-%s-%06x", sanitized, h.Sum32()&0xffffff)
+}
+
+// SetSessionName derives a per-rootPath tmux session name. Same rootPath
+// always yields the same name (hash-stable), different rootPaths get
+// distinct names. Safe to call repeatedly.
+func SetSessionName(rootPath string) {
+	SessionName = DeriveSessionName(rootPath)
 }
 
 // HandoffFilePath returns the path used by the picker to leave a "next
@@ -107,9 +115,16 @@ func IsInsideTmux() bool {
 }
 
 func SessionExists() bool {
+	return SessionExistsNamed(SessionName)
+}
+
+// SessionExistsNamed is the arbitrary-name variant used by navigation
+// preflight: the picker needs to ask "would my target --path already have
+// an asm session running?" without mutating the global SessionName.
+func SessionExistsNamed(name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
-	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", SessionName).Run()
+	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", name).Run()
 	return err == nil
 }
 

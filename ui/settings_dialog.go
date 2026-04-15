@@ -128,6 +128,7 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 			fieldPickerWidth:      projectCfg.PickerWidth != 0,
 			fieldIDE:              projectCfg.DefaultIDE != "",
 			fieldTemplateConflict: projectCfg.WorktreeTemplate.OnConflict != "",
+			fieldWorktreeBasePath: projectCfg.WorktreeBasePath != "",
 		},
 	}
 	// Default to project scope when a project context exists so overrides

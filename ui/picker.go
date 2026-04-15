@@ -136,6 +136,10 @@ type PickerModel struct {
 	searchQuery    string
 	selectedItems    map[string]bool
 	batchConfirm     BatchConfirmModel
+	// pendingNavigatePath is set when the user pressed ←/→ but we had to
+	// surface a confirmation first (active AI sessions would die). Cleared
+	// on confirm (right before navigateTo) or on cancel.
+	pendingNavigatePath string
 
 	// Top status bar (summary of all active sessions)
 	lastStatusSummary string
@@ -470,16 +474,29 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.removeDirectory(wt)
 
 	case BatchConfirmedMsg:
-		m.clearSelection()
 		switch msg.Action {
 		case BatchKillSessions:
+			m.clearSelection()
 			return m, m.batchKillSessions(msg.Items)
 		case BatchDeleteWorktrees:
+			m.clearSelection()
 			return m, m.batchDeleteWorktrees(msg.Items)
+		case BatchNavigateRestart:
+			path := m.pendingNavigatePath
+			m.pendingNavigatePath = ""
+			if path == "" {
+				// Defensive: dialog confirmed without a target. Drop the
+				// action rather than calling navigateTo("") — that would
+				// write an empty handoff and the orchestrator would either
+				// exit or re-exec with no path, neither of which is useful.
+				return m, nil
+			}
+			return m, m.navigateTo(path)
 		}
 		return m, nil
 
 	case BatchCancelledMsg:
+		m.pendingNavigatePath = ""
 		return m, nil
 
 	case ideSelectDoneMsg:
@@ -691,7 +708,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err != nil || !info.IsDir() {
 			return m, nil
 		}
-		return m, m.navigateTo(wt.Path)
+		return m, m.requestNavigate(wt.Path)
 
 	case "left":
 		// Ascend to the parent directory. filepath.Dir returns the same
@@ -701,7 +718,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if parent == m.rootPath {
 			return m, nil
 		}
-		return m, m.navigateTo(parent)
+		return m, m.requestNavigate(parent)
 
 	case "enter":
 		wt := m.selectedDirectory()
@@ -920,6 +937,49 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 	return waitForExitCmd(wt.Name)
 }
 
+// requestNavigate is the ←/→ entry point. Two independent hazards can
+// trigger a confirmation:
+//
+//  1. Current tmux session has live AI sessions — killing the session
+//     ends them with no save prompt.
+//  2. Target --path already has its own asm tmux session running
+//     somewhere — the post-exec orchestrator will kill THAT too, which
+//     is surprising if the user didn't know about it.
+//
+// Only the target session check requires a fresh tmux exec; the AI-
+// session snapshot comes from the cached m.activeKinds so the happy
+// path (no hazards) stays keypress-fast. If neither hazard applies we
+// navigate immediately.
+func (m *PickerModel) requestNavigate(newPath string) tea.Cmd {
+	aiNames := m.activeAINames()
+	targetSession := ""
+	if candidate := asmtmux.DeriveSessionName(newPath); candidate != asmtmux.SessionName {
+		if asmtmux.SessionExistsNamed(candidate) {
+			targetSession = candidate
+		}
+	}
+	if len(aiNames) == 0 && targetSession == "" {
+		return m.navigateTo(newPath)
+	}
+	m.pendingNavigatePath = newPath
+	m.batchConfirm.ShowNavigate(aiNames, m.taskNamesFor(aiNames), newPath, targetSession)
+	return nil
+}
+
+// activeAINames returns the directory names of every live AI session in
+// the current tmux session, in a stable order (picker's listing order).
+// Reads the cached snapshot refreshed by providerStateTick — no tmux exec
+// on the keypress path.
+func (m *PickerModel) activeAINames() []string {
+	var names []string
+	for _, wt := range m.directories {
+		if m.activeKinds[wt.Name].HasAI() {
+			names = append(names, wt.Name)
+		}
+	}
+	return names
+}
+
 // navigateTo leaves a handoff file for the orchestrator and tears down the
 // current tmux session. The orchestrator, which is blocked on Attach, reads
 // the handoff after Attach returns and re-execs asm with --path=newPath.
@@ -932,7 +992,8 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 //     any carry-over.
 //   - All active AI/terminal sessions running in this tmux session die as
 //     a consequence. That's the stated trade-off — user chose clean
-//     restart semantics.
+//     restart semantics; requestNavigate gates the call with a confirm
+//     dialog when AI sessions would be lost.
 func (m *PickerModel) navigateTo(newPath string) tea.Cmd {
 	// Write the handoff BEFORE killing the session. Best-effort: if this
 	// fails we still tear down, but the orchestrator will just exit
@@ -1138,6 +1199,13 @@ func (m *PickerModel) swapOutWorkingPanel() {
 // cmdFlags is the argv portion appended to the executable path (e.g.
 // "--settings" or "--delete foo --delete-dirty"). resultMsg is invoked with
 // the dialog's exit code once it terminates.
+//
+// The picker's rootPath is injected as `--path <rootPath>` by default —
+// callers MUST NOT pass their own --path. Every dialog subprocess has to
+// LoadMerged against the same rootPath the picker is using, otherwise
+// after an arrow-key navigation the child would read cfg.DefaultPath (or
+// CWD) and happily edit a different repo's project config. Centralising
+// the flag here also means new dialogs can't forget to wire it up.
 func (m *PickerModel) runDialogInWorkingPanel(windowName, cmdFlags string, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
 	m.swapOutWorkingPanel()
 
@@ -1146,7 +1214,8 @@ func (m *PickerModel) runDialogInWorkingPanel(windowName, cmdFlags string, resul
 		return nil
 	}
 
-	asmtmux.RunInWorkingPanel(windowName, fmt.Sprintf("%s %s", exe, cmdFlags))
+	argv := fmt.Sprintf("%s %s --path %s", exe, cmdFlags, m.rootPath)
+	asmtmux.RunInWorkingPanel(windowName, argv)
 	asmtmux.FocusWorkingPanel()
 	m.applyAutoZoom()
 
@@ -1200,13 +1269,15 @@ func (m *PickerModel) openWorktreeInIDE(wtPath, ideName string) tea.Cmd {
 }
 
 func (m *PickerModel) openSettings() tea.Cmd {
+	// --path is injected by runDialogInWorkingPanel.
 	return m.runDialogInWorkingPanel("asm-settings", "--settings", func(int) tea.Msg {
 		return settingsExitedMsg{}
 	})
 }
 
 func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
-	flags := fmt.Sprintf("--worktree-create --path %s --worktree-dir %s", m.rootPath, dir.Path)
+	// --path is injected by runDialogInWorkingPanel.
+	flags := fmt.Sprintf("--worktree-create --worktree-dir %s", dir.Path)
 	return m.runDialogInWorkingPanel("asm-worktree", flags, func(exitCode int) tea.Msg {
 		return worktreeExitedMsg{created: exitCode == 0}
 	})

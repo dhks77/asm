@@ -13,6 +13,11 @@ type BatchAction int
 const (
 	BatchKillSessions BatchAction = iota
 	BatchDeleteWorktrees
+	// BatchNavigateRestart warns the user before the picker re-execs asm in
+	// a different --path. Every active AI session in the current tmux
+	// session will be killed as a side effect — they're listed so the user
+	// sees what they'd lose by confirming.
+	BatchNavigateRestart
 )
 
 type BatchConfirmModel struct {
@@ -24,9 +29,17 @@ type BatchConfirmModel struct {
 	// folder name so users can confirm by task identity, not just path.
 	taskNames []string
 	dirty     int // number of items with uncommitted changes
-	cursor    int // 0=confirm, 1=cancel
-	width     int
-	height    int
+	// navigatePath carries the target --path for BatchNavigateRestart so
+	// the dialog can show the user where they're about to land.
+	navigatePath string
+	// targetSession is the tmux session name that already exists at
+	// navigatePath, if any. Empty string means the target is unoccupied.
+	// Displayed as a warning because confirming will kill that session
+	// too (via the post-exec orchestrator path).
+	targetSession string
+	cursor        int // 0=confirm, 1=cancel
+	width        int
+	height       int
 }
 
 type BatchConfirmedMsg struct {
@@ -46,12 +59,32 @@ func (m *BatchConfirmModel) Show(action BatchAction, items, taskNames []string, 
 	m.items = items
 	m.taskNames = taskNames
 	m.dirty = dirtyCount
+	m.navigatePath = ""
+	m.cursor = 1 // default to Cancel for safety
+}
+
+// ShowNavigate opens the dialog for a ←/→ navigation where either active
+// AI sessions would be killed, or the target --path already has its own
+// asm tmux session. items are the current dir's AI session names (may be
+// empty if only the target-conflict case applies). targetPath is where
+// the restart will land. targetSession is the existing tmux session name
+// at the target, or "" when the target is free.
+func (m *BatchConfirmModel) ShowNavigate(items, taskNames []string, targetPath, targetSession string) {
+	m.visible = true
+	m.action = BatchNavigateRestart
+	m.items = items
+	m.taskNames = taskNames
+	m.dirty = 0
+	m.navigatePath = targetPath
+	m.targetSession = targetSession
 	m.cursor = 1 // default to Cancel for safety
 }
 
 func (m *BatchConfirmModel) Hide() {
 	m.visible = false
 	m.items = nil
+	m.navigatePath = ""
+	m.targetSession = ""
 }
 
 func (m BatchConfirmModel) Update(msg tea.Msg) (BatchConfirmModel, tea.Cmd) {
@@ -95,7 +128,13 @@ func (m BatchConfirmModel) Update(msg tea.Msg) (BatchConfirmModel, tea.Cmd) {
 }
 
 func (m BatchConfirmModel) View() string {
-	if !m.visible || len(m.items) == 0 {
+	// Navigate can fire with zero items (only a target-session conflict) —
+	// the empty-items short-circuit still guards kill/delete actions since
+	// those are meaningless without a target list.
+	if !m.visible {
+		return ""
+	}
+	if m.action != BatchNavigateRestart && len(m.items) == 0 {
 		return ""
 	}
 
@@ -105,6 +144,8 @@ func (m BatchConfirmModel) View() string {
 		titleText = fmt.Sprintf("Kill %d session(s)?", len(m.items))
 	case BatchDeleteWorktrees:
 		titleText = fmt.Sprintf("Delete %d worktree(s)?", len(m.items))
+	case BatchNavigateRestart:
+		titleText = "Restart asm at new location?"
 	}
 
 	title := renderDialogTitle(titleText, dangerColor)
@@ -114,6 +155,21 @@ func (m BatchConfirmModel) View() string {
 	// room.
 	var body strings.Builder
 	body.WriteString("\n")
+	if m.action == BatchNavigateRestart && m.navigatePath != "" {
+		body.WriteString(lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
+			Render("→ "+m.navigatePath) + "\n")
+		if m.targetSession != "" {
+			body.WriteString(lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).Bold(true).
+				Render(fmt.Sprintf("⚠ Target already runs an asm session (%s) — it will be killed", m.targetSession)) + "\n")
+		}
+		if len(m.items) > 0 {
+			body.WriteString("\n")
+			body.WriteString(lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
+				Render(fmt.Sprintf("These %d AI session(s) will close:", len(m.items))) + "\n")
+		} else {
+			body.WriteString("\n")
+		}
+	}
 	nameStyle := lipgloss.NewStyle().Foreground(dimColor)
 	taskStyle := lipgloss.NewStyle().Foreground(primaryColor)
 	for i, name := range m.items {
