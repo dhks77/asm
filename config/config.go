@@ -266,25 +266,35 @@ func (c *Config) TemplateConflictPolicy() string {
 	return "skip"
 }
 
-// GetWorktreeBasePath returns WorktreeBasePath with a leading `~` expanded to
-// the user's home directory. Returns "" when unset so callers can fall
-// through to their default (typically the main repo's parent directory).
-func (c *Config) GetWorktreeBasePath() string {
+// DefaultWorktreeBasePath is the fallback layout when the user hasn't set
+// worktree_base_path in config. Groups worktrees by repo so multiple repos
+// sharing the same root don't collide on identically-named branches (e.g.
+// two repos each with a "feature-X" branch).
+const DefaultWorktreeBasePath = "~/worktrees/{repo}"
+
+// GetWorktreeBasePath returns the resolved base directory for new worktrees:
+//   - leading `~` → home directory
+//   - `{repo}` placeholder → repoName (dropped cleanly when repoName is empty)
+//   - empty config → DefaultWorktreeBasePath
+//
+// Callers should os.MkdirAll(result, 0o755) before `git worktree add` since
+// git requires the parent of the target to exist.
+func (c *Config) GetWorktreeBasePath(repoName string) string {
 	p := strings.TrimSpace(c.WorktreeBasePath)
 	if p == "" {
-		return ""
+		p = DefaultWorktreeBasePath
 	}
 	if p == "~" || strings.HasPrefix(p, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return p
+		if home, err := os.UserHomeDir(); err == nil {
+			if p == "~" {
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
+			}
 		}
-		if p == "~" {
-			return home
-		}
-		return filepath.Join(home, p[2:])
 	}
-	return p
+	p = strings.ReplaceAll(p, "{repo}", repoName)
+	return filepath.Clean(p) // collapses the empty segment when repoName == ""
 }
 
 // GetPickerWidth returns the picker pane width in percent, clamped to a

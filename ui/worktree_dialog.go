@@ -470,8 +470,10 @@ func (m WorktreeDialogModel) fetchTaskName(branch string) tea.Cmd {
 func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea.Cmd {
 	return func() tea.Msg {
 		folderName := worktree.BranchToFolderName(branch)
-		targetPath := filepath.Join(resolveWorktreeBase(rootPath), folderName)
-
+		targetPath, err := prepareWorktreeTarget(rootPath, repoName, folderName)
+		if err != nil {
+			return WorktreeErrorMsg{Err: err.Error()}
+		}
 		if err := worktree.CreateWorktreeFromBranch(repoDir, targetPath, branch); err != nil {
 			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree add failed: %v", err)}
 		}
@@ -488,8 +490,10 @@ func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea
 func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
 		folderName := worktree.BranchToFolderName(newBranch)
-		targetPath := filepath.Join(resolveWorktreeBase(rootPath), folderName)
-
+		targetPath, err := prepareWorktreeTarget(rootPath, repoName, folderName)
+		if err != nil {
+			return WorktreeErrorMsg{Err: err.Error()}
+		}
 		if err := worktree.CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch); err != nil {
 			return WorktreeErrorMsg{Err: fmt.Sprintf("worktree add failed: %v", err)}
 		}
@@ -503,6 +507,19 @@ func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBran
 	}
 }
 
+// prepareWorktreeTarget resolves the base directory for the new worktree and
+// makes sure it exists on disk. `git worktree add` requires the target's
+// parent to exist, so we MkdirAll before returning. Returned targetPath is
+// base/folderName with the folder itself intentionally NOT created (git
+// creates it).
+func prepareWorktreeTarget(rootPath, repoName, folderName string) (string, error) {
+	base := resolveWorktreeBase(rootPath, repoName)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s failed: %v", base, err)
+	}
+	return filepath.Join(base, folderName), nil
+}
+
 // resolveWorktreeBase decides where to create a new worktree. The picker only
 // opens this dialog in repo mode (F7 is gated), so rootPath is guaranteed to
 // be a git working tree — main repo or linked worktree.
@@ -510,11 +527,14 @@ func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBran
 // Resolution order:
 //  1. Parent directory of the most-recently-modified linked worktree (by mtime).
 //     Matches whatever layout the user is already using.
-//  2. Config's worktree_base_path when set (user can pin a location).
-//  3. Parent directory of the main repo. Standard git "sibling" convention.
-//  4. rootPath itself — unreachable in practice; safety net for the case where
-//     both ScanRepo and FindMainRepo fail.
-func resolveWorktreeBase(rootPath string) string {
+//  2. Config's worktree_base_path, with `{repo}` expanded to repoName and a
+//     built-in default of `~/worktrees/{repo}` when unset. Grouping by repo
+//     avoids collisions when multiple repos share the base.
+//  3. Parent directory of the main repo — unreachable when #2 resolves, which
+//     it always does (default is never empty). Kept as safety net for the
+//     case where the config read fails AND home dir can't be resolved.
+//  4. rootPath — last-resort safety net.
+func resolveWorktreeBase(rootPath, repoName string) string {
 	entries, _ := worktree.ScanRepo(rootPath)
 	mainRepo, _ := worktree.FindMainRepo(rootPath)
 	mainClean := ""
@@ -540,8 +560,9 @@ func resolveWorktreeBase(rootPath string) string {
 	if best.Path != "" {
 		return filepath.Dir(best.Path)
 	}
-	if cfg, err := config.LoadMerged(rootPath); err == nil {
-		if p := cfg.GetWorktreeBasePath(); p != "" {
+	cfg, err := config.LoadMerged(rootPath)
+	if err == nil {
+		if p := cfg.GetWorktreeBasePath(repoName); p != "" {
 			return p
 		}
 	}

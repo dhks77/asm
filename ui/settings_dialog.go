@@ -930,7 +930,7 @@ func (m SettingsModel) View() string {
 
 		sections = append(sections, m.renderSelectField(itemIdx, "Template on Conflict", templateConflictOptions, m.templateConflictIdx)+m.generalStateMarker(5))
 		itemIdx++
-		sections = append(sections, m.renderTextField(itemIdx, "Worktree Base Path", m.worktreeBasePathStr, "e.g. ~/worktrees — fallback when no linked worktrees exist")+m.generalStateMarker(7))
+		sections = append(sections, m.renderTextField(itemIdx, "Worktree Base Path", m.worktreeBasePathStr, "default: ~/worktrees/{repo} — use {repo} to group by repo name")+m.generalStateMarker(7))
 		itemIdx++
 		sections = append(sections, m.renderActionField(itemIdx, "Open templates directory", worktree.TemplatesRoot(m.rootPath)))
 		itemIdx++
