@@ -510,8 +510,9 @@ func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBran
 // Resolution order:
 //  1. Parent directory of the most-recently-modified linked worktree (by mtime).
 //     Matches whatever layout the user is already using.
-//  2. Parent directory of the main repo. Standard git "sibling" convention.
-//  3. rootPath itself — unreachable in practice; safety net for the case where
+//  2. Config's worktree_base_path when set (user can pin a location).
+//  3. Parent directory of the main repo. Standard git "sibling" convention.
+//  4. rootPath itself — unreachable in practice; safety net for the case where
 //     both ScanRepo and FindMainRepo fail.
 func resolveWorktreeBase(rootPath string) string {
 	entries, _ := worktree.ScanRepo(rootPath)
@@ -538,6 +539,11 @@ func resolveWorktreeBase(rootPath string) string {
 	}
 	if best.Path != "" {
 		return filepath.Dir(best.Path)
+	}
+	if cfg, err := config.LoadMerged(rootPath); err == nil {
+		if p := cfg.GetWorktreeBasePath(); p != "" {
+			return p
+		}
 	}
 	if mainRepo != "" {
 		return filepath.Dir(mainRepo)

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -49,6 +50,12 @@ type Config struct {
 	// DefaultIDE, if set, skips the IDE selector and opens directly.
 	DefaultIDE       string                 `toml:"default_ide"`
 	WorktreeTemplate WorktreeTemplateConfig `toml:"worktree_template"`
+	// WorktreeBasePath is the directory where new worktrees are created in
+	// repo mode when there are no existing linked worktrees to inherit the
+	// layout from. Empty = fall back to the main repo's parent directory
+	// (standard git sibling convention). Leading `~` is expanded to the
+	// user's home directory when resolved via GetWorktreeBasePath.
+	WorktreeBasePath string `toml:"worktree_base_path"`
 }
 
 func homeDir() string {
@@ -156,6 +163,9 @@ func merge(base, overlay *Config) {
 	if overlay.WorktreeTemplate.OnConflict != "" {
 		base.WorktreeTemplate.OnConflict = overlay.WorktreeTemplate.OnConflict
 	}
+	if overlay.WorktreeBasePath != "" {
+		base.WorktreeBasePath = overlay.WorktreeBasePath
+	}
 
 	// Merge Providers (wholesale per key)
 	if len(overlay.Providers) > 0 {
@@ -254,6 +264,27 @@ func (c *Config) TemplateConflictPolicy() string {
 		return "overwrite"
 	}
 	return "skip"
+}
+
+// GetWorktreeBasePath returns WorktreeBasePath with a leading `~` expanded to
+// the user's home directory. Returns "" when unset so callers can fall
+// through to their default (typically the main repo's parent directory).
+func (c *Config) GetWorktreeBasePath() string {
+	p := strings.TrimSpace(c.WorktreeBasePath)
+	if p == "" {
+		return ""
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return p
+		}
+		if p == "~" {
+			return home
+		}
+		return filepath.Join(home, p[2:])
+	}
+	return p
 }
 
 // GetPickerWidth returns the picker pane width in percent, clamped to a

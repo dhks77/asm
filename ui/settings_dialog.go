@@ -55,6 +55,7 @@ const (
 	fieldPickerWidth      = "pickerWidth"
 	fieldIDE              = "ide"
 	fieldTemplateConflict = "templateConflict"
+	fieldWorktreeBasePath = "worktreeBasePath"
 )
 
 // ideNoneLabel is the sentinel shown at index 0 of the Default IDE
@@ -80,9 +81,10 @@ type SettingsModel struct {
 	selectedProvider    int
 	selectedTracker     int
 	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
-	autoZoomIdx         int    // 0=on, 1=off
-	pickerWidthStr      string // free-form percentage input (e.g. "22")
-	templateConflictIdx int    // 0=skip, 1=overwrite
+	autoZoomIdx          int    // 0=on, 1=off
+	pickerWidthStr       string // free-form percentage input (e.g. "22")
+	templateConflictIdx  int    // 0=skip, 1=overwrite
+	worktreeBasePathStr  string // free-form path for repo-mode worktree creation
 
 	// Per-field project-scope overrides. true = explicit value in project;
 	// false = inherits from user. Only consulted when scopeIdx == 1.
@@ -210,6 +212,12 @@ func (m *SettingsModel) loadGeneralFromScope() {
 			break
 		}
 	}
+
+	wtBase := m.userCfg.WorktreeBasePath
+	if isProject && m.projectOverrides[fieldWorktreeBasePath] {
+		wtBase = m.projectCfg.WorktreeBasePath
+	}
+	m.worktreeBasePathStr = wtBase
 }
 
 // persistGeneralToScope writes the current UI state back into the currently
@@ -255,6 +263,11 @@ func (m *SettingsModel) persistGeneralToScope() {
 		} else {
 			cfg.WorktreeTemplate.OnConflict = ""
 		}
+		if m.projectOverrides[fieldWorktreeBasePath] {
+			cfg.WorktreeBasePath = strings.TrimSpace(m.worktreeBasePathStr)
+		} else {
+			cfg.WorktreeBasePath = ""
+		}
 	} else {
 		if len(m.providerNames) > 0 {
 			cfg.DefaultProvider = m.providerNames[m.selectedProvider]
@@ -273,6 +286,7 @@ func (m *SettingsModel) persistGeneralToScope() {
 			cfg.PickerWidth = w
 		}
 		cfg.WorktreeTemplate.OnConflict = templateConflictOptions[m.templateConflictIdx]
+		cfg.WorktreeBasePath = strings.TrimSpace(m.worktreeBasePathStr)
 	}
 
 	// Persist tracker-entry edits for built-in trackers into the scope's cfg.
@@ -320,6 +334,8 @@ func (m *SettingsModel) markGeneralOverride(fieldIdx int) {
 		m.projectOverrides[fieldIDE] = true
 	case 5:
 		m.projectOverrides[fieldTemplateConflict] = true
+	case 7:
+		m.projectOverrides[fieldWorktreeBasePath] = true
 	}
 }
 
@@ -347,6 +363,8 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 		key = fieldIDE
 	case 5:
 		key = fieldTemplateConflict
+	case 7:
+		key = fieldWorktreeBasePath
 	}
 	if key == "" {
 		return ""
@@ -377,6 +395,8 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 		}
 	case 5:
 		userVal = m.userCfg.TemplateConflictPolicy()
+	case 7:
+		userVal = m.userCfg.WorktreeBasePath
 	}
 	suffix := "  ○ inherit"
 	if userVal != "" {
@@ -451,6 +471,7 @@ func (m *SettingsModel) rebuildItems() {
 
 	// Worktree section
 	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 5})
+	m.items = append(m.items, flatItem{kind: "text", section: -1, fieldIdx: 7})
 	m.items = append(m.items, flatItem{kind: "action", section: -1, fieldIdx: 6})
 
 	// Plugin fields
@@ -549,7 +570,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Paste {
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if item.kind == "text" {
+			if p := m.generalTextPtr(item); p != nil {
+				*p += string(msg.Runes)
+				m.markGeneralOverride(item.fieldIdx)
+			} else if item.kind == "text" {
 				e := &m.entries[item.section]
 				key := e.fields[item.fieldIdx].Key
 				e.values[key] += string(msg.Runes)
@@ -739,6 +763,8 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.projectOverrides[fieldIDE] = false
 			case 5:
 				m.projectOverrides[fieldTemplateConflict] = false
+			case 7:
+				m.projectOverrides[fieldWorktreeBasePath] = false
 			}
 			m.loadGeneralFromScope()
 		} else if item.kind == "text" {
@@ -750,7 +776,12 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if item.kind == "text" {
+			if p := m.generalTextPtr(item); p != nil {
+				if len(*p) > 0 {
+					*p = (*p)[:len(*p)-1]
+					m.markGeneralOverride(item.fieldIdx)
+				}
+			} else if item.kind == "text" {
 				e := &m.entries[item.section]
 				k := e.fields[item.fieldIdx].Key
 				v := e.values[k]
@@ -770,7 +801,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+u":
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if item.kind == "text" {
+			if p := m.generalTextPtr(item); p != nil {
+				*p = ""
+				m.markGeneralOverride(item.fieldIdx)
+			} else if item.kind == "text" {
 				e := &m.entries[item.section]
 				k := e.fields[item.fieldIdx].Key
 				e.values[k] = ""
@@ -788,7 +822,10 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
 			if m.cursor < len(m.items) {
 				item := m.items[m.cursor]
-				if item.kind == "text" {
+				if p := m.generalTextPtr(item); p != nil {
+					*p += key
+					m.markGeneralOverride(item.fieldIdx)
+				} else if item.kind == "text" {
 					e := &m.entries[item.section]
 					k := e.fields[item.fieldIdx].Key
 					e.values[k] += key
@@ -892,6 +929,8 @@ func (m SettingsModel) View() string {
 		sections = append(sections, header)
 
 		sections = append(sections, m.renderSelectField(itemIdx, "Template on Conflict", templateConflictOptions, m.templateConflictIdx)+m.generalStateMarker(5))
+		itemIdx++
+		sections = append(sections, m.renderTextField(itemIdx, "Worktree Base Path", m.worktreeBasePathStr, "e.g. ~/worktrees — fallback when no linked worktrees exist")+m.generalStateMarker(7))
 		itemIdx++
 		sections = append(sections, m.renderActionField(itemIdx, "Open templates directory", worktree.TemplatesRoot(m.rootPath)))
 		itemIdx++
@@ -1040,6 +1079,45 @@ func (m SettingsModel) View() string {
 	statusBar := renderDialogHintBar(m.width,
 		" ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Ctrl+X: delete IDE  Enter: save/add  Esc: cancel")
 	return content + "\n" + statusBar
+}
+
+// generalTextPtr returns a pointer to the string backing a general-section
+// text field (section == -1, kind == "text"), or nil when the item isn't one.
+// Keeps all general text-field bookkeeping in one place instead of scattering
+// `item.kind == "text" && item.section == -1 && item.fieldIdx == N` across
+// paste / typing / backspace / ctrl+u / ctrl+r handlers.
+func (m *SettingsModel) generalTextPtr(item flatItem) *string {
+	if item.kind != "text" || item.section != -1 {
+		return nil
+	}
+	switch item.fieldIdx {
+	case 7:
+		return &m.worktreeBasePathStr
+	}
+	return nil
+}
+
+// renderTextField draws a free-form text input row used for general-section
+// path/string fields. Mirrors renderNumberField but without the numeric
+// suffix or range hint.
+func (m SettingsModel) renderTextField(itemIdx int, label, value, placeholder string) string {
+	isCursor := itemIdx == m.cursor
+	indicator, labelStyle := fieldRowCursor(isCursor)
+
+	display := value
+	if display == "" && !isCursor {
+		if placeholder != "" {
+			display = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(" + placeholder + ")")
+		} else {
+			display = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("-")
+		}
+	} else {
+		display = lipgloss.NewStyle().Foreground(whiteColor).Render(display)
+	}
+	if isCursor {
+		display += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+	}
+	return "  " + indicator + labelStyle.Render(label+": ") + display
 }
 
 // renderActionField renders an "invokable" row: a label followed by a path or
