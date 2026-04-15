@@ -165,12 +165,20 @@ func CreateWorktreeFromBranch(repoDir, targetPath, branch string) error {
 // "new branch" dialog shouldn't become a dead end when the branch just
 // happens to exist without a live worktree. If the user needed to reset the
 // branch to baseBranch, they can do that explicitly in git.
+//
+// Two detection strategies are combined: a pre-check via BranchExists, and
+// an error-message fallback after a failed `-b` call. Either alone is
+// enough, but belt-and-suspenders catches cases where show-ref behaves
+// unexpectedly (packed-refs quirks, worktree-specific ref namespaces, etc.).
 func CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch string) error {
 	if BranchExists(repoDir, newBranch) {
 		_, err := runGit(repoDir, "worktree", "add", targetPath, newBranch)
 		return err
 	}
 	_, err := runGit(repoDir, "worktree", "add", "-b", newBranch, targetPath, baseBranch)
+	if err != nil && strings.Contains(err.Error(), "already exists") {
+		_, err = runGit(repoDir, "worktree", "add", targetPath, newBranch)
+	}
 	return err
 }
 
