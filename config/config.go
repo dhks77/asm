@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -49,6 +50,12 @@ type Config struct {
 	// DefaultIDE, if set, skips the IDE selector and opens directly.
 	DefaultIDE       string                 `toml:"default_ide"`
 	WorktreeTemplate WorktreeTemplateConfig `toml:"worktree_template"`
+	// WorktreeBasePath is the directory where new worktrees are created in
+	// repo mode when there are no existing linked worktrees to inherit the
+	// layout from. Empty = fall back to the main repo's parent directory
+	// (standard git sibling convention). Leading `~` is expanded to the
+	// user's home directory when resolved via GetWorktreeBasePath.
+	WorktreeBasePath string `toml:"worktree_base_path"`
 }
 
 func homeDir() string {
@@ -156,6 +163,9 @@ func merge(base, overlay *Config) {
 	if overlay.WorktreeTemplate.OnConflict != "" {
 		base.WorktreeTemplate.OnConflict = overlay.WorktreeTemplate.OnConflict
 	}
+	if overlay.WorktreeBasePath != "" {
+		base.WorktreeBasePath = overlay.WorktreeBasePath
+	}
 
 	// Merge Providers (wholesale per key)
 	if len(overlay.Providers) > 0 {
@@ -254,6 +264,37 @@ func (c *Config) TemplateConflictPolicy() string {
 		return "overwrite"
 	}
 	return "skip"
+}
+
+// DefaultWorktreeBasePath is the fallback layout when the user hasn't set
+// worktree_base_path in config. Groups worktrees by repo so multiple repos
+// sharing the same root don't collide on identically-named branches (e.g.
+// two repos each with a "feature-X" branch).
+const DefaultWorktreeBasePath = "~/worktrees/{repo}"
+
+// GetWorktreeBasePath returns the resolved base directory for new worktrees:
+//   - leading `~` → home directory
+//   - `{repo}` placeholder → repoName (dropped cleanly when repoName is empty)
+//   - empty config → DefaultWorktreeBasePath
+//
+// Callers should os.MkdirAll(result, 0o755) before `git worktree add` since
+// git requires the parent of the target to exist.
+func (c *Config) GetWorktreeBasePath(repoName string) string {
+	p := strings.TrimSpace(c.WorktreeBasePath)
+	if p == "" {
+		p = DefaultWorktreeBasePath
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if p == "~" {
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	}
+	p = strings.ReplaceAll(p, "{repo}", repoName)
+	return filepath.Clean(p) // collapses the empty segment when repoName == ""
 }
 
 // GetPickerWidth returns the picker pane width in percent, clamped to a

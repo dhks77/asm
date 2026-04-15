@@ -69,7 +69,11 @@ func (p *PluginProvider) Name() string        { return p.info.Name }
 func (p *PluginProvider) DisplayName() string  { return p.info.DisplayName }
 func (p *PluginProvider) Command() string      { return p.info.Command }
 func (p *PluginProvider) Args() []string       { return p.info.Args }
-func (p *PluginProvider) ResumeArgs() []string { return p.info.ResumeArgs }
+// ResumeArgs returns the plugin's declared resume args regardless of cwd —
+// plugins can't gate on per-cwd session existence (the protocol is static
+// JSON). Plugin authors that can't tolerate a "resume with no history" call
+// should leave resume_args unset.
+func (p *PluginProvider) ResumeArgs(cwd string) []string { return p.info.ResumeArgs }
 func (p *PluginProvider) PluginPath() string   { return p.path }
 func (p *PluginProvider) NeedsContent(title string) bool {
 	return p.info.NeedsContent

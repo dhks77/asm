@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,6 +18,7 @@ import (
 	"github.com/nhn/asm/tracker"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/ui"
+	"github.com/nhn/asm/worktree"
 )
 
 func main() {
@@ -73,6 +76,11 @@ func main() {
 	if mergedCfg, err := config.LoadMerged(rootPath); err == nil {
 		cfg = mergedCfg
 	}
+
+	// First-entry auto-seed of project worktree_base_path. Runs before any
+	// subprocess fork so both orchestrator and picker (which re-reads
+	// config in its own main()) observe the seeded value.
+	autoSeedWorktreeBasePath(rootPath, cfg)
 
 	// Derive per-path tmux session name so multiple asm instances (one per
 	// root path) can run concurrently without stomping on each other.
@@ -192,6 +200,82 @@ func saveDoorayConfig(dc *tracker.DoorayConfig, scope config.Scope, rootPath str
 	return config.SaveScope(cfg, scope, rootPath)
 }
 
+// autoSeedWorktreeBasePath writes a project-scope worktree_base_path into
+// .asm/config.toml the FIRST time asm is run against a git repo that already
+// has linked worktrees. Rationale: the user clearly has an existing layout
+// convention — we should lock it in so the worktree-create dialog and
+// settings UI reflect it, instead of letting the `~/worktrees/{repo}`
+// default win by accident.
+//
+// Guardrails:
+//   - Not in repo mode → nothing to infer from.
+//   - Project config file already exists → user has been here before, do
+//     not touch. Covers both the "we already seeded" and "user has their
+//     own project settings" cases uniformly.
+//   - No linked worktrees → nothing to infer.
+//   - Detected parent matches whatever GetWorktreeBasePath would already
+//     return → writing would be a no-op, so skip to avoid creating an
+//     otherwise-empty .asm/ directory.
+//
+// Best-effort: a write failure is logged and ignored — the normal
+// fallback chain in resolveWorktreeBase still covers the UX.
+func autoSeedWorktreeBasePath(rootPath string, cfg *config.Config) {
+	if !worktree.IsRepoMode(rootPath) {
+		return
+	}
+	if _, err := os.Stat(config.ProjectConfigPath(rootPath)); err == nil {
+		return
+	}
+	parent := worktree.MostRecentLinkedWorktreeParent(rootPath)
+	if parent == "" {
+		return
+	}
+	repoName := worktree.RepoName(rootPath)
+	if parent == cfg.GetWorktreeBasePath(repoName) {
+		return
+	}
+	projectCfg, err := config.LoadScope(config.ScopeProject, rootPath)
+	if err != nil {
+		logErr("auto-seed worktree_base_path: load project config failed: %v\n", err)
+		return
+	}
+	projectCfg.WorktreeBasePath = parent
+	if err := config.SaveScope(projectCfg, config.ScopeProject, rootPath); err != nil {
+		logErr("auto-seed worktree_base_path: save failed: %v\n", err)
+		return
+	}
+	// Propagate to the in-memory cfg so the rest of THIS process sees the
+	// seeded value without a re-read. Subprocesses re-run LoadMerged in
+	// their own main() and pick it up from disk.
+	cfg.WorktreeBasePath = parent
+}
+
+// confirmRestartExistingSession prompts the user before we destroy an
+// existing asm tmux session for this rootPath. Returns true to proceed
+// with kill+restart, false to abort. If stdin isn't a TTY (piped, cron,
+// etc.) we can't prompt, so fall back to the old silent-kill behavior —
+// refusing would break non-interactive launchers.
+func confirmRestartExistingSession(rootPath string) bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return true
+	}
+	fmt.Printf("asm is already running for %s (tmux session: %s).\n", rootPath, asmtmux.SessionName)
+	fmt.Println("Closing it will kill every AI/terminal session inside.")
+	fmt.Print("Close existing session and start fresh? [y/N]: ")
+	var answer string
+	// Fscanln returns an error on empty input / EOF / ^C; treat all of
+	// those as "no" so the safe default (preserve the running session)
+	// wins whenever the user hesitates.
+	_, _ = fmt.Fscanln(os.Stdin, &answer)
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
 	if !asmtmux.IsAvailable() {
 		logErr("Error: tmux is required. Install it with: brew install tmux\n")
@@ -204,8 +288,23 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 		return
 	}
 
-	// Kill existing session if any
+	// Kill existing session if any — but warn first so a stray invocation
+	// doesn't wipe out AI sessions the user still cares about. The "inside
+	// tmux" branch above already handled the case where this instance IS
+	// that session, so reaching here means the session is attached (or
+	// detached) elsewhere and a silent kill is genuinely destructive.
+	//
+	// ASM_RESTART_CONFIRMED=1 is set by the picker's ←/→ re-exec path to
+	// skip re-asking — the picker already prompted and the user said yes.
+	// Unset after reading so it can't leak into child processes or a
+	// later in-place re-exec.
 	if asmtmux.SessionExists() {
+		if os.Getenv("ASM_RESTART_CONFIRMED") == "1" {
+			os.Unsetenv("ASM_RESTART_CONFIRMED")
+		} else if !confirmRestartExistingSession(rootPath) {
+			fmt.Println("Cancelled.")
+			return
+		}
 		asmtmux.KillSession()
 	}
 
@@ -241,8 +340,32 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	asmtmux.FocusPickingPanel()
 
 	// Attach to the session (blocks until session ends)
-	if err := asmtmux.Attach(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+	attachErr := asmtmux.Attach()
+
+	// The picker's ←/→ navigate writes a handoff file then kills the tmux
+	// session, which pops Attach. If the handoff is present, re-exec asm
+	// with the new --path so we end up in a fresh tmux session named after
+	// the new root. syscall.Exec replaces the current process image, so
+	// repeated navigations don't accumulate parent asm processes.
+	if data, err := os.ReadFile(asmtmux.HandoffFilePath()); err == nil {
+		os.Remove(asmtmux.HandoffFilePath())
+		next := strings.TrimSpace(string(data))
+		if next != "" {
+			self, err := os.Executable()
+			if err == nil {
+				// Mark the re-exec as user-confirmed so the new process
+				// doesn't re-ask "close existing session?" — the picker
+				// already surfaced that prompt before writing the handoff.
+				// Preserve the original env otherwise so ~/.asm config,
+				// tmux, $SHELL etc. carry through.
+				env := append(os.Environ(), "ASM_RESTART_CONFIRMED=1")
+				_ = syscall.Exec(self, []string{self, "--path", next}, env)
+			}
+		}
+	}
+
+	if attachErr != nil {
+		if exitErr, ok := attachErr.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
 	}

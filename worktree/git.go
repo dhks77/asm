@@ -13,6 +13,12 @@ import (
 // normal command latency but short enough that hangs surface quickly.
 const gitCommandTimeout = 5 * time.Second
 
+// gitFetchTimeout is the longer deadline used for `git fetch`, which hits
+// the network and is bounded by the remote's responsiveness, not local
+// filesystem latency. 30s lets typical fetches complete while still failing
+// fast on a dead remote.
+const gitFetchTimeout = 30 * time.Second
+
 // CurrentBranch returns the current branch name of the git work tree at dir,
 // or an empty string if it cannot be resolved.
 func CurrentBranch(dir string) string {

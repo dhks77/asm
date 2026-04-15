@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 )
@@ -24,12 +26,39 @@ func (p *ClaudeProvider) DisplayName() string  { return "Claude" }
 func (p *ClaudeProvider) Command() string      { return p.command }
 func (p *ClaudeProvider) Args() []string       { return p.args }
 
-// ResumeArgs returns ["--continue"], which tells Claude Code to resume the
-// most recent conversation in the current working directory. Claude keys
-// conversations by project (CWD) so each worktree, launched with its own
-// cwd, gets its own resume target without asm tracking session IDs.
-// Safe when no prior conversation exists — Claude falls back to a new one.
-func (p *ClaudeProvider) ResumeArgs() []string { return []string{"--continue"} }
+// ResumeArgs returns ["--continue"] only when a prior conversation exists
+// for cwd. Claude Code's --continue exits with an error when there is no
+// history in the current project, so we probe ~/.claude/projects/<cwd>/
+// first. Claude keys conversations by project path, so each worktree's cwd
+// gets its own resume target without asm tracking session IDs.
+func (p *ClaudeProvider) ResumeArgs(cwd string) []string {
+	if !hasClaudeSession(cwd) {
+		return nil
+	}
+	return []string{"--continue"}
+}
+
+// hasClaudeSession reports whether Claude has stored any conversation for the
+// given cwd. Claude's on-disk layout is
+// ~/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/<session-id>.jsonl
+// (one file per session). An empty/missing directory = no resumable history.
+func hasClaudeSession(cwd string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	dir := filepath.Join(home, ".claude", "projects", strings.ReplaceAll(cwd, "/", "-"))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+			return true
+		}
+	}
+	return false
+}
 
 // NeedsContent returns true when the pane title indicates busy state,
 // meaning content capture is needed to determine the specific busy detail.
