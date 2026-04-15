@@ -18,6 +18,7 @@ import (
 	"github.com/nhn/asm/tracker"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/ui"
+	"github.com/nhn/asm/worktree"
 )
 
 func main() {
@@ -75,6 +76,11 @@ func main() {
 	if mergedCfg, err := config.LoadMerged(rootPath); err == nil {
 		cfg = mergedCfg
 	}
+
+	// First-entry auto-seed of project worktree_base_path. Runs before any
+	// subprocess fork so both orchestrator and picker (which re-reads
+	// config in its own main()) observe the seeded value.
+	autoSeedWorktreeBasePath(rootPath, cfg)
 
 	// Derive per-path tmux session name so multiple asm instances (one per
 	// root path) can run concurrently without stomping on each other.
@@ -192,6 +198,56 @@ func saveDoorayConfig(dc *tracker.DoorayConfig, scope config.Scope, rootPath str
 		"task_pattern": dc.TaskPattern,
 	}
 	return config.SaveScope(cfg, scope, rootPath)
+}
+
+// autoSeedWorktreeBasePath writes a project-scope worktree_base_path into
+// .asm/config.toml the FIRST time asm is run against a git repo that already
+// has linked worktrees. Rationale: the user clearly has an existing layout
+// convention — we should lock it in so the worktree-create dialog and
+// settings UI reflect it, instead of letting the `~/worktrees/{repo}`
+// default win by accident.
+//
+// Guardrails:
+//   - Not in repo mode → nothing to infer from.
+//   - Project config file already exists → user has been here before, do
+//     not touch. Covers both the "we already seeded" and "user has their
+//     own project settings" cases uniformly.
+//   - No linked worktrees → nothing to infer.
+//   - Detected parent matches whatever GetWorktreeBasePath would already
+//     return → writing would be a no-op, so skip to avoid creating an
+//     otherwise-empty .asm/ directory.
+//
+// Best-effort: a write failure is logged and ignored — the normal
+// fallback chain in resolveWorktreeBase still covers the UX.
+func autoSeedWorktreeBasePath(rootPath string, cfg *config.Config) {
+	if !worktree.IsRepoMode(rootPath) {
+		return
+	}
+	if _, err := os.Stat(config.ProjectConfigPath(rootPath)); err == nil {
+		return
+	}
+	parent := worktree.MostRecentLinkedWorktreeParent(rootPath)
+	if parent == "" {
+		return
+	}
+	repoName := worktree.RepoName(rootPath)
+	if parent == cfg.GetWorktreeBasePath(repoName) {
+		return
+	}
+	projectCfg, err := config.LoadScope(config.ScopeProject, rootPath)
+	if err != nil {
+		logErr("auto-seed worktree_base_path: load project config failed: %v\n", err)
+		return
+	}
+	projectCfg.WorktreeBasePath = parent
+	if err := config.SaveScope(projectCfg, config.ScopeProject, rootPath); err != nil {
+		logErr("auto-seed worktree_base_path: save failed: %v\n", err)
+		return
+	}
+	// Propagate to the in-memory cfg so the rest of THIS process sees the
+	// seeded value without a re-read. Subprocesses re-run LoadMerged in
+	// their own main() and pick it up from disk.
+	cfg.WorktreeBasePath = parent
 }
 
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {

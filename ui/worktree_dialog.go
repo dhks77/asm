@@ -531,7 +531,10 @@ func prepareWorktreeTarget(rootPath, repoName, folderName string) (string, error
 //
 // Resolution order:
 //  1. Parent directory of the most-recently-modified linked worktree (by mtime).
-//     Matches whatever layout the user is already using.
+//     Matches whatever layout the user is already using. The auto-seed on
+//     first repo entry also writes this into project config, so repeat runs
+//     usually hit step 2 with the seeded value — step 1 still wins here for
+//     robustness if the config was cleared or the layout drifted.
 //  2. Config's worktree_base_path, with `{repo}` expanded to repoName and a
 //     built-in default of `~/worktrees/{repo}` when unset. Grouping by repo
 //     avoids collisions when multiple repos share the base.
@@ -540,30 +543,8 @@ func prepareWorktreeTarget(rootPath, repoName, folderName string) (string, error
 //     case where the config read fails AND home dir can't be resolved.
 //  4. rootPath — last-resort safety net.
 func resolveWorktreeBase(rootPath, repoName string) string {
-	entries, _ := worktree.ScanRepo(rootPath)
-	mainRepo, _ := worktree.FindMainRepo(rootPath)
-	mainClean := ""
-	if mainRepo != "" {
-		mainClean = filepath.Clean(mainRepo)
-	}
-
-	var best worktree.Worktree
-	var bestMtime time.Time
-	for _, wt := range entries {
-		if mainClean != "" && filepath.Clean(wt.Path) == mainClean {
-			continue // skip main repo — we want a linked-worktree parent
-		}
-		info, err := os.Stat(wt.Path)
-		if err != nil {
-			continue
-		}
-		if best.Path == "" || info.ModTime().After(bestMtime) {
-			best = wt
-			bestMtime = info.ModTime()
-		}
-	}
-	if best.Path != "" {
-		return filepath.Dir(best.Path)
+	if parent := worktree.MostRecentLinkedWorktreeParent(rootPath); parent != "" {
+		return parent
 	}
 	cfg, err := config.LoadMerged(rootPath)
 	if err == nil {
@@ -571,7 +552,7 @@ func resolveWorktreeBase(rootPath, repoName string) string {
 			return p
 		}
 	}
-	if mainRepo != "" {
+	if mainRepo, err := worktree.FindMainRepo(rootPath); err == nil && mainRepo != "" {
 		return filepath.Dir(mainRepo)
 	}
 	return rootPath
