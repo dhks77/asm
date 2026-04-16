@@ -14,8 +14,9 @@ import (
 	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/notification"
 	"github.com/nhn/asm/provider"
-	"github.com/nhn/asm/tracker"
+	"github.com/nhn/asm/shelljoin"
 	asmtmux "github.com/nhn/asm/tmux"
+	"github.com/nhn/asm/tracker"
 	"github.com/nhn/asm/worktree"
 )
 
@@ -87,11 +88,11 @@ type batchDeleteCompletedMsg struct{ count int }
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
-	cfg            *config.Config
-	rootPath       string
-	directories    []worktree.Worktree
-	branches       map[string]string // worktree path -> branch name (one-shot)
-	taskInfos      map[string]tracker.TaskInfo
+	cfg                *config.Config
+	rootPath           string
+	directories        []worktree.Worktree
+	branches           map[string]string // worktree path -> branch name (one-shot)
+	taskInfos          map[string]tracker.TaskInfo
 	providerStates     map[string]provider.State
 	prevProviderStates map[string]provider.State
 	worktreeProviders  map[string]string // worktree name -> provider name
@@ -117,14 +118,14 @@ type PickerModel struct {
 	// goroutines at the 200ms scroll cadence.
 	statusSummaryWriting bool
 	spinnerFrame         int
-	scrollTick     int
-	cursor         int
-	viewTop        int    // first visible item index for scrolling
-	workingDir     string // directory shown in working panel (AI session)
-	termDir        string // directory shown in working panel (terminal)
-	tracker        tracker.Tracker
-	taskCache      *tracker.PathCache
-	ides           []ide.IDE
+	scrollTick           int
+	cursor               int
+	viewTop              int    // first visible item index for scrolling
+	workingDir           string // directory shown in working panel (AI session)
+	termDir              string // directory shown in working panel (terminal)
+	tracker              tracker.Tracker
+	taskCache            *tracker.PathCache
+	ides                 []ide.IDE
 	// cachedBranches tracks the branch each seeded taskInfo was observed
 	// under; we invalidate the seed when the branch re-resolves differently.
 	cachedBranches map[string]string
@@ -134,8 +135,8 @@ type PickerModel struct {
 	ready          bool
 	err            string
 	searchQuery    string
-	selectedItems    map[string]bool
-	batchConfirm     BatchConfirmModel
+	selectedItems  map[string]bool
+	batchConfirm   BatchConfirmModel
 	// pendingNavigatePath is set when the user pressed ←/→ but we had to
 	// surface a confirmation first (active AI sessions would die). Cleared
 	// on confirm (right before navigateTo) or on cancel.
@@ -154,10 +155,10 @@ type PickerModel struct {
 
 func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) PickerModel {
 	return PickerModel{
-		cfg:            cfg,
-		rootPath:       rootPath,
-		branches:       make(map[string]string),
-		taskInfos:      make(map[string]tracker.TaskInfo),
+		cfg:                cfg,
+		rootPath:           rootPath,
+		branches:           make(map[string]string),
+		taskInfos:          make(map[string]tracker.TaskInfo),
 		providerStates:     make(map[string]provider.State),
 		prevProviderStates: make(map[string]provider.State),
 		worktreeProviders:  make(map[string]string),
@@ -168,14 +169,66 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		activeKinds:        make(map[string]asmtmux.SessionKind),
 		terminalWidth:      120, // sane default until the first tmux query lands
 		selectedItems:      make(map[string]bool),
-		batchConfirm:     NewBatchConfirmModel(),
-		tracker:           t,
-		taskCache:        taskCache,
-		cachedBranches:    make(map[string]string),
-		ides:              ides,
-		focused:        true,
-		isRepoMode:     worktree.IsRepoMode(rootPath),
+		batchConfirm:       NewBatchConfirmModel(),
+		tracker:            t,
+		taskCache:          taskCache,
+		cachedBranches:     make(map[string]string),
+		ides:               ides,
+		focused:            true,
+		isRepoMode:         worktree.IsRepoMode(rootPath),
 	}
+}
+
+func (m *PickerModel) worktreeByName(name string) *worktree.Worktree {
+	for i := range m.directories {
+		if m.directories[i].Name == name {
+			return &m.directories[i]
+		}
+	}
+	return nil
+}
+
+func (m *PickerModel) focusWorkingPanel() {
+	asmtmux.FocusWorkingPanel()
+	m.applyAutoZoom()
+}
+
+func (m *PickerModel) swapAIToWorkingPanel(name string) bool {
+	if !asmtmux.WindowExists(asmtmux.WindowName(name)) {
+		return false
+	}
+	asmtmux.SwapToWorkingPanel(name)
+	m.workingDir = name
+	m.termDir = ""
+	return true
+}
+
+func (m *PickerModel) swapTermToWorkingPanel(name string) bool {
+	if !asmtmux.WindowExists(asmtmux.TerminalWindowName(name)) {
+		return false
+	}
+	asmtmux.SwapTermToWorkingPanel(name)
+	m.termDir = name
+	m.workingDir = ""
+	return true
+}
+
+func (m *PickerModel) swapCurrentAIOut() bool {
+	if m.workingDir == "" {
+		return false
+	}
+	asmtmux.SwapBackFromWorkingPanel(m.workingDir)
+	m.workingDir = ""
+	return true
+}
+
+func (m *PickerModel) swapCurrentTermOut() bool {
+	if m.termDir == "" {
+		return false
+	}
+	asmtmux.SwapTermBackFromWorkingPanel(m.termDir)
+	m.termDir = ""
+	return true
 }
 
 // filteredDirectories returns indices into m.directories matching the current search query.
@@ -416,11 +469,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if isDisplayed {
 			m.workingDir = ""
 			// Show terminal for this directory if it exists
-			termWin := asmtmux.TerminalWindowName(msg.DirName)
-			if asmtmux.WindowExists(termWin) {
-				asmtmux.SwapTermToWorkingPanel(msg.DirName)
-				m.termDir = msg.DirName
-			} else {
+			if !m.swapTermToWorkingPanel(msg.DirName) {
 				asmtmux.FocusPickingPanel()
 			}
 		}
@@ -451,13 +500,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.confirmed {
 			return m, nil
 		}
-		var wt *worktree.Worktree
-		for i := range m.directories {
-			if m.directories[i].Name == msg.dirName {
-				wt = &m.directories[i]
-				break
-			}
-		}
+		wt := m.worktreeByName(msg.dirName)
 		if wt == nil {
 			return m, nil
 		}
@@ -517,8 +560,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		winName := asmtmux.WindowName(wt.Name)
 		if asmtmux.WindowExists(winName) {
 			if m.workingDir == wt.Name {
-				asmtmux.SwapBackFromWorkingPanel(wt.Name)
-				m.workingDir = ""
+				m.swapCurrentAIOut()
 			}
 			asmtmux.KillDirectoryWindow(wt.Name)
 		}
@@ -647,8 +689,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case terminalExitedMsg:
 		isDisplayed := m.termDir == msg.dirName
 		if isDisplayed {
-			asmtmux.SwapTermBackFromWorkingPanel(msg.dirName)
-			m.termDir = ""
+			m.swapCurrentTermOut()
 		}
 		asmtmux.KillTerminalWindow(msg.dirName)
 		delete(m.terminalStartTimes, msg.dirName)
@@ -657,12 +698,8 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the working pane instead of leaving the user with a split view
 			// where the picker has focus and the working pane sits idle on
 			// the right.
-			winName := asmtmux.WindowName(msg.dirName)
-			if asmtmux.WindowExists(winName) {
-				asmtmux.SwapToWorkingPanel(msg.dirName)
-				m.workingDir = msg.dirName
-				asmtmux.FocusWorkingPanel()
-				m.applyAutoZoom()
+			if m.swapAIToWorkingPanel(msg.dirName) {
+				m.focusWorkingPanel()
 			} else {
 				asmtmux.FocusPickingPanel()
 			}
@@ -789,8 +826,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		winName := asmtmux.WindowName(wt.Name)
 		if asmtmux.WindowExists(winName) {
 			if m.workingDir == wt.Name {
-				asmtmux.SwapBackFromWorkingPanel(wt.Name)
-				m.workingDir = ""
+				m.swapCurrentAIOut()
 			}
 			asmtmux.KillDirectoryWindow(wt.Name)
 		}
@@ -1025,13 +1061,8 @@ func (m *PickerModel) openBatchDelete() tea.Cmd {
 	names := m.selectedItemNames()
 	dirtyCount := 0
 	for _, name := range names {
-		for _, wt := range m.directories {
-			if wt.Name == name {
-				if worktree.HasChanges(wt.Path) {
-					dirtyCount++
-				}
-				break
-			}
+		if wt := m.worktreeByName(name); wt != nil && worktree.HasChanges(wt.Path) {
+			dirtyCount++
 		}
 	}
 	m.batchConfirm.Show(BatchDeleteWorktrees, names, m.taskNamesFor(names), dirtyCount)
@@ -1044,12 +1075,9 @@ func (m *PickerModel) openBatchDelete() tea.Cmd {
 func (m *PickerModel) taskNamesFor(names []string) []string {
 	out := make([]string, len(names))
 	for i, name := range names {
-		for _, wt := range m.directories {
-			if wt.Name == name {
-				if info, ok := m.taskInfos[wt.Path]; ok {
-					out[i] = info.Name
-				}
-				break
+		if wt := m.worktreeByName(name); wt != nil {
+			if info, ok := m.taskInfos[wt.Path]; ok {
+				out[i] = info.Name
 			}
 		}
 	}
@@ -1078,8 +1106,7 @@ func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
 		winName := asmtmux.WindowName(name)
 		if asmtmux.WindowExists(winName) {
 			if m.workingDir == name {
-				asmtmux.SwapBackFromWorkingPanel(name)
-				m.workingDir = ""
+				m.swapCurrentAIOut()
 			}
 			asmtmux.KillDirectoryWindow(name)
 		}
@@ -1087,8 +1114,7 @@ func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
 		termWinName := asmtmux.TerminalWindowName(name)
 		if asmtmux.WindowExists(termWinName) {
 			if m.termDir == name {
-				asmtmux.SwapTermBackFromWorkingPanel(name)
-				m.termDir = ""
+				m.swapCurrentTermOut()
 			}
 			asmtmux.KillTerminalWindow(name)
 		}
@@ -1097,11 +1123,8 @@ func (m *PickerModel) batchDeleteWorktrees(names []string) tea.Cmd {
 
 	var toRemove []worktree.Worktree
 	for _, name := range names {
-		for _, wt := range m.directories {
-			if wt.Name == name {
-				toRemove = append(toRemove, wt)
-				break
-			}
+		if wt := m.worktreeByName(name); wt != nil {
+			toRemove = append(toRemove, *wt)
 		}
 	}
 
@@ -1180,14 +1203,8 @@ func (m *PickerModel) cleanupSessionState(name string) {
 }
 
 func (m *PickerModel) swapOutWorkingPanel() {
-	if m.workingDir != "" {
-		asmtmux.SwapBackFromWorkingPanel(m.workingDir)
-		m.workingDir = ""
-	}
-	if m.termDir != "" {
-		asmtmux.SwapTermBackFromWorkingPanel(m.termDir)
-		m.termDir = ""
-	}
+	m.swapCurrentAIOut()
+	m.swapCurrentTermOut()
 }
 
 // runDialogInWorkingPanel is the shared boilerplate for every modal dialog
@@ -1196,8 +1213,8 @@ func (m *PickerModel) swapOutWorkingPanel() {
 // and returns a tea.Cmd that blocks on dialog exit and converts the exit
 // code into the caller-supplied message.
 //
-// cmdFlags is the argv portion appended to the executable path (e.g.
-// "--settings" or "--delete foo --delete-dirty"). resultMsg is invoked with
+// args is the argv slice appended to the executable path (e.g.
+// []string{"--settings"}). resultMsg is invoked with
 // the dialog's exit code once it terminates.
 //
 // The picker's rootPath is injected as `--path <rootPath>` by default —
@@ -1206,7 +1223,7 @@ func (m *PickerModel) swapOutWorkingPanel() {
 // after an arrow-key navigation the child would read cfg.DefaultPath (or
 // CWD) and happily edit a different repo's project config. Centralising
 // the flag here also means new dialogs can't forget to wire it up.
-func (m *PickerModel) runDialogInWorkingPanel(windowName, cmdFlags string, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
+func (m *PickerModel) runDialogInWorkingPanel(windowName string, args []string, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
 	m.swapOutWorkingPanel()
 
 	exe, err := os.Executable()
@@ -1214,7 +1231,7 @@ func (m *PickerModel) runDialogInWorkingPanel(windowName, cmdFlags string, resul
 		return nil
 	}
 
-	argv := fmt.Sprintf("%s %s --path %s", exe, cmdFlags, m.rootPath)
+	argv := shelljoin.Join(append(append([]string{exe}, args...), "--path", m.rootPath)...)
 	asmtmux.RunInWorkingPanel(windowName, argv)
 	asmtmux.FocusWorkingPanel()
 	m.applyAutoZoom()
@@ -1225,7 +1242,7 @@ func (m *PickerModel) runDialogInWorkingPanel(windowName, cmdFlags string, resul
 }
 
 func (m *PickerModel) openProviderSelect() tea.Cmd {
-	return m.runDialogInWorkingPanel("asm-provider-select", "--provider-select", func(exitCode int) tea.Msg {
+	return m.runDialogInWorkingPanel("asm-provider-select", []string{"--provider-select"}, func(exitCode int) tea.Msg {
 		if exitCode == 0 {
 			return providerSelectDoneMsg{ProviderName: asmtmux.GetSessionOption("asm-selected-provider")}
 		}
@@ -1238,7 +1255,7 @@ func (m *PickerModel) openProviderSelect() tea.Cmd {
 // ideSelectDoneMsg — which carries the worktree path so the handler can
 // launch the IDE against it.
 func (m *PickerModel) openIDESelect(wtPath string) tea.Cmd {
-	selectCmd := m.runDialogInWorkingPanel("asm-ide-select", "--ide-select", func(exitCode int) tea.Msg {
+	selectCmd := m.runDialogInWorkingPanel("asm-ide-select", []string{"--ide-select"}, func(exitCode int) tea.Msg {
 		if exitCode == 0 {
 			return ideSelectDoneMsg{
 				IDEName: asmtmux.GetSessionOption("asm-selected-ide"),
@@ -1270,15 +1287,15 @@ func (m *PickerModel) openWorktreeInIDE(wtPath, ideName string) tea.Cmd {
 
 func (m *PickerModel) openSettings() tea.Cmd {
 	// --path is injected by runDialogInWorkingPanel.
-	return m.runDialogInWorkingPanel("asm-settings", "--settings", func(int) tea.Msg {
+	return m.runDialogInWorkingPanel("asm-settings", []string{"--settings"}, func(int) tea.Msg {
 		return settingsExitedMsg{}
 	})
 }
 
 func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
 	// --path is injected by runDialogInWorkingPanel.
-	flags := fmt.Sprintf("--worktree-create --worktree-dir %s", dir.Path)
-	return m.runDialogInWorkingPanel("asm-worktree", flags, func(exitCode int) tea.Msg {
+	args := []string{"--worktree-create", "--worktree-dir", dir.Path}
+	return m.runDialogInWorkingPanel("asm-worktree", args, func(exitCode int) tea.Msg {
 		return worktreeExitedMsg{created: exitCode == 0}
 	})
 }
@@ -1289,19 +1306,19 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 		taskName = info.Name
 	}
 
-	flags := fmt.Sprintf("--delete %s", wt.Name)
+	args := []string{"--delete", wt.Name}
 	if taskName != "" {
-		flags += fmt.Sprintf(" --delete-task '%s'", taskName)
+		args = append(args, "--delete-task", taskName)
 	}
 	if worktree.HasChanges(wt.Path) {
-		flags += " --delete-dirty"
+		args = append(args, "--delete-dirty")
 	}
 	if worktree.IsWorktree(wt.Path) {
-		flags += " --delete-worktree"
+		args = append(args, "--delete-worktree")
 	}
 
 	wtName := wt.Name
-	return m.runDialogInWorkingPanel("asm-delete", flags, func(exitCode int) tea.Msg {
+	return m.runDialogInWorkingPanel("asm-delete", args, func(exitCode int) tea.Msg {
 		return deleteExitedMsg{dirName: wtName, confirmed: exitCode == 0}
 	})
 }
@@ -1317,18 +1334,16 @@ func (m *PickerModel) showTerminalInWorkingPanel(name, path string) tea.Cmd {
 		m.terminalStartTimes[name] = time.Now()
 		cmd = waitForTermExitCmd(name)
 	}
-	asmtmux.SwapTermToWorkingPanel(name)
-	m.termDir = name
-	asmtmux.FocusWorkingPanel()
-	m.applyAutoZoom()
+	if m.swapTermToWorkingPanel(name) {
+		m.focusWorkingPanel()
+	}
 	return cmd
 }
 
 func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	// Already showing this terminal
 	if m.termDir == wt.Name {
-		asmtmux.FocusWorkingPanel()
-		m.applyAutoZoom()
+		m.focusWorkingPanel()
 		return nil
 	}
 
@@ -1341,31 +1356,19 @@ func (m *PickerModel) toggleTerminal() tea.Cmd {
 	if m.workingDir != "" {
 		// AI session is displayed → switch to terminal
 		wtName := m.workingDir
-		var wtPath string
-		for _, wt := range m.directories {
-			if wt.Name == wtName {
-				wtPath = wt.Path
-				break
-			}
-		}
-		if wtPath == "" {
+		wt := m.worktreeByName(wtName)
+		if wt == nil {
 			return nil
 		}
-		asmtmux.SwapBackFromWorkingPanel(wtName)
-		m.workingDir = ""
-		return m.showTerminalInWorkingPanel(wtName, wtPath)
+		m.swapCurrentAIOut()
+		return m.showTerminalInWorkingPanel(wtName, wt.Path)
 	} else if m.termDir != "" {
 		// Terminal is displayed → switch to AI session (if exists)
 		wtName := m.termDir
-		asmtmux.SwapTermBackFromWorkingPanel(wtName)
-		m.termDir = ""
+		m.swapCurrentTermOut()
 
-		winName := asmtmux.WindowName(wtName)
-		if asmtmux.WindowExists(winName) {
-			asmtmux.SwapToWorkingPanel(wtName)
-			m.workingDir = wtName
-			asmtmux.FocusWorkingPanel()
-			m.applyAutoZoom()
+		if m.swapAIToWorkingPanel(wtName) {
+			m.focusWorkingPanel()
 		}
 	}
 	return nil
@@ -1378,26 +1381,17 @@ func waitForTermExitCmd(dirName string) tea.Cmd {
 	}
 }
 
-
 func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 	if m.workingDir == wt.Name {
-		asmtmux.FocusWorkingPanel()
-		m.applyAutoZoom()
+		m.focusWorkingPanel()
 		return
 	}
 	// Recreate working panel if it was lost
 	asmtmux.EnsureWorkingPanel()
-	if m.workingDir != "" {
-		asmtmux.SwapBackFromWorkingPanel(m.workingDir)
+	m.swapOutWorkingPanel()
+	if m.swapAIToWorkingPanel(wt.Name) {
+		m.focusWorkingPanel()
 	}
-	if m.termDir != "" {
-		asmtmux.SwapTermBackFromWorkingPanel(m.termDir)
-		m.termDir = ""
-	}
-	asmtmux.SwapToWorkingPanel(wt.Name)
-	m.workingDir = wt.Name
-	asmtmux.FocusWorkingPanel()
-	m.applyAutoZoom()
 }
 
 // applyAutoZoom zooms the working pane if config's auto_zoom is enabled.
@@ -1641,13 +1635,7 @@ func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (st
 	}
 	targetKind = activeKinds[target]
 
-	var wt *worktree.Worktree
-	for i := range m.directories {
-		if m.directories[i].Name == target {
-			wt = &m.directories[i]
-			break
-		}
-	}
+	wt := m.worktreeByName(target)
 	if wt == nil {
 		return "", ""
 	}
@@ -2481,4 +2469,3 @@ func (m PickerModel) renderProviderState(state provider.State, dirName string, f
 	}
 	return style.Render(spinner + " " + label)
 }
-

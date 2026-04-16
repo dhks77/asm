@@ -15,8 +15,9 @@ import (
 	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/plugincfg"
 	"github.com/nhn/asm/provider"
-	"github.com/nhn/asm/tracker"
+	"github.com/nhn/asm/shelljoin"
 	asmtmux "github.com/nhn/asm/tmux"
+	"github.com/nhn/asm/tracker"
 	"github.com/nhn/asm/ui"
 	"github.com/nhn/asm/worktree"
 )
@@ -316,7 +317,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	}
 
 	// Create tmux session (starts with default shell)
-	pickerCmd := fmt.Sprintf("%s --picker --path %s", exe, rootPath)
+	pickerCmd := shelljoin.Join(exe, "--picker", "--path", rootPath)
 	if err := asmtmux.CreateSession(pickerCmd); err != nil {
 		logErr("Error creating tmux session: %v\n", err)
 		os.Exit(1)
@@ -400,7 +401,6 @@ func runWorktreeCreate(rootPath, dirPath string, t tracker.Tracker) {
 	}
 	os.Exit(1)
 }
-
 
 func runProviderSelect(registry *provider.Registry) {
 	model := ui.NewProviderSelectModel(registry.Names())
