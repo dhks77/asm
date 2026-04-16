@@ -927,10 +927,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "f3": // Ctrl+k: kill selected session
 		return m, m.openKillSession()
 
-	case "o": // Ctrl+o / o: Open task URL in browser
-		if len(m.selectedItems) > 0 {
-			break // fall through to search in selection mode
-		}
+	case "ctrl+o": // Open task URL in browser
 		wt := m.contextDirectory()
 		if wt != nil {
 			if info, ok := m.taskInfos[wt.Path]; ok && info.URL != "" {
@@ -2123,8 +2120,16 @@ func (m PickerModel) View() string {
 	activeKinds := m.activeKinds
 
 	filtered := m.filteredDirectories()
+	searchLine := ""
+	if m.searchQuery != "" {
+		searchLine = lipgloss.NewStyle().Foreground(primaryColor).Padding(0, 1).Render("/ " + m.searchQuery)
+	}
 	if len(filtered) == 0 {
-		body := []string{title, ""}
+		body := []string{title}
+		if searchLine != "" {
+			body = append(body, searchLine)
+		}
+		body = append(body, "")
 		if len(m.directories) == 0 {
 			body = append(body, "No open sessions", "", "Press Ctrl+N to launch a session")
 		} else {
@@ -2186,8 +2191,7 @@ func (m PickerModel) View() string {
 	// Build view: title (fixed) + search bar + list + padding
 	var viewLines []string
 	viewLines = append(viewLines, title)
-	if m.searchQuery != "" {
-		searchLine := lipgloss.NewStyle().Foreground(primaryColor).Padding(0, 1).Render("/ " + m.searchQuery)
+	if searchLine != "" {
 		viewLines = append(viewLines, searchLine)
 	}
 	for _, row := range visibleRows {
