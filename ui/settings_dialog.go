@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,16 @@ type settingsEntry struct {
 	entry  plugincfg.Entry
 	fields []plugincfg.Field
 	values map[string]string // current UI values (user + scope changes)
+}
+
+type repoColorEntry struct {
+	Name  string
+	Color string
+}
+
+type textEditTarget struct {
+	get func() string
+	set func(string)
 }
 
 // flatItem represents a navigable item in the settings UI.
@@ -89,6 +100,7 @@ type SettingsModel struct {
 	// ideNames is the display list for Default IDE. Index 0 is always
 	// ideNoneLabel; indices 1.. are the configured IDEs in order.
 	ideNames            []string
+	repoColorEntries    []repoColorEntry
 	selectedProvider    int
 	selectedTracker     int
 	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
@@ -123,14 +135,15 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 	displayIDEs := append([]string{ideNoneLabel}, ideNames...)
 
 	m := SettingsModel{
-		userCfg:       userCfg,
-		projectCfg:    projectCfg,
-		rootPath:      rootPath,
-		entries:       entries,
-		ideEntries:    loadIDEEntries(userCfg),
-		providerNames: providerNames,
-		trackerNames:  trackerNames,
-		ideNames:      displayIDEs,
+		userCfg:          userCfg,
+		projectCfg:       projectCfg,
+		rootPath:         rootPath,
+		entries:          entries,
+		ideEntries:       loadIDEEntries(userCfg),
+		repoColorEntries: loadRepoColorEntries(userCfg),
+		providerNames:    providerNames,
+		trackerNames:     trackerNames,
+		ideNames:         displayIDEs,
 		projectOverrides: map[string]bool{
 			fieldProvider:         projectCfg.DefaultProvider != "",
 			fieldTracker:          projectCfg.DefaultTracker != "",
@@ -449,6 +462,9 @@ func (m *SettingsModel) rebuildItems() {
 	if !isLocal {
 		// Picker width is a global-only UI setting.
 		m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: generalFieldPickerWidth})
+		for i := range m.repoColorEntries {
+			m.items = append(m.items, flatItem{kind: "repo-color", section: i})
+		}
 	}
 
 	if showWorktree {
@@ -504,6 +520,51 @@ func copyMap(m map[string]string) map[string]string {
 	return out
 }
 
+func loadRepoColorEntries(cfg *config.Config) []repoColorEntry {
+	if cfg == nil || len(cfg.RepoColors) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.RepoColors))
+	for name := range cfg.RepoColors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]repoColorEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, repoColorEntry{
+			Name:  name,
+			Color: cfg.RepoColors[name],
+		})
+	}
+	return entries
+}
+
+func repoColorsMap(entries []repoColorEntry) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		if entry.Name == "" {
+			continue
+		}
+		out[entry.Name] = repoColorSaveValue(entry.Name, entry.Color)
+	}
+	return out
+}
+
+func (m SettingsModel) validateRepoColors() error {
+	for _, entry := range m.repoColorEntries {
+		if entry.Name == "" {
+			continue
+		}
+		if !buildRepoColorState(entry.Name, entry.Color).Valid {
+			return fmt.Errorf("invalid repo color for %s: use auto, #RRGGBB, rgb(r,g,b), or ANSI 0-255", entry.Name)
+		}
+	}
+	return nil
+}
+
 func (m SettingsModel) Init() tea.Cmd {
 	var cmds []tea.Cmd
 	for i, e := range m.entries {
@@ -555,17 +616,8 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Paste {
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if p := m.generalTextPtr(item); p != nil {
-				*p += string(msg.Runes)
-				m.markGeneralOverride(item.fieldIdx)
-			} else if item.kind == "text" {
-				e := &m.entries[item.section]
-				key := e.fields[item.fieldIdx].Key
-				e.values[key] += string(msg.Runes)
-			} else if isIDEField(item.kind) {
-				if p := m.ideFieldPtr(item.section, item.kind); p != nil {
-					*p += string(msg.Runes)
-				}
+			if target, ok := m.textEditTarget(item); ok {
+				target.set(target.get() + string(msg.Runes))
 			}
 		}
 		return m, nil
@@ -667,6 +719,11 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "ctrl+s":
+		if err := m.validateRepoColors(); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		m.err = ""
 		return m, m.save()
 
 	case "enter":
@@ -696,6 +753,11 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if err := m.validateRepoColors(); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		m.err = ""
 		return m, m.save()
 
 	case "ctrl+x":
@@ -746,45 +808,25 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if p := m.generalTextPtr(item); p != nil {
-				if len(*p) > 0 {
-					*p = (*p)[:len(*p)-1]
-					m.markGeneralOverride(item.fieldIdx)
-				}
-			} else if item.kind == "text" {
-				e := &m.entries[item.section]
-				k := e.fields[item.fieldIdx].Key
-				v := e.values[k]
-				if len(v) > 0 {
-					e.values[k] = v[:len(v)-1]
+			if target, ok := m.textEditTarget(item); ok {
+				value := target.get()
+				if len(value) > 0 {
+					target.set(value[:len(value)-1])
 				}
 			} else if item.kind == "number" && len(m.pickerWidthStr) > 0 {
 				m.pickerWidthStr = m.pickerWidthStr[:len(m.pickerWidthStr)-1]
 				m.markGeneralOverride(item.fieldIdx)
-			} else if isIDEField(item.kind) {
-				if p := m.ideFieldPtr(item.section, item.kind); p != nil && len(*p) > 0 {
-					*p = (*p)[:len(*p)-1]
-				}
 			}
 		}
 
 	case "ctrl+u":
 		if m.cursor < len(m.items) {
 			item := m.items[m.cursor]
-			if p := m.generalTextPtr(item); p != nil {
-				*p = ""
-				m.markGeneralOverride(item.fieldIdx)
-			} else if item.kind == "text" {
-				e := &m.entries[item.section]
-				k := e.fields[item.fieldIdx].Key
-				e.values[k] = ""
+			if target, ok := m.textEditTarget(item); ok {
+				target.set("")
 			} else if item.kind == "number" {
 				m.pickerWidthStr = ""
 				m.markGeneralOverride(item.fieldIdx)
-			} else if isIDEField(item.kind) {
-				if p := m.ideFieldPtr(item.section, item.kind); p != nil {
-					*p = ""
-				}
 			}
 		}
 
@@ -792,23 +834,14 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(key) == 1 && key[0] >= 32 && key[0] < 127 {
 			if m.cursor < len(m.items) {
 				item := m.items[m.cursor]
-				if p := m.generalTextPtr(item); p != nil {
-					*p += key
-					m.markGeneralOverride(item.fieldIdx)
-				} else if item.kind == "text" {
-					e := &m.entries[item.section]
-					k := e.fields[item.fieldIdx].Key
-					e.values[k] += key
+				if target, ok := m.textEditTarget(item); ok {
+					target.set(target.get() + key)
 				} else if item.kind == "number" && key[0] >= '0' && key[0] <= '9' {
 					// Cap length at 3 digits
 					if len(m.pickerWidthStr) < 3 {
 						m.pickerWidthStr += key
 					}
 					m.markGeneralOverride(item.fieldIdx)
-				} else if isIDEField(item.kind) {
-					if p := m.ideFieldPtr(item.section, item.kind); p != nil {
-						*p += key
-					}
 				}
 			}
 		}
@@ -825,6 +858,7 @@ func (m SettingsModel) save() tea.Cmd {
 	// IDEs are always global-scoped in the settings UI — target-local
 	// per-IDE overrides aren't worth the complexity right now.
 	saveIDEEntries(m.userCfg, m.ideEntries)
+	m.userCfg.RepoColors = repoColorsMap(m.repoColorEntries)
 
 	userCfg := *m.userCfg
 	projectCfg := *m.projectCfg
@@ -888,6 +922,18 @@ func (m SettingsModel) View() string {
 		}
 		if !isLocal {
 			sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%"))
+			itemIdx++
+		}
+		sections = append(sections, "")
+	}
+
+	if !isLocal && len(m.repoColorEntries) > 0 {
+		header := lipgloss.NewStyle().Padding(0, 2).Render(
+			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("Repo Colors"),
+		)
+		sections = append(sections, header)
+		for _, entry := range m.repoColorEntries {
+			sections = append(sections, m.renderRepoColorField(itemIdx, entry))
 			itemIdx++
 		}
 		sections = append(sections, "")
@@ -1051,24 +1097,49 @@ func (m SettingsModel) View() string {
 
 	content = padToHeight(content, m.height-3)
 	statusBar := renderDialogHintBar(m.width,
-		" ↑↓/Tab: navigate  ←→: select  Ctrl+R: inherit  Ctrl+X: delete IDE  Enter: save/add  Esc: cancel")
+		" ↑↓/Tab: navigate  ←→: select  type: edit  Ctrl+R: inherit  Ctrl+X: delete IDE  Enter: save/add  Esc: cancel")
 	return content + "\n" + statusBar
 }
 
-// generalTextPtr returns a pointer to the string backing a general-section
-// text field (section == -1, kind == "text"), or nil when the item isn't one.
-// Keeps all general text-field bookkeeping in one place instead of scattering
-// `item.kind == "text" && item.section == -1 && item.fieldIdx == N` across
-// paste / typing / backspace / ctrl+u / ctrl+r handlers.
-func (m *SettingsModel) generalTextPtr(item flatItem) *string {
-	if item.kind != "text" || item.section != -1 {
-		return nil
+func (m *SettingsModel) textEditTarget(item flatItem) (textEditTarget, bool) {
+	if item.kind == "text" && item.section == -1 {
+		switch item.fieldIdx {
+		case generalFieldWorktreeBasePath:
+			return textEditTarget{
+				get: func() string { return m.worktreeBasePathStr },
+				set: func(v string) {
+					m.worktreeBasePathStr = v
+					m.markGeneralOverride(item.fieldIdx)
+					m.err = ""
+				},
+			}, true
+		}
 	}
-	switch item.fieldIdx {
-	case generalFieldWorktreeBasePath:
-		return &m.worktreeBasePathStr
+	if item.kind == "repo-color" && item.section >= 0 && item.section < len(m.repoColorEntries) {
+		return textEditTarget{
+			get: func() string { return m.repoColorEntries[item.section].Color },
+			set: func(v string) {
+				m.repoColorEntries[item.section].Color = v
+				m.err = ""
+			},
+		}, true
 	}
-	return nil
+	if item.kind == "text" && item.section >= 0 && item.section < len(m.entries) {
+		key := m.entries[item.section].fields[item.fieldIdx].Key
+		return textEditTarget{
+			get: func() string { return m.entries[item.section].values[key] },
+			set: func(v string) { m.entries[item.section].values[key] = v },
+		}, true
+	}
+	if isIDEField(item.kind) {
+		if p := m.ideFieldPtr(item.section, item.kind); p != nil {
+			return textEditTarget{
+				get: func() string { return *p },
+				set: func(v string) { *p = v },
+			}, true
+		}
+	}
+	return textEditTarget{}, false
 }
 
 // renderTextField draws a free-form text input row used for general-section
@@ -1092,6 +1163,33 @@ func (m SettingsModel) renderTextField(itemIdx int, label, value, placeholder st
 		display += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
 	}
 	return "  " + indicator + labelStyle.Render(label+": ") + display
+}
+
+func (m SettingsModel) renderRepoColorField(itemIdx int, entry repoColorEntry) string {
+	isCursor := itemIdx == m.cursor
+	indicator, labelStyle := fieldRowCursor(isCursor)
+
+	state := buildRepoColorState(entry.Name, entry.Color)
+	display := state.Raw
+	if display == "" && !isCursor {
+		display = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(" + repoColorInputPlaceholder + ")")
+	} else {
+		display = lipgloss.NewStyle().Foreground(whiteColor).Render(display)
+	}
+	if isCursor {
+		display += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+	}
+
+	preview := ""
+	if state.Valid {
+		preview = lipgloss.NewStyle().Foreground(dimColor).Render("  ")
+		preview += lipgloss.NewStyle().Foreground(lipgloss.Color(state.Normalized)).Bold(true).Render("● preview")
+		preview += lipgloss.NewStyle().Foreground(dimColor).Render(" " + state.Normalized)
+	} else if state.Raw != "" {
+		preview = lipgloss.NewStyle().Foreground(dangerColor).Render("  invalid")
+	}
+
+	return "  " + indicator + labelStyle.Render(entry.Name+": ") + display + preview
 }
 
 // renderActionField renders an "invokable" row: a label followed by a path or

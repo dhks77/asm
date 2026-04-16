@@ -33,6 +33,13 @@ type DirectoriesScannedMsg struct {
 	// CachedBranches records the branch each cached entry was observed
 	// under; used to invalidate stale names once the branch is re-resolved.
 	CachedBranches map[string]string
+	// RepoRoots maps target path -> grouping key. This is intentionally the
+	// repo/display name, not an absolute filesystem root, so all worktrees of
+	// the same repo group together even when checked out in different paths.
+	RepoRoots map[string]string
+	// RepoColors maps grouping key -> configured terminal color value.
+	// Values may be presets, ANSI 0-255, or hex/rgb forms.
+	RepoColors map[string]string
 }
 
 // BranchResolvedMsg is emitted after a one-off per-worktree branch lookup.
@@ -110,6 +117,11 @@ type restoreSnapshotDoneMsg struct {
 	Errors        []string
 }
 
+type queuedTaskResolve struct {
+	Path   string
+	Branch string
+}
+
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
@@ -118,6 +130,8 @@ type PickerModel struct {
 	directories        []worktree.Worktree
 	branches           map[string]string // worktree path -> branch name (one-shot)
 	taskInfos          map[string]tracker.TaskInfo
+	repoRoots          map[string]string // target path -> group root
+	repoColors         map[string]string // group root -> configured terminal color value
 	providerStates     map[string]provider.State
 	prevProviderStates map[string]provider.State
 	worktreeProviders  map[string]string // worktree name -> provider name
@@ -161,29 +175,31 @@ type PickerModel struct {
 	// cachedBranches tracks the branch each seeded taskInfo was observed
 	// under; we invalidate the seed when the branch re-resolves differently.
 	cachedBranches map[string]string
-	focused        bool
-	width          int
-	height         int
-	ready          bool
-	err            string
-	searchQuery    string
-	workingZoomed  bool
-	restoreLast    bool
-	selectedItems  map[string]bool
-	// pendingNavigatePath is set when the user pressed ←/→ but we had to
-	// surface a confirmation first (active AI sessions would die). Cleared
-	// on confirm (right before navigateTo) or on cancel.
-	pendingNavigatePath string
+	// branchVerified tracks which paths have had their branch re-read from git
+	// in this picker lifetime. Seeded branch values can render immediately,
+	// but we still verify them lazily in the background.
+	branchVerified map[string]bool
+	// metadata fetch queues keep branch/task subprocesses bounded so initial
+	// picker startup stays responsive even with many open sessions.
+	branchFetchQueue   []string
+	queuedBranches     map[string]bool
+	branchFetchPending bool
+	taskFetchQueue     []queuedTaskResolve
+	queuedTasks        map[string]bool
+	taskFetchPending   bool
+	focused            bool
+	width              int
+	height             int
+	ready              bool
+	err                string
+	searchQuery        string
+	workingZoomed      bool
+	restoreLast        bool
+	selectedItems      map[string]bool
 
 	// Top status bar (summary of all active sessions)
 	lastStatusSummary string
 	statusBarEnabled  bool
-
-	// isRepoMode = true when rootPath is itself a git working tree (main repo
-	// or linked worktree). Controls two things: the listing source
-	// (`git worktree list` vs directory scan) and whether Ctrl+W is usable.
-	// Computed once in NewPickerModel from rootPath.
-	isRepoMode bool
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE, restoreLast bool) PickerModel {
@@ -192,6 +208,8 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		rootPath:             rootPath,
 		branches:             make(map[string]string),
 		taskInfos:            make(map[string]tracker.TaskInfo),
+		repoRoots:            make(map[string]string),
+		repoColors:           make(map[string]string),
 		providerStates:       make(map[string]provider.State),
 		prevProviderStates:   make(map[string]provider.State),
 		worktreeProviders:    make(map[string]string),
@@ -207,9 +225,11 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		tracker:              t,
 		taskCache:            taskCache,
 		cachedBranches:       make(map[string]string),
+		branchVerified:       make(map[string]bool),
+		queuedBranches:       make(map[string]bool),
+		queuedTasks:          make(map[string]bool),
 		ides:                 ides,
 		focused:              true,
-		isRepoMode:           worktree.IsRepoMode(rootPath),
 		restoreLast:          restoreLast,
 	}
 }
@@ -221,6 +241,105 @@ func (m *PickerModel) worktreeByPath(path string) *worktree.Worktree {
 		}
 	}
 	return nil
+}
+
+func taskResolveKey(path, branch string) string {
+	return path + "\x00" + branch
+}
+
+func (m *PickerModel) enqueueBranchFetch(path string) {
+	if path == "" || m.branchVerified[path] || m.queuedBranches[path] {
+		return
+	}
+	m.branchFetchQueue = append(m.branchFetchQueue, path)
+	m.queuedBranches[path] = true
+}
+
+func (m *PickerModel) enqueueTaskFetch(path, branch string) {
+	if path == "" || branch == "" || m.tracker == nil {
+		return
+	}
+	key := taskResolveKey(path, branch)
+	if m.queuedTasks[key] {
+		return
+	}
+	m.taskFetchQueue = append(m.taskFetchQueue, queuedTaskResolve{Path: path, Branch: branch})
+	m.queuedTasks[key] = true
+}
+
+func (m *PickerModel) pruneMetadataQueues(validPaths map[string]bool) {
+	for path := range m.branches {
+		if !validPaths[path] {
+			delete(m.branches, path)
+		}
+	}
+	for path := range m.taskInfos {
+		if !validPaths[path] {
+			delete(m.taskInfos, path)
+		}
+	}
+	for path := range m.cachedBranches {
+		if !validPaths[path] {
+			delete(m.cachedBranches, path)
+		}
+	}
+	for path := range m.branchVerified {
+		if !validPaths[path] {
+			delete(m.branchVerified, path)
+		}
+	}
+	filteredBranches := m.branchFetchQueue[:0]
+	for _, path := range m.branchFetchQueue {
+		if validPaths[path] {
+			filteredBranches = append(filteredBranches, path)
+		} else {
+			delete(m.queuedBranches, path)
+		}
+	}
+	m.branchFetchQueue = filteredBranches
+
+	filteredTasks := m.taskFetchQueue[:0]
+	for _, req := range m.taskFetchQueue {
+		if validPaths[req.Path] {
+			filteredTasks = append(filteredTasks, req)
+		} else {
+			delete(m.queuedTasks, taskResolveKey(req.Path, req.Branch))
+		}
+	}
+	m.taskFetchQueue = filteredTasks
+}
+
+func (m *PickerModel) startNextBranchFetch() tea.Cmd {
+	if m.branchFetchPending || len(m.branchFetchQueue) == 0 {
+		return nil
+	}
+	path := m.branchFetchQueue[0]
+	m.branchFetchQueue = m.branchFetchQueue[1:]
+	delete(m.queuedBranches, path)
+	m.branchFetchPending = true
+	return m.fetchBranch(path)
+}
+
+func (m *PickerModel) startNextTaskFetch() tea.Cmd {
+	if m.taskFetchPending || len(m.taskFetchQueue) == 0 {
+		return nil
+	}
+	req := m.taskFetchQueue[0]
+	m.taskFetchQueue = m.taskFetchQueue[1:]
+	delete(m.queuedTasks, taskResolveKey(req.Path, req.Branch))
+	m.taskFetchPending = true
+	return m.fetchTaskName(req.Path, req.Branch)
+}
+
+func (m *PickerModel) startNextMetadataFetches() tea.Cmd {
+	var cmds []tea.Cmd
+	if cmd := m.startNextBranchFetch(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if cmd := m.startNextTaskFetch(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *PickerModel) requestTerminalLayout() tea.Cmd {
@@ -378,8 +497,8 @@ func (m *PickerModel) swapCurrentTermOut() bool {
 	return true
 }
 
-// filteredDirectories returns indices into m.directories matching the current search query.
-// Active sessions (AI or terminal window open) are sorted first, preserving original order within each group.
+// filteredDirectories returns indices into m.directories matching the current
+// search query, grouped by repository/project root.
 func (m *PickerModel) filteredDirectories() []int {
 	var matched []int
 	if m.searchQuery == "" {
@@ -409,19 +528,31 @@ func (m *PickerModel) filteredDirectories() []int {
 		}
 	}
 
-	// Partition: active sessions (AI or terminal) first, inactive after. Preserves internal order.
-	// Read the cached map populated by the 1s providerStateTick; the picker sort
-	// runs on every View() so we must not trigger a synchronous tmux exec here.
 	activeKinds := m.activeKinds
-	var active, inactive []int
-	for _, i := range matched {
-		if activeKinds[m.directories[i].Path] != 0 {
-			active = append(active, i)
-		} else {
-			inactive = append(inactive, i)
+	sort.SliceStable(matched, func(i, j int) bool {
+		left := m.directories[matched[i]]
+		right := m.directories[matched[j]]
+
+		leftRoot := m.repoRootForPath(left.Path)
+		rightRoot := m.repoRootForPath(right.Path)
+		leftLabel := strings.ToLower(m.repoLabelForPath(left.Path))
+		rightLabel := strings.ToLower(m.repoLabelForPath(right.Path))
+		if leftLabel != rightLabel {
+			return leftLabel < rightLabel
 		}
-	}
-	return append(active, inactive...)
+		if leftRoot != rightRoot {
+			return leftRoot < rightRoot
+		}
+
+		leftActive := activeKinds[left.Path] != 0
+		rightActive := activeKinds[right.Path] != 0
+		if leftActive != rightActive {
+			return leftActive && !rightActive
+		}
+
+		return false
+	})
+	return matched
 }
 
 func (m PickerModel) Init() tea.Cmd {
@@ -555,94 +686,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case providerStateTickMsg:
-		// Remember the worktree under cursor so sort changes don't shift selection.
-		cursorPath := ""
-		if wt := m.selectedDirectory(); wt != nil {
-			cursorPath = wt.Path
-		}
-
-		var cmds []tea.Cmd
-		pending := 0
-		activeKinds := asmtmux.ListActiveSessions()
-		// Publish the snapshot so the scrollTick status-bar render can
-		// read it without triggering its own tmux exec.
-		m.activeKinds = activeKinds
-		for _, wt := range m.directories {
-			kind := activeKinds[wt.Path]
-			if kind.HasAI() {
-				if _, tracked := m.sessionStartTimes[wt.Path]; !tracked {
-					m.sessionStartTimes[wt.Path] = time.Now()
-				}
-				// Recover provider info from tmux if not tracked
-				if _, known := m.worktreeProviders[wt.Path]; !known {
-					stored := asmtmux.GetWindowOption(wt.Path, "asm-provider")
-					if stored != "" {
-						m.worktreeProviders[wt.Path] = stored
-					} else {
-						m.worktreeProviders[wt.Path] = m.registry.Default().Name()
-					}
-				}
-				if cmd := m.fetchProviderState(wt.Path); cmd != nil {
-					cmds = append(cmds, cmd)
-					pending++
-				}
-			}
-			if kind.HasTerm() {
-				if _, tracked := m.terminalStartTimes[wt.Path]; !tracked {
-					m.terminalStartTimes[wt.Path] = time.Now()
-				}
-			}
-		}
-		m.stabilizeCursor(cursorPath)
-		if cmd := m.persistSessionSnapshotCmd(activeKinds); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-		if pending == 0 {
-			// Nothing to wait for — re-arm the tick directly so we keep
-			// polling once sessions come online.
-			cmds = append(cmds, providerStateTickCmd())
-			return m, tea.Batch(cmds...)
-		}
-		m.providerStatePending = pending
-		return m, tea.Batch(cmds...)
+		return m.handleProviderStateTick()
 
 	case ProviderStateUpdatedMsg:
-		var extraCmds []tea.Cmd
-		if msg.State != provider.StateUnknown {
-			prevState := m.prevProviderStates[msg.Path]
-			m.providerStates[msg.Path] = msg.State
-			m.prevProviderStates[msg.Path] = msg.State
-
-			if prevState.IsBusy() && msg.State == provider.StateIdle {
-				now := time.Now()
-				m.flashItems[msg.Path] = now
-				extraCmds = append(extraCmds, flashExpireCmd(msg.Path, now, 3*time.Second))
-				if m.cfg.IsDesktopNotificationsEnabled() {
-					displayName := filepath.Base(msg.Path)
-					if wt := m.worktreeByPath(msg.Path); wt != nil {
-						displayName = wt.Name
-						if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
-							displayName = info.Name
-						}
-					}
-					extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, m.workingPath))
-				}
-			}
-		}
-		// Count this response against the pending cycle and, once all
-		// responses are in, schedule the next detect-state tick. This is
-		// the "fixed delay after the previous cycle completes" model —
-		// never fan out faster than DetectState can drain.
-		if m.providerStatePending > 0 {
-			m.providerStatePending--
-			if m.providerStatePending == 0 {
-				extraCmds = append(extraCmds, providerStateTickCmd())
-			}
-		}
-		if len(extraCmds) == 0 {
-			return m, nil
-		}
-		return m, tea.Batch(extraCmds...)
+		return m.handleProviderStateUpdated(msg)
 
 	case flashExpiredMsg:
 		if startedAt, ok := m.flashItems[msg.Path]; ok {
@@ -665,64 +712,20 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(scrollTickCmd(), writeCmd)
 
 	case sessionExitedMsg:
-		m.cleanupSessionState(msg.Path)
-		isDisplayed := m.workingPath == msg.Path
-		asmtmux.CleanupExitedWindow(msg.Path, isDisplayed)
-		if isDisplayed {
-			m.workingPath = ""
-			// Show terminal for this target if it exists.
-			if !m.swapTermToWorkingPanel(msg.Path) {
-				asmtmux.FocusPickingPanel()
-			}
-		}
-		return m, m.scanDirectories()
+		return m.handleSessionExited(msg)
 
 	case worktreeExitedMsg:
-		if msg.created {
-			// Surface any template-copy warnings posted by the worktree
-			// runner via tmux session options. Success counts are not
-			// shown — the copied files speak for themselves.
-			if w := asmtmux.GetSessionOption("asm-worktree-warnings"); w != "" {
-				m.err = "Template copy issues:\n" + w
-			}
-			_ = asmtmux.SetSessionOption("asm-worktree-warnings", "")
-			_ = asmtmux.SetSessionOption("asm-worktree-copied", "")
-			if msg.path == "" {
-				return m, m.scanDirectories()
-			}
-			wt, extraCmds := m.ensureDirectoryTracked(msg.path)
-			if wt == nil {
-				return m, m.scanDirectories()
-			}
-			var cmds []tea.Cmd
-			cmds = append(cmds, extraCmds...)
-			if cmd := m.openOrFocusWorktree(wt); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			return m, tea.Batch(cmds...)
-		}
-		return m, nil
+		return m.handleWorktreeExited(msg)
 
 	case DirectoryRemovedMsg:
-		return m, m.scanDirectories()
+		return m, m.refreshDirectoriesCmd()
 
 	case WorktreeErrorMsg:
 		m.err = msg.Err
 		return m, nil
 
 	case deleteExitedMsg:
-		if !msg.confirmed {
-			return m, nil
-		}
-		wt := m.worktreeByPath(msg.path)
-		if wt == nil {
-			return m, nil
-		}
-		_, focusedTargetKilled := m.killTargetSessions(wt.Path)
-		if focusedTargetKilled {
-			asmtmux.FocusPickingPanel()
-		}
-		return m, m.removeDirectory(wt)
+		return m.handleDeleteExited(msg)
 
 	case BatchConfirmedMsg:
 		switch msg.Action {
@@ -732,22 +735,10 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case BatchDeleteWorktrees:
 			m.clearSelection()
 			return m, m.batchDeleteWorktrees(msg.Items)
-		case BatchNavigateRestart:
-			path := m.pendingNavigatePath
-			m.pendingNavigatePath = ""
-			if path == "" {
-				// Defensive: dialog confirmed without a target. Drop the
-				// action rather than calling navigateTo("") — that would
-				// write an empty handoff and the orchestrator would either
-				// exit or re-exec with no path, neither of which is useful.
-				return m, nil
-			}
-			return m, m.navigateTo(path)
 		}
 		return m, nil
 
 	case BatchCancelledMsg:
-		m.pendingNavigatePath = ""
 		return m, nil
 
 	case ideSelectDoneMsg:
@@ -757,50 +748,16 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openWorktreeInIDE(msg.Path, msg.IDEName)
 
 	case launcherExitedMsg:
-		asmlog.Debugf("picker: launcher-exited session=%q path=%q", asmtmux.SessionName, msg.Path)
-		if msg.Path == "" {
-			return m, nil
-		}
-		wt, extraCmds := m.ensureDirectoryTracked(msg.Path)
-		if wt == nil {
-			asmlog.Debugf("picker: launcher-exited ignored untrackable path=%q", msg.Path)
-			return m, nil
-		}
-		windowExists := asmtmux.WindowExists(asmtmux.WindowName(wt.Path))
-		asmlog.Debugf("picker: launcher target=%q window_exists=%t extra_cmds=%d provider=%q",
-			wt.Path, windowExists, len(extraCmds), m.defaultProviderName(wt.Path))
-		if cmd := m.openOrFocusWorktree(wt); cmd != nil {
-			extraCmds = append(extraCmds, cmd)
-		}
-		if len(extraCmds) == 0 {
-			return m, nil
-		}
-		return m, tea.Batch(extraCmds...)
+		return m.handleLauncherExited(msg)
 
 	case providerSelectDoneMsg:
-		if msg.ProviderName == "" {
-			return m, nil
-		}
-		wt := m.contextDirectory()
-		if wt == nil {
-			return m, nil
-		}
-		// Kill existing session if any, then start with selected provider
-		winName := asmtmux.WindowName(wt.Path)
-		if asmtmux.WindowExists(winName) {
-			if m.workingPath == wt.Path {
-				m.swapCurrentAIOut()
-			}
-			asmtmux.KillDirectoryWindow(wt.Path)
-		}
-		m.cleanupSessionState(wt.Path)
-		return m, m.startSession(wt, msg.ProviderName, true)
+		return m.handleProviderSelectDone(msg)
 
 	case batchKillCompletedMsg:
-		return m, m.scanDirectories()
+		return m, m.refreshDirectoriesCmd()
 
 	case batchDeleteCompletedMsg:
-		return m, m.scanDirectories()
+		return m, m.refreshDirectoriesCmd()
 
 	case tea.KeyMsg:
 		if m.err != "" {
@@ -810,129 +767,19 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case DirectoriesScannedMsg:
-		m.directories = msg.Directories
-		// Seed taskInfos from the persistent cache so the first render has
-		// task names filled in. Any entry with a branch mismatch when git
-		// branch re-resolves will be invalidated by BranchResolvedMsg below.
-		validPaths := make(map[string]bool, len(msg.Directories))
-		for _, wt := range msg.Directories {
-			validPaths[wt.Path] = true
-		}
-		for p, info := range msg.CachedTasks {
-			if !validPaths[p] {
-				continue
-			}
-			if _, exists := m.taskInfos[p]; !exists {
-				m.taskInfos[p] = info
-			}
-		}
-		for p, b := range msg.CachedBranches {
-			if validPaths[p] {
-				m.cachedBranches[p] = b
-			}
-		}
-		// Prune stale selections
-		validSelectedPaths := make(map[string]bool)
-		for _, wt := range msg.Directories {
-			validSelectedPaths[wt.Path] = true
-		}
-		for path := range m.selectedItems {
-			if !validSelectedPaths[path] {
-				delete(m.selectedItems, path)
-			}
-		}
-		filtered := m.filteredDirectories()
-		if m.cursor >= len(filtered) {
-			m.cursor = max(0, len(filtered)-1)
-		}
-		m.viewTop = 0
-		var cmds []tea.Cmd
-		for _, wt := range msg.Directories {
-			// Only resolve the branch for worktrees we haven't seen yet;
-			// a rescan after a session exits should not refetch branches
-			// that are already known.
-			if _, ok := m.branches[wt.Path]; !ok {
-				cmds = append(cmds, m.fetchBranch(wt.Path))
-			}
-		}
-		return m, tea.Batch(cmds...)
+		return m.handleDirectoriesScanned(msg)
 
 	case BranchResolvedMsg:
-		if msg.Branch == "" {
-			return m, nil
-		}
-		m.branches[msg.Path] = msg.Branch
-		if m.tracker != nil {
-			// Invalidate a seeded cache entry whose branch no longer matches
-			// what's actually checked out — otherwise a stale task name
-			// would stick until TTL expiry.
-			if seeded, ok := m.cachedBranches[msg.Path]; ok && seeded != msg.Branch {
-				delete(m.taskInfos, msg.Path)
-				delete(m.cachedBranches, msg.Path)
-				if m.taskCache != nil {
-					m.taskCache.Delete(msg.Path)
-				}
-			}
-			if _, ok := m.taskInfos[msg.Path]; !ok {
-				return m, m.fetchTaskName(msg.Path, msg.Branch)
-			}
-		}
-		return m, nil
+		return m.handleBranchResolved(msg)
 
 	case TaskResolvedMsg:
-		if msg.Info.Name != "" {
-			m.taskInfos[msg.Path] = msg.Info
-			if msg.Branch != "" {
-				m.cachedBranches[msg.Path] = msg.Branch
-				if m.taskCache != nil {
-					m.taskCache.Set(msg.Path, msg.Branch, msg.Info)
-				}
-			}
-		}
-		return m, nil
+		return m.handleTaskResolved(msg)
 
 	case settingsExitedMsg:
-		// Reload merged config (user + project) to pick up changed defaults
-		if newCfg, err := config.LoadMerged(m.rootPath); err == nil {
-			m.cfg = newCfg
-			defaultName := newCfg.DefaultProvider
-			if defaultName == "" {
-				defaultName = provider.DefaultProviderName
-			}
-			m.registry.SetDefault(defaultName)
-			// Rebuild the IDE list so adds/edits/removes from the settings
-			// UI take effect without a restart.
-			overrides := make(map[string]ide.Override, len(newCfg.IDEs))
-			for name, c := range newCfg.IDEs {
-				overrides[name] = ide.Override{Command: c.Command, Args: c.Args}
-			}
-			m.ides = ide.Builtins(overrides)
-			// Picker width is configured as a percentage but tmux applies it as
-			// an absolute pane width. Mark it dirty so the current client width
-			// is re-synchronized immediately.
-			m.pickerWidthDirty = true
-			return m, m.requestTerminalLayout()
-		}
-		return m, nil
+		return m.handleSettingsExited()
 
 	case terminalExitedMsg:
-		isDisplayed := m.termPath == msg.path
-		if isDisplayed {
-			m.swapCurrentTermOut()
-		}
-		asmtmux.KillTerminalWindow(msg.path)
-		delete(m.terminalStartTimes, msg.path)
-		if isDisplayed {
-			// If this target also has an AI session, show it in the working
-			// pane instead of leaving the picker focused with idle content on
-			// the right.
-			if m.swapAIToWorkingPanel(msg.path) {
-				m.focusWorkingPanel()
-			} else {
-				asmtmux.FocusPickingPanel()
-			}
-		}
-		return m, m.scanDirectories()
+		return m.handleTerminalExited(msg)
 
 	}
 
@@ -1161,246 +1008,6 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 	return waitForExitCmd(wt.Path)
 }
 
-// requestNavigate is the ←/→ entry point. Two independent hazards can
-// trigger a confirmation:
-//
-//  1. Current tmux session has live AI sessions — killing the session
-//     ends them with no save prompt.
-//  2. Target --path already has its own asm tmux session running
-//     somewhere — the post-exec orchestrator will kill THAT too, which
-//     is surprising if the user didn't know about it.
-//
-// Only the target session check requires a fresh tmux exec; the AI-
-// session snapshot comes from the cached m.activeKinds so the happy
-// path (no hazards) stays keypress-fast. If neither hazard applies we
-// navigate immediately.
-func (m *PickerModel) requestNavigate(newPath string) tea.Cmd {
-	aiNames := m.activeAINames()
-	targetSession := ""
-	if candidate := asmtmux.DeriveSessionName(newPath); candidate != asmtmux.SessionName {
-		if asmtmux.SessionExistsNamed(candidate) {
-			targetSession = candidate
-		}
-	}
-	if len(aiNames) == 0 && targetSession == "" {
-		return m.navigateTo(newPath)
-	}
-	m.pendingNavigatePath = newPath
-	req := BatchConfirmRequest{
-		Action:        BatchNavigateRestart,
-		Items:         aiNames,
-		TaskNames:     m.taskNamesFor(aiNames),
-		NavigatePath:  newPath,
-		TargetSession: targetSession,
-	}
-	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
-		if exitCode == 0 {
-			return BatchConfirmedMsg{Action: BatchNavigateRestart, Items: aiNames}
-		}
-		return BatchCancelledMsg{}
-	})
-}
-
-// activeAINames returns the directory names of every live AI session in
-// the current tmux session, in a stable order (picker's listing order).
-// Reads the cached snapshot refreshed by providerStateTick — no tmux exec
-// on the keypress path.
-func (m *PickerModel) activeAINames() []string {
-	var paths []string
-	for _, wt := range m.directories {
-		if m.activeKinds[wt.Path].HasAI() {
-			paths = append(paths, wt.Path)
-		}
-	}
-	return paths
-}
-
-// navigateTo leaves a handoff file for the orchestrator and tears down the
-// current tmux session. The orchestrator, which is blocked on Attach, reads
-// the handoff after Attach returns and re-execs asm with --path=newPath.
-//
-// Why restart instead of in-place rewrite of rootPath:
-//   - The tmux session name hashes rootPath; staying in-place leaves the
-//     session named after the ORIGINAL path forever, which is misleading.
-//   - Name-keyed per-session state (start times, providers) risks collision
-//     when two paths expose same-named worktrees. A fresh process avoids
-//     any carry-over.
-//   - All active AI/terminal sessions running in this tmux session die as
-//     a consequence. That's the stated trade-off — user chose clean
-//     restart semantics; requestNavigate gates the call with a confirm
-//     dialog when AI sessions would be lost.
-func (m *PickerModel) navigateTo(newPath string) tea.Cmd {
-	// Write the handoff BEFORE killing the session. Best-effort: if this
-	// fails we still tear down, but the orchestrator will just exit
-	// instead of re-execing. Ctrl+Q behaviour.
-	_ = os.WriteFile(asmtmux.HandoffFilePath(), []byte(newPath), 0o644)
-	asmtmux.KillSession()
-	return tea.Quit
-}
-
-func (m *PickerModel) clearSelection() {
-	m.selectedItems = make(map[string]bool)
-}
-
-func (m *PickerModel) selectedItemPaths() []string {
-	var paths []string
-	for path := range m.selectedItems {
-		paths = append(paths, path)
-	}
-	return paths
-}
-
-func (m *PickerModel) openBatchKill() tea.Cmd {
-	paths := m.selectedItemPaths()
-	req := BatchConfirmRequest{
-		Action:    BatchKillSessions,
-		Items:     paths,
-		TaskNames: m.taskNamesFor(paths),
-	}
-	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
-		if exitCode == 0 {
-			return BatchConfirmedMsg{Action: BatchKillSessions, Items: paths}
-		}
-		return BatchCancelledMsg{}
-	})
-}
-
-func (m *PickerModel) openKillSession() tea.Cmd {
-	wt := m.selectedDirectory()
-	if wt == nil {
-		return nil
-	}
-	paths := []string{wt.Path}
-	req := BatchConfirmRequest{
-		Action:    BatchKillSessions,
-		Items:     paths,
-		TaskNames: m.taskNamesFor(paths),
-	}
-	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
-		if exitCode == 0 {
-			return BatchConfirmedMsg{Action: BatchKillSessions, Items: paths}
-		}
-		return BatchCancelledMsg{}
-	})
-}
-
-func (m *PickerModel) openBatchDelete() tea.Cmd {
-	paths := m.selectedItemPaths()
-	dirtyCount := 0
-	for _, path := range paths {
-		if wt := m.worktreeByPath(path); wt != nil && worktree.HasChanges(wt.Path) {
-			dirtyCount++
-		}
-	}
-	req := BatchConfirmRequest{
-		Action:    BatchDeleteWorktrees,
-		Items:     paths,
-		TaskNames: m.taskNamesFor(paths),
-		Dirty:     dirtyCount,
-	}
-	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
-		if exitCode == 0 {
-			return BatchConfirmedMsg{Action: BatchDeleteWorktrees, Items: paths}
-		}
-		return BatchCancelledMsg{}
-	})
-}
-
-// taskNamesFor returns a parallel slice of resolved task names for the
-// given target paths (empty string when no info is cached). Used by the
-// batch-confirm dialog so users see task titles, not just folder names.
-func (m *PickerModel) taskNamesFor(paths []string) []string {
-	out := make([]string, len(paths))
-	for i, path := range paths {
-		if wt := m.worktreeByPath(path); wt != nil {
-			if info, ok := m.taskInfos[wt.Path]; ok {
-				out[i] = info.Name
-			}
-		}
-	}
-	return out
-}
-
-func (m *PickerModel) batchKillSessions(paths []string) tea.Cmd {
-	count := 0
-	focusedTargetKilled := false
-	for _, path := range paths {
-		killed, displayed := m.killTargetSessions(path)
-		count += killed
-		if displayed {
-			focusedTargetKilled = true
-		}
-	}
-	if focusedTargetKilled {
-		asmtmux.FocusPickingPanel()
-	}
-	return func() tea.Msg {
-		return batchKillCompletedMsg{count: count}
-	}
-}
-
-func (m *PickerModel) batchDeleteWorktrees(paths []string) tea.Cmd {
-	// Kill active sessions and collect worktrees to remove
-	focusedTargetKilled := false
-	for _, path := range paths {
-		_, displayed := m.killTargetSessions(path)
-		if displayed {
-			focusedTargetKilled = true
-		}
-	}
-	if focusedTargetKilled {
-		asmtmux.FocusPickingPanel()
-	}
-
-	var toRemove []worktree.Worktree
-	for _, path := range paths {
-		if wt := m.worktreeByPath(path); wt != nil {
-			toRemove = append(toRemove, *wt)
-		}
-	}
-
-	return func() tea.Msg {
-		count := 0
-		for _, wt := range toRemove {
-			if worktree.IsWorktree(wt.Path) {
-				mainRepo, err := worktree.FindMainRepo(wt.Path)
-				if err == nil {
-					if err := worktree.RemoveWorktree(mainRepo, wt.Path, false); err != nil {
-						worktree.RemoveWorktree(mainRepo, wt.Path, true)
-					}
-					count++
-					continue
-				}
-			}
-			if err := os.RemoveAll(wt.Path); err == nil {
-				count++
-			}
-		}
-		return batchDeleteCompletedMsg{count: count}
-	}
-}
-
-type DirectoryRemovedMsg struct{}
-
-func (m *PickerModel) removeDirectory(dir *worktree.Worktree) tea.Cmd {
-	dirPath := dir.Path
-	return func() tea.Msg {
-		if worktree.IsWorktree(dirPath) {
-			mainRepo, err := worktree.FindMainRepo(dirPath)
-			if err == nil {
-				if err := worktree.RemoveWorktree(mainRepo, dirPath, false); err != nil {
-					worktree.RemoveWorktree(mainRepo, dirPath, true)
-				}
-				return DirectoryRemovedMsg{}
-			}
-		}
-		if err := os.RemoveAll(dirPath); err != nil {
-			return WorktreeErrorMsg{Err: fmt.Sprintf("remove failed: %v", err)}
-		}
-		return DirectoryRemovedMsg{}
-	}
-}
-
 // waitForExitCmd returns a tea.Cmd that blocks until the AI process exits for a target path.
 func waitForExitCmd(targetPath string) tea.Cmd {
 	return func() tea.Msg {
@@ -1420,57 +1027,6 @@ type terminalExitedMsg struct {
 type deleteExitedMsg struct {
 	path      string
 	confirmed bool
-}
-
-// cleanupSessionState removes per-session bookkeeping for the given target
-// path. Called whenever a session ends or is about to be restarted so stale
-// state doesn't leak into the next session (e.g. frozen provider state,
-// leftover "done!" flash, old start time).
-func (m *PickerModel) cleanupSessionState(path string) {
-	delete(m.providerStates, path)
-	delete(m.prevProviderStates, path)
-	delete(m.worktreeProviders, path)
-	delete(m.sessionStartTimes, path)
-	delete(m.flashItems, path)
-}
-
-// killTargetSessions tears down both AI and terminal sessions for a target
-// path, including any working-pane/front-state bookkeeping. Returns how many
-// tmux windows were killed and whether the target had been fronted.
-func (m *PickerModel) killTargetSessions(path string) (int, bool) {
-	hasAI := asmtmux.WindowExists(asmtmux.WindowName(path))
-	hasTerm := asmtmux.WindowExists(asmtmux.TerminalWindowName(path))
-	if !hasAI && !hasTerm {
-		return 0, false
-	}
-
-	m.cleanupSessionState(path)
-	wasFronted := false
-	if m.workingPath == path {
-		m.swapCurrentAIOut()
-		wasFronted = true
-	}
-	if m.termPath == path {
-		m.swapCurrentTermOut()
-		wasFronted = true
-	}
-
-	killed := 0
-	if hasAI {
-		asmtmux.KillDirectoryWindow(path)
-		killed++
-	}
-	if hasTerm {
-		asmtmux.KillTerminalWindow(path)
-		killed++
-	}
-	delete(m.terminalStartTimes, path)
-	return killed, wasFronted
-}
-
-func (m *PickerModel) swapOutWorkingPanel() {
-	m.swapCurrentAIOut()
-	m.swapCurrentTermOut()
 }
 
 // runDialogInWorkingPanel is the shared boilerplate for every modal dialog
@@ -1596,15 +1152,19 @@ func (m *PickerModel) ensureDirectoryTracked(path string) (*worktree.Worktree, [
 		return wt, nil
 	}
 
-	m.directories = append(m.directories, worktree.Worktree{
-		Name: filepath.Base(cleanPath),
-		Path: cleanPath,
-	})
+	if m.repoRoots == nil {
+		m.repoRoots = make(map[string]string)
+	}
+	if m.repoColors == nil {
+		m.repoColors = make(map[string]string)
+	}
+	m.directories = append(m.directories, trackedWorktree(cleanPath))
+	mergeRepoMetadataForPaths([]string{cleanPath}, m.repoRoots, m.repoColors)
 	wt := &m.directories[len(m.directories)-1]
 
 	var cmds []tea.Cmd
 	if _, ok := m.branches[cleanPath]; !ok {
-		cmds = append(cmds, m.fetchBranch(cleanPath))
+		cmds = append(cmds, m.queueBranchFetchForPath(cleanPath))
 	}
 	return wt, cmds
 }
@@ -1811,6 +1371,22 @@ func (m *PickerModel) itemHeight(wi int) int {
 	return h
 }
 
+func (m *PickerModel) itemDisplayHeight(filtered []int, top, fi int) int {
+	if fi < 0 || fi >= len(filtered) {
+		return 0
+	}
+	h := m.itemHeight(filtered[fi])
+	if fi == top {
+		return h + 1
+	}
+	prevPath := m.directories[filtered[fi-1]].Path
+	curPath := m.directories[filtered[fi]].Path
+	if m.repoRootForPath(prevPath) != m.repoRootForPath(curPath) {
+		h++
+	}
+	return h
+}
+
 // adjustViewTop scrolls the viewport down so the cursor item is fully visible.
 func (m *PickerModel) adjustViewTop() {
 	if m.height == 0 {
@@ -1825,14 +1401,14 @@ func (m *PickerModel) adjustViewTop() {
 		maxListLines = 1
 	}
 
-	// Count lines from viewTop to cursor (inclusive)
-	linesUsed := 0
-	for fi := m.viewTop; fi <= m.cursor && fi < len(filtered); fi++ {
-		linesUsed += m.itemHeight(filtered[fi])
-	}
-
-	for linesUsed > maxListLines && m.viewTop < m.cursor {
-		linesUsed -= m.itemHeight(filtered[m.viewTop])
+	for m.viewTop < m.cursor {
+		linesUsed := 0
+		for fi := m.viewTop; fi <= m.cursor && fi < len(filtered); fi++ {
+			linesUsed += m.itemDisplayHeight(filtered, m.viewTop, fi)
+		}
+		if linesUsed <= maxListLines {
+			break
+		}
 		m.viewTop++
 	}
 }
@@ -2313,13 +1889,6 @@ func (m PickerModel) View() string {
 		return "Loading..."
 	}
 
-	var title string
-	if m.focused {
-		title = headerStyle.Render(filepath.Base(m.rootPath))
-	} else {
-		title = lipgloss.NewStyle().Foreground(dimColor).Padding(0, 1).Render(filepath.Base(m.rootPath))
-	}
-
 	// View() is re-entered for every terminal repaint; read the cached map
 	// rather than spawning a tmux exec on each render.
 	activeKinds := m.activeKinds
@@ -2330,7 +1899,7 @@ func (m PickerModel) View() string {
 		searchLine = lipgloss.NewStyle().Foreground(primaryColor).Padding(0, 1).Render("/ " + m.searchQuery)
 	}
 	if len(filtered) == 0 {
-		body := []string{title}
+		var body []string
 		if searchLine != "" {
 			body = append(body, searchLine)
 		}
@@ -2345,36 +1914,12 @@ func (m PickerModel) View() string {
 			empty = append(empty, "")
 		}
 		view := strings.Join(empty[:m.height], "\n")
-		if m.err != "" {
-			errDialog := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(dangerColor).
-				Padding(1, 2).
-				Width(min(50, m.width-4)).
-				Render(
-					lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render("Error") + "\n\n" +
-						lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
-						statusBarStyle.Render("Press any key to dismiss"))
-			view = m.overlayCenter(view, errDialog)
-		}
-		return view
+		return m.renderErrorOverlay(view)
 	}
 
-	// Render all filtered items and count lines per item
-	type renderedItem struct {
-		text      string
-		lineCount int
-	}
-	items := make([]renderedItem, len(filtered))
-	for fi, wi := range filtered {
-		wt := m.directories[wi]
-		text := m.renderItem(fi, wt, activeKinds[wt.Path])
-		items[fi] = renderedItem{text: text, lineCount: strings.Count(text, "\n") + 1}
-	}
-
-	// Available lines for the list (height - title - margin). Shortcuts bar is
+	// Available lines for the list. Shortcuts bar is
 	// rendered by tmux at the bottom of the terminal, outside this pane.
-	maxListLines := m.height - 2
+	maxListLines := m.height
 	if m.searchQuery != "" {
 		maxListLines-- // search bar takes one line
 	}
@@ -2385,17 +1930,23 @@ func (m PickerModel) View() string {
 	// Build visible list with viewport scrolling
 	var visibleRows []string
 	usedLines := 0
-	for i := m.viewTop; i < len(items); i++ {
-		if usedLines+items[i].lineCount > maxListLines {
+	for fi := m.viewTop; fi < len(filtered); fi++ {
+		wi := filtered[fi]
+		wt := m.directories[wi]
+		text := m.renderItem(fi, wt, activeKinds[wt.Path])
+		if fi == m.viewTop || m.repoRootForPath(m.directories[filtered[fi-1]].Path) != m.repoRootForPath(wt.Path) {
+			text = m.renderRepoHeader(wt.Path) + "\n" + text
+		}
+		lineCount := strings.Count(text, "\n") + 1
+		if usedLines+lineCount > maxListLines {
 			break
 		}
-		visibleRows = append(visibleRows, items[i].text)
-		usedLines += items[i].lineCount
+		visibleRows = append(visibleRows, text)
+		usedLines += lineCount
 	}
 
-	// Build view: title (fixed) + search bar + list + padding
+	// Build view: search bar + list + padding
 	var viewLines []string
-	viewLines = append(viewLines, title)
 	if searchLine != "" {
 		viewLines = append(viewLines, searchLine)
 	}
@@ -2410,21 +1961,7 @@ func (m PickerModel) View() string {
 		viewLines = viewLines[:targetLines]
 	}
 	view := strings.Join(viewLines, "\n")
-
-	if m.err != "" {
-		errDialog := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(dangerColor).
-			Padding(1, 2).
-			Width(min(50, m.width-4)).
-			Render(
-				lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render("Error") + "\n\n" +
-					lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
-					statusBarStyle.Render("Press any key to dismiss"))
-		view = m.overlayCenter(view, errDialog)
-	}
-
-	return view
+	return m.renderErrorOverlay(view)
 }
 
 func (m PickerModel) renderItem(index int, wt worktree.Worktree, kind asmtmux.SessionKind) string {
@@ -2460,8 +1997,9 @@ func (m PickerModel) renderItem(index int, wt worktree.Worktree, kind asmtmux.Se
 	taskName := taskInfo.Name
 	branch, hasBranch := m.branches[wt.Path]
 	hasBranch = hasBranch && branch != ""
+	repoAccent := m.repoAccentForPath(wt.Path)
 
-	primaryStyle := taskNameStyle
+	primaryStyle := lipgloss.NewStyle().Foreground(repoAccent)
 	if isSelected {
 		primaryStyle = lipgloss.NewStyle().Foreground(primaryColor).Bold(true)
 	}
@@ -2577,6 +2115,22 @@ func (m PickerModel) overlayCenter(base, overlay string) string {
 	)
 }
 
+func (m PickerModel) renderErrorOverlay(view string) string {
+	if m.err == "" {
+		return view
+	}
+	errDialog := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(dangerColor).
+		Padding(1, 2).
+		Width(min(50, m.width-4)).
+		Render(
+			lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render("Error") + "\n\n" +
+				lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
+				statusBarStyle.Render("Press any key to dismiss"))
+	return m.overlayCenter(view, errDialog)
+}
+
 // Commands
 
 func (m PickerModel) scanDirectories() tea.Cmd {
@@ -2615,10 +2169,13 @@ func (m PickerModel) scanDirectories() tea.Cmd {
 				}
 			}
 		}
+		repoRoots, repoColors := repoMetadataForPaths(paths)
 		return DirectoriesScannedMsg{
 			Directories:    wts,
 			CachedTasks:    tasks,
 			CachedBranches: branches,
+			RepoRoots:      repoRoots,
+			RepoColors:     repoColors,
 		}
 	}
 }

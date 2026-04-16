@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nhn/asm/asmlog"
+	"github.com/nhn/asm/config"
 	asmfavorites "github.com/nhn/asm/favorites"
 	"github.com/nhn/asm/recent"
 	asmtmux "github.com/nhn/asm/tmux"
@@ -38,7 +39,7 @@ type launcherEntry struct {
 
 type launcherActiveTargets struct {
 	paths     map[string]asmtmux.SessionKind
-	repoRoots map[string]bool
+	repoNames map[string]bool
 }
 
 // LauncherModel is a standalone launcher for the working panel.
@@ -545,7 +546,7 @@ func loadRepoEntries(currentPath, filter string, activeTargets launcherActiveTar
 			return
 		}
 		seen[clean] = true
-		label := worktree.RepoName(clean)
+		_, label := config.ProjectIdentity(clean)
 		if label == "" {
 			label = filepath.Base(clean)
 		}
@@ -634,7 +635,7 @@ func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, res
 			if !worktree.IsRepoMode(clean) {
 				continue
 			}
-			label := worktree.RepoName(clean)
+			_, label := config.ProjectIdentity(clean)
 			if label == "" {
 				label = filepath.Base(clean)
 			}
@@ -659,17 +660,13 @@ func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, res
 func newLauncherActiveTargets(activeKinds map[string]asmtmux.SessionKind) launcherActiveTargets {
 	active := launcherActiveTargets{
 		paths:     activeKinds,
-		repoRoots: make(map[string]bool),
+		repoNames: make(map[string]bool),
 	}
 	for path := range activeKinds {
-		if !worktree.IsRepoMode(path) {
-			continue
+		_, label := config.ProjectIdentity(path)
+		if label != "" && label != "." {
+			active.repoNames[label] = true
 		}
-		root := filepath.Clean(path)
-		if mainRepo, err := worktree.FindMainRepo(root); err == nil && mainRepo != "" {
-			root = filepath.Clean(mainRepo)
-		}
-		active.repoRoots[root] = true
 	}
 	return active
 }
@@ -683,10 +680,11 @@ func (a launcherActiveTargets) hasRepo(repoPath string) bool {
 	if a.hasPath(clean) {
 		return true
 	}
-	if mainRepo, err := worktree.FindMainRepo(clean); err == nil && mainRepo != "" {
-		clean = filepath.Clean(mainRepo)
+	_, label := config.ProjectIdentity(clean)
+	if label == "" || label == "." {
+		return false
 	}
-	return a.repoRoots[clean]
+	return a.repoNames[label]
 }
 
 func launcherFavoriteSet(entries []asmfavorites.Entry) map[string]bool {

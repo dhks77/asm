@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/nhn/asm/worktree"
 )
 
 // Scope represents the configuration scope.
@@ -56,6 +55,9 @@ type Config struct {
 	// (standard git sibling convention). Leading `~` is expanded to the
 	// user's home directory when resolved via GetWorktreeBasePath.
 	WorktreeBasePath string `toml:"worktree_base_path"`
+	// RepoColors stores per-repository accent colors keyed by repository label.
+	// Values may be ANSI 0-255, hex, rgb(r,g,b), or preset aliases.
+	RepoColors map[string]string `toml:"repo_colors"`
 }
 
 func homeDir() string {
@@ -85,39 +87,6 @@ func UserConfigPath() string {
 // to the nearest ancestor with `.asm/config.toml`, falling back to the target.
 func ProjectConfigPath(rootPath string) string {
 	return filepath.Join(ProjectRoot(rootPath), ".asm", "config.toml")
-}
-
-// ProjectRoot resolves the directory that owns the target-local config for a
-// given target path.
-func ProjectRoot(targetPath string) string {
-	clean := filepath.Clean(targetPath)
-	if clean == "" || clean == "." {
-		return clean
-	}
-	if worktree.IsRepoMode(clean) {
-		if mainRepo, err := worktree.FindMainRepo(clean); err == nil && mainRepo != "" {
-			return filepath.Clean(mainRepo)
-		}
-	}
-	if root, ok := nearestProjectRoot(clean); ok {
-		return root
-	}
-	return clean
-}
-
-func nearestProjectRoot(path string) (string, bool) {
-	cur := filepath.Clean(path)
-	for {
-		candidate := filepath.Join(cur, ".asm", "config.toml")
-		if _, err := os.Stat(candidate); err == nil {
-			return cur, true
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return "", false
-		}
-		cur = parent
-	}
 }
 
 // ScopePath returns the config file path for the given scope.
@@ -198,7 +167,6 @@ func merge(base, overlay *Config) {
 	if overlay.WorktreeBasePath != "" {
 		base.WorktreeBasePath = overlay.WorktreeBasePath
 	}
-
 	// Merge Providers (wholesale per key)
 	if len(overlay.Providers) > 0 {
 		if base.Providers == nil {
@@ -232,6 +200,18 @@ func merge(base, overlay *Config) {
 				if v != "" {
 					base.Trackers[name][k] = v
 				}
+			}
+		}
+	}
+
+	// Merge repo colors by repository label.
+	if len(overlay.RepoColors) > 0 {
+		if base.RepoColors == nil {
+			base.RepoColors = make(map[string]string)
+		}
+		for name, color := range overlay.RepoColors {
+			if color != "" {
+				base.RepoColors[name] = color
 			}
 		}
 	}
