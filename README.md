@@ -236,7 +236,6 @@ runtime에서 project가 user를 override (map 필드는 per-key merge). Setting
 ```toml
 default_path = ""
 desktop_notifications = true
-auto_zoom = true                  # working pane 자동 풀스크린
 picker_width = 22                 # picker pane 폭 (%, 10~50)
 default_provider = "claude"
 default_tracker = "dooray"

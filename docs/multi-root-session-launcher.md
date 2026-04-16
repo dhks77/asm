@@ -489,7 +489,6 @@ asm 인스턴스 내부에서 picker/dialog subprocess가 다시 뜰 때는 dire
 
 - `default_path` (launcher 초기 진입 기본값)
 - `picker_width`
-- `auto_zoom`
 - `desktop_notifications`
 - `providers.*`
 - `trackers.*`
@@ -550,7 +549,6 @@ user global
 - tracker credential
 - IDE binary definitions
 - `picker_width`
-- `auto_zoom`
 - `desktop_notifications`
 
 ### target-local config 에 두는 값
@@ -564,7 +562,6 @@ user global
 반대로 아래 값은 target-local config에 두지 않는다.
 
 - `picker_width`
-- `auto_zoom`
 - `desktop_notifications`
 - provider command / args
 - tracker credential

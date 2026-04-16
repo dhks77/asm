@@ -41,7 +41,6 @@ type WorktreeTemplateConfig struct {
 type Config struct {
 	DefaultPath          string                       `toml:"default_path"`
 	DesktopNotifications *bool                        `toml:"desktop_notifications"`
-	AutoZoom             *bool                        `toml:"auto_zoom"`
 	PickerWidth          int                          `toml:"picker_width"` // picker pane width in %
 	DefaultProvider      string                       `toml:"default_provider"`
 	DefaultTracker       string                       `toml:"default_tracker"`
@@ -181,9 +180,6 @@ func merge(base, overlay *Config) {
 	if overlay.DesktopNotifications != nil {
 		base.DesktopNotifications = overlay.DesktopNotifications
 	}
-	if overlay.AutoZoom != nil {
-		base.AutoZoom = overlay.AutoZoom
-	}
 	if overlay.PickerWidth != 0 {
 		base.PickerWidth = overlay.PickerWidth
 	}
@@ -284,13 +280,6 @@ func (c *Config) IsDesktopNotificationsEnabled() bool {
 		return true // default: enabled
 	}
 	return *c.DesktopNotifications
-}
-
-func (c *Config) IsAutoZoomEnabled() bool {
-	if c.AutoZoom == nil {
-		return true // default: enabled
-	}
-	return *c.AutoZoom
 }
 
 // TemplateConflictPolicy returns the configured conflict policy for worktree

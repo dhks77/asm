@@ -239,6 +239,7 @@ func (m *PickerModel) swapAIToWorkingPanel(targetPath string) bool {
 	asmtmux.SwapToWorkingPanel(targetPath)
 	m.workingPath = targetPath
 	m.termPath = ""
+	m.stabilizeCursor(targetPath)
 	return true
 }
 
@@ -249,6 +250,7 @@ func (m *PickerModel) swapTermToWorkingPanel(targetPath string) bool {
 	asmtmux.SwapTermToWorkingPanel(targetPath)
 	m.termPath = targetPath
 	m.workingPath = ""
+	m.stabilizeCursor(targetPath)
 	return true
 }
 
@@ -1009,7 +1011,6 @@ func (m *PickerModel) startSession(wt *worktree.Worktree, providerName string, r
 	m.worktreeProviders[wt.Path] = p.Name()
 	m.sessionStartTimes[wt.Path] = time.Now()
 	m.showInWorkingPanel(wt)
-	m.applyInitialSessionLayout()
 	asmlog.Debugf("picker: start-session visible working_path=%q target=%q", m.workingPath, wt.Path)
 	return waitForExitCmd(wt.Path)
 }
@@ -1489,18 +1490,13 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 // terminal window already existed — its watcher is already running).
 func (m *PickerModel) showTerminalInWorkingPanel(targetPath, path string) tea.Cmd {
 	var cmd tea.Cmd
-	created := false
 	if !asmtmux.WindowExists(asmtmux.TerminalWindowName(targetPath)) {
 		asmtmux.CreateTerminalWindow(targetPath, path)
 		m.terminalStartTimes[targetPath] = time.Now()
 		cmd = waitForTermExitCmd(targetPath)
-		created = true
 	}
 	if m.swapTermToWorkingPanel(targetPath) {
 		m.focusWorkingPanel()
-		if created {
-			m.applyInitialSessionLayout()
-		}
 	}
 	return cmd
 }
@@ -1508,6 +1504,7 @@ func (m *PickerModel) showTerminalInWorkingPanel(targetPath, path string) tea.Cm
 func (m *PickerModel) switchToTerminal(wt *worktree.Worktree) tea.Cmd {
 	// Already showing this terminal
 	if m.termPath == wt.Path {
+		m.stabilizeCursor(wt.Path)
 		m.focusWorkingPanel()
 		return nil
 	}
@@ -1548,15 +1545,20 @@ func waitForTermExitCmd(targetPath string) tea.Cmd {
 
 func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 	if m.workingPath == wt.Path {
+		m.stabilizeCursor(wt.Path)
 		m.focusWorkingPanel()
 		_ = recent.Record(wt.Path)
 		return
 	}
+	wasZoomed := asmtmux.IsWorkingPanelZoomed()
 	// Recreate working panel if it was lost
 	asmtmux.EnsureWorkingPanel()
 	m.swapOutWorkingPanel()
 	if m.swapAIToWorkingPanel(wt.Path) {
 		m.focusWorkingPanel()
+		if wasZoomed {
+			_ = asmtmux.ZoomWorkingPanel()
+		}
 		_ = recent.Record(wt.Path)
 	}
 }
@@ -1570,15 +1572,6 @@ func (m *PickerModel) openOrFocusWorktree(wt *worktree.Worktree) tea.Cmd {
 		return nil
 	}
 	return m.startSession(wt, m.defaultProviderName(wt.Path), true)
-}
-
-// applyInitialSessionLayout applies the global picker-layout preference when a
-// brand-new AI/terminal session is first shown. After that, picker visibility
-// is controlled manually via Ctrl+L.
-func (m *PickerModel) applyInitialSessionLayout() {
-	if m.cfg != nil && m.cfg.IsAutoZoomEnabled() {
-		asmtmux.ZoomWorkingPanel()
-	}
 }
 
 func (m *PickerModel) togglePickerPanel() tea.Cmd {
@@ -1656,9 +1649,13 @@ func (m *PickerModel) rotateSession(delta int) tea.Cmd {
 	}
 
 	// Find current position. If nothing is shown, jump to first/last.
+	currentPath := m.workingPath
+	if currentPath == "" {
+		currentPath = m.termPath
+	}
 	idx := -1
 	for i, wt := range active {
-		if wt.Path == m.workingPath {
+		if wt.Path == currentPath {
 			idx = i
 			break
 		}
@@ -1673,6 +1670,7 @@ func (m *PickerModel) rotateSession(delta int) tea.Cmd {
 	} else {
 		if len(active) < 2 {
 			// Only session is already shown — just focus it.
+			m.stabilizeCursor(active[idx].Path)
 			asmtmux.FocusWorkingPanel()
 			return nil
 		}

@@ -41,7 +41,6 @@ type flatItem struct {
 }
 
 var scopeOptions = []string{"global", "local"}
-var autoZoomOptions = []string{"on", "off"}
 var templateConflictOptions = []string{"skip", "overwrite"}
 
 const pickerWidthMin = 10
@@ -51,7 +50,6 @@ const pickerWidthMax = 50
 const (
 	fieldProvider         = "provider"
 	fieldTracker          = "tracker"
-	fieldAutoZoom         = "autoZoom"
 	fieldPickerWidth      = "pickerWidth"
 	fieldIDE              = "ide"
 	fieldTemplateConflict = "templateConflict"
@@ -64,7 +62,6 @@ const (
 const (
 	generalFieldProvider = iota
 	generalFieldTracker
-	generalFieldAutoZoom
 	generalFieldPickerWidth
 	generalFieldIDE
 	generalFieldTemplateConflict
@@ -95,7 +92,6 @@ type SettingsModel struct {
 	selectedProvider    int
 	selectedTracker     int
 	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
-	autoZoomIdx         int    // 0=on, 1=off
 	pickerWidthStr      string // free-form percentage input (e.g. "22")
 	templateConflictIdx int    // 0=skip, 1=overwrite
 	worktreeBasePathStr string // free-form path for repo-mode worktree creation
@@ -138,7 +134,6 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 		projectOverrides: map[string]bool{
 			fieldProvider:         projectCfg.DefaultProvider != "",
 			fieldTracker:          projectCfg.DefaultTracker != "",
-			fieldAutoZoom:         projectCfg.AutoZoom != nil,
 			fieldPickerWidth:      projectCfg.PickerWidth != 0,
 			fieldIDE:              projectCfg.DefaultIDE != "",
 			fieldTemplateConflict: projectCfg.WorktreeTemplate.OnConflict != "",
@@ -156,7 +151,7 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 }
 
 // loadGeneralFromScope syncs the general-section UI state (provider, tracker,
-// auto zoom, picker width) with the currently selected scope. For project
+// picker width) with the currently selected scope. For project
 // scope, fields that are not explicitly overridden show the user-scope value
 // so the user can see what they would inherit.
 func (m *SettingsModel) loadGeneralFromScope() {
@@ -198,16 +193,6 @@ func (m *SettingsModel) loadGeneralFromScope() {
 				break
 			}
 		}
-	}
-
-	azEnabled := m.userCfg.IsAutoZoomEnabled()
-	if isProject && m.projectOverrides[fieldAutoZoom] {
-		azEnabled = m.projectCfg.IsAutoZoomEnabled()
-	}
-	if azEnabled {
-		m.autoZoomIdx = 0
-	} else {
-		m.autoZoomIdx = 1
 	}
 
 	pw := m.userCfg.GetPickerWidth()
@@ -258,12 +243,6 @@ func (m *SettingsModel) persistGeneralToScope() {
 		} else {
 			cfg.DefaultIDE = ""
 		}
-		if m.projectOverrides[fieldAutoZoom] {
-			azOn := m.autoZoomIdx == 0
-			cfg.AutoZoom = &azOn
-		} else {
-			cfg.AutoZoom = nil
-		}
 		if m.projectOverrides[fieldPickerWidth] {
 			if w := parsePickerWidth(m.pickerWidthStr); w > 0 {
 				cfg.PickerWidth = w
@@ -295,8 +274,6 @@ func (m *SettingsModel) persistGeneralToScope() {
 		} else {
 			cfg.DefaultIDE = ""
 		}
-		azOn := m.autoZoomIdx == 0
-		cfg.AutoZoom = &azOn
 		if w := parsePickerWidth(m.pickerWidthStr); w > 0 {
 			cfg.PickerWidth = w
 		}
@@ -373,8 +350,6 @@ func generalFieldKey(fieldIdx int) string {
 		return fieldProvider
 	case generalFieldTracker:
 		return fieldTracker
-	case generalFieldAutoZoom:
-		return fieldAutoZoom
 	case generalFieldPickerWidth:
 		return fieldPickerWidth
 	case generalFieldIDE:
@@ -394,11 +369,6 @@ func (m *SettingsModel) generalInheritedValue(fieldIdx int) string {
 		return m.userCfg.DefaultProvider
 	case generalFieldTracker:
 		return m.userCfg.DefaultTracker
-	case generalFieldAutoZoom:
-		if m.userCfg.IsAutoZoomEnabled() {
-			return "on"
-		}
-		return "off"
 	case generalFieldPickerWidth:
 		return fmt.Sprintf("%d%%", m.userCfg.GetPickerWidth())
 	case generalFieldIDE:
@@ -477,8 +447,7 @@ func (m *SettingsModel) rebuildItems() {
 		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldIDE})
 	}
 	if !isLocal {
-		// Auto zoom and picker width are global-only UI settings.
-		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldAutoZoom})
+		// Picker width is a global-only UI setting.
 		m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: generalFieldPickerWidth})
 	}
 
@@ -664,12 +633,6 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.selectedTracker = (m.selectedTracker + 1) % len(m.trackerNames)
 					} else {
 						m.selectedTracker = (m.selectedTracker - 1 + len(m.trackerNames)) % len(m.trackerNames)
-					}
-				} else if item.fieldIdx == generalFieldAutoZoom {
-					if key == "right" {
-						m.autoZoomIdx = (m.autoZoomIdx + 1) % len(autoZoomOptions)
-					} else {
-						m.autoZoomIdx = (m.autoZoomIdx - 1 + len(autoZoomOptions)) % len(autoZoomOptions)
 					}
 				} else if item.fieldIdx == generalFieldIDE && len(m.ideNames) > 0 {
 					if key == "right" {
@@ -924,8 +887,6 @@ func (m SettingsModel) View() string {
 			itemIdx++
 		}
 		if !isLocal {
-			sections = append(sections, m.renderSelectField(itemIdx, "Hide Picker On Open", autoZoomOptions, m.autoZoomIdx))
-			itemIdx++
 			sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%"))
 			itemIdx++
 		}
