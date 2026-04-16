@@ -54,9 +54,18 @@ type ProviderStateUpdatedMsg struct {
 type spinnerTickMsg time.Time
 type scrollTickMsg time.Time
 
-// terminalWidthResolvedMsg delivers the tmux client width measured off the
-// Update goroutine. Dispatched on WindowSizeMsg.
-type terminalWidthResolvedMsg struct{ width int }
+// terminalLayoutTickMsg drives periodic tmux client-width refreshes. We can't
+// rely on Bubble Tea's WindowSizeMsg alone because the picker pane may stay at
+// a fixed cell width after a prior resize-pane -x, so the pane itself doesn't
+// necessarily get a SIGWINCH when the outer terminal changes size.
+type terminalLayoutTickMsg time.Time
+
+// terminalLayoutResolvedMsg delivers the attached tmux client width plus the
+// main-window zoom flag, measured off the Update goroutine.
+type terminalLayoutResolvedMsg struct {
+	width  int
+	zoomed bool
+}
 
 // statusSummaryWrittenMsg is returned by writeStatusSummaryCmd once its
 // tmux set-option calls have finished. It clears the inflight flag so the
@@ -110,8 +119,15 @@ type PickerModel struct {
 	activeKinds map[string]asmtmux.SessionKind
 	// terminalWidth caches the tmux client width so status-bar layout
 	// computations don't call tmux synchronously from Update. Refreshed
-	// on WindowSizeMsg via an async tea.Cmd.
+	// by a lightweight watcher via async tea.Cmd.
 	terminalWidth int
+	// terminalWidthPending gates the async tmux layout probe so repeated
+	// WindowSizeMsg/watch ticks don't fan out concurrent tmux execs.
+	terminalWidthPending bool
+	// pickerWidthDirty means the current split width no longer matches the
+	// configured picker percentage and should be re-applied once the main
+	// window is not zoomed.
+	pickerWidthDirty bool
 	// statusSummaryWriting is true while a writeStatusSummaryCmd goroutine
 	// is still flushing set-option calls to tmux. scrollTick skips issuing
 	// a new write while this is set, so a slow tmux server can't snowball
@@ -155,27 +171,29 @@ type PickerModel struct {
 
 func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) PickerModel {
 	return PickerModel{
-		cfg:                cfg,
-		rootPath:           rootPath,
-		branches:           make(map[string]string),
-		taskInfos:          make(map[string]tracker.TaskInfo),
-		providerStates:     make(map[string]provider.State),
-		prevProviderStates: make(map[string]provider.State),
-		worktreeProviders:  make(map[string]string),
-		registry:           registry,
-		sessionStartTimes:  make(map[string]time.Time),
-		terminalStartTimes: make(map[string]time.Time),
-		flashItems:         make(map[string]time.Time),
-		activeKinds:        make(map[string]asmtmux.SessionKind),
-		terminalWidth:      120, // sane default until the first tmux query lands
-		selectedItems:      make(map[string]bool),
-		batchConfirm:       NewBatchConfirmModel(),
-		tracker:            t,
-		taskCache:          taskCache,
-		cachedBranches:     make(map[string]string),
-		ides:               ides,
-		focused:            true,
-		isRepoMode:         worktree.IsRepoMode(rootPath),
+		cfg:                  cfg,
+		rootPath:             rootPath,
+		branches:             make(map[string]string),
+		taskInfos:            make(map[string]tracker.TaskInfo),
+		providerStates:       make(map[string]provider.State),
+		prevProviderStates:   make(map[string]provider.State),
+		worktreeProviders:    make(map[string]string),
+		registry:             registry,
+		sessionStartTimes:    make(map[string]time.Time),
+		terminalStartTimes:   make(map[string]time.Time),
+		flashItems:           make(map[string]time.Time),
+		activeKinds:          make(map[string]asmtmux.SessionKind),
+		terminalWidth:        120, // sane default until the first tmux query lands
+		terminalWidthPending: true,
+		pickerWidthDirty:     true,
+		selectedItems:        make(map[string]bool),
+		batchConfirm:         NewBatchConfirmModel(),
+		tracker:              t,
+		taskCache:            taskCache,
+		cachedBranches:       make(map[string]string),
+		ides:                 ides,
+		focused:              true,
+		isRepoMode:           worktree.IsRepoMode(rootPath),
 	}
 }
 
@@ -186,6 +204,22 @@ func (m *PickerModel) worktreeByName(name string) *worktree.Worktree {
 		}
 	}
 	return nil
+}
+
+func (m *PickerModel) requestTerminalLayout() tea.Cmd {
+	if m.terminalWidthPending {
+		return nil
+	}
+	m.terminalWidthPending = true
+	return fetchTerminalLayoutCmd()
+}
+
+func (m *PickerModel) syncPickerWidthCmd(zoomed bool) tea.Cmd {
+	if !m.pickerWidthDirty || zoomed || m.cfg == nil {
+		return nil
+	}
+	m.pickerWidthDirty = false
+	return resizePickerPanelCmd(m.cfg.GetPickerWidth())
 }
 
 func (m *PickerModel) focusWorkingPanel() {
@@ -278,7 +312,14 @@ func (m *PickerModel) filteredDirectories() []int {
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(m.scanDirectories(), providerStateTickCmd(), spinnerTickCmd(), scrollTickCmd(), sessionHealthTickCmd())
+	return tea.Batch(
+		m.scanDirectories(),
+		providerStateTickCmd(),
+		spinnerTickCmd(),
+		scrollTickCmd(),
+		sessionHealthTickCmd(),
+		fetchTerminalLayoutCmd(),
+	)
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -309,15 +350,28 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if firstReady {
 			m.applyAutoZoomPicker()
 		}
-		// Terminal width governs the status-bar layout and rarely changes —
-		// refresh it off the Update goroutine so a slow tmux can't stall us.
-		return m, fetchTerminalWidthCmd()
+		// Bubble Tea only reports picker-pane size changes. The outer tmux
+		// client can resize without changing this pane's width, so kick the
+		// async tmux-side layout probe here and also keep a background watcher.
+		return m, m.requestTerminalLayout()
 
-	case terminalWidthResolvedMsg:
-		if msg.width > 0 {
+	case terminalLayoutTickMsg:
+		return m, m.requestTerminalLayout()
+
+	case terminalLayoutResolvedMsg:
+		m.terminalWidthPending = false
+		if msg.width > 0 && msg.width != m.terminalWidth {
+			m.terminalWidth = msg.width
+			m.pickerWidthDirty = true
+		} else if msg.width > 0 {
 			m.terminalWidth = msg.width
 		}
-		return m, nil
+		var cmds []tea.Cmd
+		if cmd := m.syncPickerWidthCmd(msg.zoomed); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		cmds = append(cmds, terminalLayoutTickCmd())
+		return m, tea.Batch(cmds...)
 
 	case statusSummaryWrittenMsg:
 		m.statusSummaryWriting = false
@@ -678,11 +732,11 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				overrides[name] = ide.Override{Command: c.Command, Args: c.Args}
 			}
 			m.ides = ide.Builtins(overrides)
-			// Apply picker width immediately — only if not zoomed (resize is
-			// ignored on zoomed panes and would confuse the state otherwise).
-			if !asmtmux.IsWorkingPanelZoomed() {
-				asmtmux.ResizePickerPanel(newCfg.GetPickerWidth())
-			}
+			// Picker width is configured as a percentage but tmux applies it as
+			// an absolute pane width. Mark it dirty so the current client width
+			// is re-synchronized immediately.
+			m.pickerWidthDirty = true
+			return m, m.requestTerminalLayout()
 		}
 		return m, nil
 
@@ -2327,12 +2381,29 @@ func sessionHealthTickCmd() tea.Cmd {
 	})
 }
 
-// fetchTerminalWidthCmd measures the tmux client width in a goroutine. The
-// tmux call has its own timeout via CommandContext; on failure width is 0 and
-// the model keeps its previous value.
-func fetchTerminalWidthCmd() tea.Cmd {
+func terminalLayoutTickCmd() tea.Cmd {
+	return tea.Tick(750*time.Millisecond, func(t time.Time) tea.Msg {
+		return terminalLayoutTickMsg(t)
+	})
+}
+
+// fetchTerminalLayoutCmd measures the tmux client width and current zoom flag
+// in a goroutine. On width lookup failure width is 0 and the model keeps its
+// previous width; the zoom flag still helps us decide whether a deferred pane
+// resize can be applied now.
+func fetchTerminalLayoutCmd() tea.Cmd {
 	return func() tea.Msg {
-		return terminalWidthResolvedMsg{width: asmtmux.TerminalWidth()}
+		return terminalLayoutResolvedMsg{
+			width:  asmtmux.TerminalWidth(),
+			zoomed: asmtmux.IsWorkingPanelZoomed(),
+		}
+	}
+}
+
+func resizePickerPanelCmd(pickerPct int) tea.Cmd {
+	return func() tea.Msg {
+		_ = asmtmux.ResizePickerPanel(pickerPct)
+		return nil
 	}
 }
 
