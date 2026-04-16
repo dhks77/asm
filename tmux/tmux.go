@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nhn/asm/asmlog"
 )
 
 // SessionName is the active tmux session name. Defaults to "asm" but is
@@ -114,6 +117,22 @@ func IsInsideTmux() bool {
 	return os.Getenv("TMUX") != ""
 }
 
+// CurrentSessionName returns the tmux session name of the currently attached
+// client. Intended for picker/dialog subprocesses already running inside an
+// existing asm tmux session.
+func CurrentSessionName() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "#{session_name}").Output()
+	if err != nil {
+		asmlog.Debugf("tmux: current-session lookup failed err=%v", err)
+		return "", err
+	}
+	name := strings.TrimSpace(string(out))
+	asmlog.Debugf("tmux: current-session=%q", name)
+	return name, nil
+}
+
 func SessionExists() bool {
 	return SessionExistsNamed(SessionName)
 }
@@ -126,6 +145,13 @@ func SessionExistsNamed(name string) bool {
 	defer cancel()
 	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", name).Run()
 	return err == nil
+}
+
+// TargetID returns a stable short hash for an absolute target path.
+func TargetID(targetPath string) string {
+	h := fnv.New64a()
+	h.Write([]byte(filepath.Clean(targetPath)))
+	return fmt.Sprintf("%010x", h.Sum64()&0xffffffffff)
 }
 
 func WindowExists(windowName string) bool {
@@ -143,8 +169,36 @@ func WindowExists(windowName string) bool {
 	return false
 }
 
-func WindowName(dirName string) string {
-	return "wt-" + dirName
+func WindowName(targetPath string) string {
+	return "ai-" + TargetID(targetPath)
+}
+
+func windowTarget(winName string) string {
+	return fmt.Sprintf("%s:%s", SessionName, winName)
+}
+
+func setWindowOptionByName(winName, key, value string) error {
+	return runTmuxCmd("set-option", "-w",
+		"-t", windowTarget(winName),
+		"@"+key, value,
+	)
+}
+
+func setManagedWindowMetadata(winName, targetPath, displayName, kind string) error {
+	cleanPath := filepath.Clean(targetPath)
+	options := [][2]string{
+		{"asm-id", TargetID(cleanPath)},
+		{"asm-path", cleanPath},
+		{"asm-display-name", displayName},
+		{"asm-kind", kind},
+		{"asm-started-at", strconv.FormatInt(time.Now().Unix(), 10)},
+	}
+	for _, opt := range options {
+		if err := setWindowOptionByName(winName, opt[0], opt[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CreateSession creates a new tmux session and sets up pane-switching key bindings.
@@ -196,7 +250,9 @@ func CreateSession(pickerCmd string) error {
 	bindRouted("C-w", "F7")  // create worktree
 	bindRouted("C-d", "F6")  // delete directory
 	bindRouted("C-p", "F4")  // provider selection
-	bindRouted("C-k", "F3")  // open task URL
+	bindRouted("C-k", "F3")  // kill selected session
+	bindRouted("C-l", "C-l") // toggle picker panel visibility
+	bindRouted("C-o", "o")   // open task URL
 	bindRouted("C-]", "F1")  // rotate to next active session
 	bindRouted("C-e", "F2")  // open worktree in IDE
 
@@ -385,9 +441,11 @@ func UnzoomWorkingPanel() error {
 
 // EnableStatusBar turns on a three-line status bar at the bottom of the
 // terminal, spanning full width.
-//   line 0: current session detail
-//   line 1: other active sessions
-//   line 2: keyboard shortcuts hint
+//
+//	line 0: current session detail
+//	line 1: other active sessions
+//	line 2: keyboard shortcuts hint
+//
 // Content is set via SetStatusLines / SetShortcutsLine.
 func EnableStatusBar() {
 	runTmux("set-option", "-t", SessionName, "status", "3")
@@ -465,8 +523,10 @@ func Attach() error {
 // CreateDirectoryWindow creates a hidden tmux window with a shell,
 // then sends the AI command via send-keys so aliases are available.
 // When the AI process exits, signals via wait-for for detection.
-func CreateDirectoryWindow(dirName, dirPath, command string, args []string) error {
-	winName := WindowName(dirName)
+func CreateDirectoryWindow(targetPath, dirPath, command string, args []string) error {
+	winName := WindowName(targetPath)
+	asmlog.Debugf("tmux: create-directory-window session=%q win=%q target=%q dir=%q command=%q args=%v",
+		SessionName, winName, targetPath, dirPath, command, args)
 
 	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
@@ -474,6 +534,13 @@ func CreateDirectoryWindow(dirName, dirPath, command string, args []string) erro
 		"-c", dirPath,
 	)
 	if err != nil {
+		asmlog.Debugf("tmux: create-directory-window new-window failed session=%q win=%q err=%v",
+			SessionName, winName, err)
+		return err
+	}
+	if err := setManagedWindowMetadata(winName, targetPath, filepath.Base(dirPath), "ai"); err != nil {
+		asmlog.Debugf("tmux: create-directory-window metadata failed session=%q win=%q err=%v",
+			SessionName, winName, err)
 		return err
 	}
 
@@ -483,18 +550,24 @@ func CreateDirectoryWindow(dirName, dirPath, command string, args []string) erro
 	}
 
 	// After AI exits: signal via wait-for (instant event detection)
-	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(dirName))
+	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(targetPath))
 	fullCmd := aiCmd + " ; " + exitSignal
 
-	return runTmuxCmd("send-keys",
+	if err := runTmuxCmd("send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 		fullCmd, "Enter",
-	)
+	); err != nil {
+		asmlog.Debugf("tmux: create-directory-window send-keys failed session=%q win=%q err=%v",
+			SessionName, winName, err)
+		return err
+	}
+	asmlog.Debugf("tmux: create-directory-window ready session=%q win=%q target=%q", SessionName, winName, targetPath)
+	return nil
 }
 
-// ExitSignalName returns the tmux wait-for signal name for a directory.
-func ExitSignalName(dirName string) string {
-	return "asm-exit-" + dirName
+// ExitSignalName returns the tmux wait-for signal name for a target path.
+func ExitSignalName(targetPath string) string {
+	return "asm-exit-" + TargetID(targetPath)
 }
 
 // waitForExitPollInterval bounds each `tmux wait-for` blocking call so a
@@ -503,11 +576,11 @@ func ExitSignalName(dirName string) string {
 // the session as exited. If it's still alive we loop and wait again.
 const waitForExitPollInterval = 30 * time.Second
 
-// WaitForExit blocks until the AI process exits in the given directory window.
+// WaitForExit blocks until the AI process exits in the given AI window.
 // Uses a bounded `tmux wait-for` + window-existence probe so a missed signal
 // or a tmux server restart can't leak the caller goroutine indefinitely.
-func WaitForExit(dirName string) error {
-	return waitForSignalOrWindowGone(ExitSignalName(dirName), WindowName(dirName))
+func WaitForExit(targetPath string) error {
+	return waitForSignalOrWindowGone(ExitSignalName(targetPath), WindowName(targetPath))
 }
 
 // waitForSignalOrWindowGone is the shared logic behind WaitForExit and the
@@ -533,12 +606,12 @@ func waitForSignalOrWindowGone(signal, windowName string) error {
 	}
 }
 
-// CleanupExitedWindow handles cleanup when the AI process exits in a directory.
-func CleanupExitedWindow(dirName string, isCurrentlyDisplayed bool) {
+// CleanupExitedWindow handles cleanup when the AI process exits for a target.
+func CleanupExitedWindow(targetPath string, isCurrentlyDisplayed bool) {
 	if isCurrentlyDisplayed {
-		SwapBackFromWorkingPanel(dirName)
+		SwapBackFromWorkingPanel(targetPath)
 	}
-	KillDirectoryWindow(dirName)
+	KillDirectoryWindow(targetPath)
 }
 
 func swapPaneToWorking(winName string) error {
@@ -555,19 +628,19 @@ func swapPaneFromWorking(winName string) error {
 	)
 }
 
-// SwapToWorkingPanel swaps a directory's window pane into the main window's working panel.
-func SwapToWorkingPanel(dirName string) error {
-	return swapPaneToWorking(WindowName(dirName))
+// SwapToWorkingPanel swaps a target's AI window into the main working panel.
+func SwapToWorkingPanel(targetPath string) error {
+	return swapPaneToWorking(WindowName(targetPath))
 }
 
-// SwapBackFromWorkingPanel swaps the current working panel back to its directory window.
-func SwapBackFromWorkingPanel(dirName string) error {
-	return swapPaneFromWorking(WindowName(dirName))
+// SwapBackFromWorkingPanel swaps the current working panel back to its AI window.
+func SwapBackFromWorkingPanel(targetPath string) error {
+	return swapPaneFromWorking(WindowName(targetPath))
 }
 
-// KillDirectoryWindow kills a directory's tmux window.
-func KillDirectoryWindow(dirName string) error {
-	winName := WindowName(dirName)
+// KillDirectoryWindow kills a target's AI tmux window.
+func KillDirectoryWindow(targetPath string) error {
+	winName := WindowName(targetPath)
 	return runTmuxCmd("kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 	)
@@ -578,11 +651,14 @@ func KillDirectoryWindow(dirName string) error {
 // The exit code is stored in tmux variable @{windowName}-exit.
 func RunInWorkingPanel(windowName, cmd string) error {
 	EnsureWorkingPanel()
+	asmlog.Debugf("tmux: run-dialog-window session=%q win=%q cmd=%q", SessionName, windowName, cmd)
 	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
 		"-n", windowName,
 	)
 	if err != nil {
+		asmlog.Debugf("tmux: run-dialog-window new-window failed session=%q win=%q err=%v",
+			SessionName, windowName, err)
 		return err
 	}
 
@@ -594,14 +670,22 @@ func RunInWorkingPanel(windowName, cmd string) error {
 		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
 		fullCmd, "Enter",
 	); err != nil {
+		asmlog.Debugf("tmux: run-dialog-window send-keys failed session=%q win=%q err=%v",
+			SessionName, windowName, err)
 		return err
 	}
 
 	// Swap into working panel
-	return runTmuxCmd("swap-pane",
+	if err := runTmuxCmd("swap-pane",
 		"-s", windowFirstPane(windowName),
 		"-t", workingTarget(),
-	)
+	); err != nil {
+		asmlog.Debugf("tmux: run-dialog-window swap-pane failed session=%q win=%q err=%v",
+			SessionName, windowName, err)
+		return err
+	}
+	asmlog.Debugf("tmux: run-dialog-window ready session=%q win=%q", SessionName, windowName)
+	return nil
 }
 
 // WaitAndCleanupWorkingPanel blocks until the window's process exits,
@@ -646,6 +730,7 @@ func runTmuxCmd(args ...string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
+		asmlog.Debugf("tmux: command failed session=%q args=%v err=%v output=%q", SessionName, args, err, msg)
 		if msg != "" {
 			return fmt.Errorf("%s: %w", msg, err)
 		}
@@ -654,13 +739,13 @@ func runTmuxCmd(args ...string) error {
 	return nil
 }
 
-// CapturePaneContent captures the visible content of a directory's pane.
-func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
+// CapturePaneContent captures the visible content of an AI pane.
+func CapturePaneContent(targetPath string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
 		target = workingTarget()
 	} else {
-		target = windowFirstPane(WindowName(dirName))
+		target = windowFirstPane(WindowName(targetPath))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -674,12 +759,12 @@ func CapturePaneContent(dirName string, isDisplayed bool) (string, error) {
 // CapturePaneHistory captures the last `lines` of scrollback plus the visible
 // pane content. Useful when the visible area is full of UI chrome and the
 // actual response has scrolled above.
-func CapturePaneHistory(dirName string, isDisplayed bool, lines int) (string, error) {
+func CapturePaneHistory(targetPath string, isDisplayed bool, lines int) (string, error) {
 	var target string
 	if isDisplayed {
 		target = workingTarget()
 	} else {
-		target = windowFirstPane(WindowName(dirName))
+		target = windowFirstPane(WindowName(targetPath))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -691,14 +776,14 @@ func CapturePaneHistory(dirName string, isDisplayed bool, lines int) (string, er
 	return string(out), nil
 }
 
-// GetPaneTitle reads the tmux pane title for a directory's pane.
+// GetPaneTitle reads the tmux pane title for an AI pane.
 // The AI provider sets the pane title to indicate its current state.
-func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
+func GetPaneTitle(targetPath string, isDisplayed bool) (string, error) {
 	var target string
 	if isDisplayed {
 		target = workingTarget()
 	} else {
-		target = windowFirstPane(WindowName(dirName))
+		target = windowFirstPane(WindowName(targetPath))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
@@ -709,8 +794,18 @@ func GetPaneTitle(dirName string, isDisplayed bool) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// utilityWindows are non-session windows that should be closed on Ctrl+G.
-var utilityWindows = []string{"asm-settings", "asm-worktree", "asm-delete", "asm-provider-select"}
+// utilityWindows are non-session windows that should be treated as modal
+// dialogs: only one should be open at a time, Ctrl+G should close them, and
+// repeated open requests should refocus the existing dialog instead of trying
+// to spawn a duplicate window.
+var utilityWindows = []string{
+	"asm-settings",
+	"asm-worktree",
+	"asm-delete",
+	"asm-provider-select",
+	"asm-ide-select",
+	"asm-launcher",
+}
 
 // HasUtilityWindow returns true if any utility window is open.
 func HasUtilityWindow() bool {
@@ -735,27 +830,27 @@ func KillSession() error {
 	return runTmuxCmd("kill-session", "-t", SessionName)
 }
 
-// TerminalWindowName returns the tmux window name for a directory's terminal.
-func TerminalWindowName(dirName string) string {
-	return "term-" + dirName
+// TerminalWindowName returns the tmux window name for a target's terminal.
+func TerminalWindowName(targetPath string) string {
+	return "term-" + TargetID(targetPath)
 }
 
 // TermExitSignalName returns the tmux wait-for signal name for a terminal.
-func TermExitSignalName(dirName string) string {
-	return "asm-term-exit-" + dirName
+func TermExitSignalName(targetPath string) string {
+	return "asm-term-exit-" + TargetID(targetPath)
 }
 
 // WaitForTermExit is the terminal-window counterpart of WaitForExit — it uses
 // the same bounded wait + window-existence probe so a missed signal can't
 // park the caller goroutine forever.
-func WaitForTermExit(dirName string) error {
-	return waitForSignalOrWindowGone(TermExitSignalName(dirName), TerminalWindowName(dirName))
+func WaitForTermExit(targetPath string) error {
+	return waitForSignalOrWindowGone(TermExitSignalName(targetPath), TerminalWindowName(targetPath))
 }
 
 // CreateTerminalWindow creates a hidden tmux window with a shell at the directory path.
 // When the shell exits, sends a wait-for signal for cleanup.
-func CreateTerminalWindow(dirName, dirPath string) error {
-	winName := TerminalWindowName(dirName)
+func CreateTerminalWindow(targetPath, dirPath string) error {
+	winName := TerminalWindowName(targetPath)
 
 	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
@@ -765,13 +860,16 @@ func CreateTerminalWindow(dirName, dirPath string) error {
 	if err != nil {
 		return err
 	}
+	if err := setManagedWindowMetadata(winName, targetPath, filepath.Base(dirPath), "term"); err != nil {
+		return err
+	}
 
 	shell := os.Getenv("SHELL")
 	if shell == "" {
 		shell = "zsh"
 	}
 
-	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(dirName))
+	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(targetPath))
 	fullCmd := shell + " ; " + exitSignal
 
 	return runTmuxCmd("send-keys",
@@ -781,18 +879,18 @@ func CreateTerminalWindow(dirName, dirPath string) error {
 }
 
 // SwapTermToWorkingPanel swaps a terminal window's pane into the main window's working panel.
-func SwapTermToWorkingPanel(dirName string) error {
-	return swapPaneToWorking(TerminalWindowName(dirName))
+func SwapTermToWorkingPanel(targetPath string) error {
+	return swapPaneToWorking(TerminalWindowName(targetPath))
 }
 
 // SwapTermBackFromWorkingPanel swaps the working panel back to the terminal's hidden window.
-func SwapTermBackFromWorkingPanel(dirName string) error {
-	return swapPaneFromWorking(TerminalWindowName(dirName))
+func SwapTermBackFromWorkingPanel(targetPath string) error {
+	return swapPaneFromWorking(TerminalWindowName(targetPath))
 }
 
 // KillTerminalWindow kills a terminal's tmux window.
-func KillTerminalWindow(dirName string) error {
-	winName := TerminalWindowName(dirName)
+func KillTerminalWindow(targetPath string) error {
+	winName := TerminalWindowName(targetPath)
 	return runTmuxCmd("kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
 	)
@@ -800,30 +898,35 @@ func KillTerminalWindow(dirName string) error {
 
 // SetSessionOption sets a tmux session-level option.
 func SetSessionOption(key, value string) error {
-	return runTmuxCmd("set-option", "-t", SessionName, "@"+key, value)
+	err := runTmuxCmd("set-option", "-t", SessionName, "@"+key, value)
+	if err != nil {
+		asmlog.Debugf("tmux: set-session-option failed session=%q key=%q value=%q err=%v", SessionName, key, value, err)
+		return err
+	}
+	asmlog.Debugf("tmux: set-session-option session=%q key=%q value=%q", SessionName, key, value)
+	return nil
 }
 
 // GetSessionOption reads a tmux session-level option.
 func GetSessionOption(key string) string {
 	out, err := exec.Command("tmux", "show-option", "-t", SessionName, "-v", "@"+key).Output()
 	if err != nil {
+		asmlog.Debugf("tmux: get-session-option failed session=%q key=%q err=%v", SessionName, key, err)
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	value := strings.TrimSpace(string(out))
+	asmlog.Debugf("tmux: get-session-option session=%q key=%q value=%q", SessionName, key, value)
+	return value
 }
 
-// SetWindowOption sets a tmux window option on a directory's window.
-func SetWindowOption(dirName, key, value string) error {
-	winName := WindowName(dirName)
-	return runTmuxCmd("set-option", "-w",
-		"-t", fmt.Sprintf("%s:%s", SessionName, winName),
-		"@"+key, value,
-	)
+// SetWindowOption sets a tmux window option on a target's AI window.
+func SetWindowOption(targetPath, key, value string) error {
+	return setWindowOptionByName(WindowName(targetPath), key, value)
 }
 
-// GetWindowOption reads a tmux window option from a directory's window.
-func GetWindowOption(dirName, key string) string {
-	winName := WindowName(dirName)
+// GetWindowOption reads a tmux window option from a target's AI window.
+func GetWindowOption(targetPath, key string) string {
+	winName := WindowName(targetPath)
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", "show-option", "-w", "-v",
@@ -847,33 +950,40 @@ const (
 func (k SessionKind) HasAI() bool   { return k&SessionAI != 0 }
 func (k SessionKind) HasTerm() bool { return k&SessionTerm != 0 }
 
-// ListActiveSessions returns per-directory kind flags by inspecting live tmux windows.
-// Keys are directory names (without the wt-/term- prefix); values are bitmasks of
-// kinds that currently have a window. Directories with no active session are
-// omitted. One tmux call, shared by ListDirectoryWindows.
+// ListActiveSessions returns per-target kind flags by inspecting live tmux windows.
+// Keys are absolute target paths from @asm-path metadata; values are bitmasks of
+// kinds that currently have a window. Targets with no active session are omitted.
 func ListActiveSessions() map[string]SessionKind {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}").Output()
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}\t#{@asm-path}\t#{@asm-kind}").Output()
 	if err != nil {
 		return nil
 	}
 	result := make(map[string]SessionKind)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		switch {
-		case strings.HasPrefix(line, "wt-"):
-			name := strings.TrimPrefix(line, "wt-")
-			result[name] |= SessionAI
-		case strings.HasPrefix(line, "term-"):
-			name := strings.TrimPrefix(line, "term-")
-			result[name] |= SessionTerm
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		targetPath := strings.TrimSpace(parts[1])
+		if targetPath == "" {
+			continue
+		}
+		switch strings.TrimSpace(parts[2]) {
+		case "ai":
+			result[targetPath] |= SessionAI
+		case "term":
+			result[targetPath] |= SessionTerm
 		}
 	}
 	return result
 }
 
-// ListDirectoryWindows returns directory names (without "wt-" prefix) of all active AI
-// directory windows. Kept for callers that only care about AI sessions.
+// ListDirectoryWindows returns absolute target paths of all active AI windows.
 func ListDirectoryWindows() []string {
 	kinds := ListActiveSessions()
 	var result []string

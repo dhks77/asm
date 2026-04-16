@@ -34,6 +34,7 @@ func main() {
 	worktreeDir := flag.String("worktree-dir", "", "Directory path for worktree operations")
 	providerSelect := flag.Bool("provider-select", false, "Run provider selection dialog")
 	ideSelect := flag.Bool("ide-select", false, "Run IDE selection dialog")
+	launcherMode := flag.Bool("launcher", false, "Run session launcher dialog")
 	flag.Parse()
 
 	initLog()
@@ -83,9 +84,34 @@ func main() {
 	// config in its own main()) observe the seeded value.
 	autoSeedWorktreeBasePath(rootPath, cfg)
 
-	// Derive per-path tmux session name so multiple asm instances (one per
-	// root path) can run concurrently without stomping on each other.
-	asmtmux.SetSessionName(rootPath)
+	// Derive the tmux session name for this process. Top-level asm launches
+	// still hash from --path, but picker/dialog subprocesses running inside an
+	// existing asm tmux session must target that CURRENT session even when they
+	// receive a different --path (launcher/settings local-scope context, etc.).
+	sessionBoundMode := *pickerMode || *settingsMode || *deleteMode != "" || *worktreeCreate || *providerSelect || *ideSelect || *launcherMode
+	sessionSource := "derived-from-root"
+	if sessionBoundMode {
+		if inheritedSession := strings.TrimSpace(os.Getenv("ASM_SESSION_NAME")); strings.HasPrefix(inheritedSession, "asm-") {
+			asmtmux.SessionName = inheritedSession
+			sessionSource = "env:ASM_SESSION_NAME"
+		} else if asmtmux.IsInsideTmux() {
+			if currentSession, err := asmtmux.CurrentSessionName(); err == nil && strings.HasPrefix(currentSession, "asm-") {
+				asmtmux.SessionName = currentSession
+				sessionSource = "tmux:current-session"
+			} else {
+				asmtmux.SetSessionName(rootPath)
+				if err != nil {
+					logDebug("main: failed to resolve current tmux session for session-bound mode root=%q err=%v", rootPath, err)
+				}
+			}
+		} else {
+			asmtmux.SetSessionName(rootPath)
+		}
+	} else {
+		asmtmux.SetSessionName(rootPath)
+	}
+	logDebug("main: root=%q picker=%t settings=%t delete=%q worktree_create=%t provider_select=%t ide_select=%t launcher=%t session=%q source=%s inside_tmux=%t",
+		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
 
 	registry := buildRegistry(cfg)
 	t := buildTracker(cfg, rootPath)
@@ -99,6 +125,8 @@ func main() {
 		runProviderSelect(registry)
 	} else if *ideSelect {
 		runIDESelect(buildIDEs(cfg))
+	} else if *launcherMode {
+		runLauncher(rootPath, t, taskCache)
 	} else if *settingsMode {
 		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
@@ -441,6 +469,29 @@ func runIDESelect(ides []ide.IDE) {
 		asmtmux.SetSessionOption("asm-selected-ide", m.Selected)
 		os.Exit(0)
 	}
+	os.Exit(1)
+}
+
+func runLauncher(initialPath string, t tracker.Tracker, taskCache *tracker.PathCache) {
+	logDebug("launcher: start initial_path=%q session=%q", initialPath, asmtmux.SessionName)
+	model := ui.NewLauncherModel(initialPath, t, taskCache)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	result, err := p.Run()
+	if err != nil {
+		logErr("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if m, ok := result.(ui.LauncherModel); ok && m.SelectedPath != "" {
+		logDebug("launcher: selected path=%q session=%q", m.SelectedPath, asmtmux.SessionName)
+		if err := asmtmux.SetSessionOption("asm-selected-target-path", m.SelectedPath); err != nil {
+			logErr("Error storing launcher selection: %v\n", err)
+			os.Exit(1)
+		}
+		logDebug("launcher: stored selection path=%q session=%q", m.SelectedPath, asmtmux.SessionName)
+		os.Exit(0)
+	}
+	logDebug("launcher: exited without selection session=%q result_type=%T", asmtmux.SessionName, result)
 	os.Exit(1)
 }
 

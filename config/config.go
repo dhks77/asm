@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/nhn/asm/worktree"
 )
 
 // Scope represents the configuration scope.
@@ -80,9 +81,44 @@ func UserConfigPath() string {
 	return filepath.Join(UserConfigDir(), "config.toml")
 }
 
-// ProjectConfigPath returns the project-level config path.
+// ProjectConfigPath returns the target-local config path for a target path.
+// Repo-backed targets resolve to the main repo root; plain directories resolve
+// to the nearest ancestor with `.asm/config.toml`, falling back to the target.
 func ProjectConfigPath(rootPath string) string {
-	return filepath.Join(rootPath, ".asm", "config.toml")
+	return filepath.Join(ProjectRoot(rootPath), ".asm", "config.toml")
+}
+
+// ProjectRoot resolves the directory that owns the target-local config for a
+// given target path.
+func ProjectRoot(targetPath string) string {
+	clean := filepath.Clean(targetPath)
+	if clean == "" || clean == "." {
+		return clean
+	}
+	if worktree.IsRepoMode(clean) {
+		if mainRepo, err := worktree.FindMainRepo(clean); err == nil && mainRepo != "" {
+			return filepath.Clean(mainRepo)
+		}
+	}
+	if root, ok := nearestProjectRoot(clean); ok {
+		return root
+	}
+	return clean
+}
+
+func nearestProjectRoot(path string) (string, bool) {
+	cur := filepath.Clean(path)
+	for {
+		candidate := filepath.Join(cur, ".asm", "config.toml")
+		if _, err := os.Stat(candidate); err == nil {
+			return cur, true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", false
+		}
+		cur = parent
+	}
 }
 
 // ScopePath returns the config file path for the given scope.

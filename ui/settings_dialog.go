@@ -40,7 +40,7 @@ type flatItem struct {
 	fieldIdx int
 }
 
-var scopeOptions = []string{"user", "project"}
+var scopeOptions = []string{"global", "local"}
 var autoZoomOptions = []string{"on", "off"}
 var templateConflictOptions = []string{"skip", "overwrite"}
 
@@ -58,6 +58,20 @@ const (
 	fieldWorktreeBasePath = "worktreeBasePath"
 )
 
+// Stable identifiers for general-section rows. These are intentionally
+// decoupled from on-screen order because some rows are conditionally hidden
+// (for example, global-only fields disappear in local scope).
+const (
+	generalFieldProvider = iota
+	generalFieldTracker
+	generalFieldAutoZoom
+	generalFieldPickerWidth
+	generalFieldIDE
+	generalFieldTemplateConflict
+	generalFieldOpenTemplatesDir
+	generalFieldWorktreeBasePath
+)
+
 // ideNoneLabel is the sentinel shown at index 0 of the Default IDE
 // select, meaning "don't pick a default — always show the selector".
 const ideNoneLabel = "(none)"
@@ -73,18 +87,18 @@ type SettingsModel struct {
 	// they're serialized back into cfg.IDEs.
 	ideEntries []ideEditEntry
 
-	providerNames    []string
-	trackerNames     []string
+	providerNames []string
+	trackerNames  []string
 	// ideNames is the display list for Default IDE. Index 0 is always
 	// ideNoneLabel; indices 1.. are the configured IDEs in order.
-	ideNames         []string
+	ideNames            []string
 	selectedProvider    int
 	selectedTracker     int
 	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
-	autoZoomIdx          int    // 0=on, 1=off
-	pickerWidthStr       string // free-form percentage input (e.g. "22")
-	templateConflictIdx  int    // 0=skip, 1=overwrite
-	worktreeBasePathStr  string // free-form path for repo-mode worktree creation
+	autoZoomIdx         int    // 0=on, 1=off
+	pickerWidthStr      string // free-form percentage input (e.g. "22")
+	templateConflictIdx int    // 0=skip, 1=overwrite
+	worktreeBasePathStr string // free-form path for repo-mode worktree creation
 
 	// Per-field project-scope overrides. true = explicit value in project;
 	// false = inherits from user. Only consulted when scopeIdx == 1.
@@ -322,21 +336,8 @@ func (m *SettingsModel) markGeneralOverride(fieldIdx int) {
 	if m.currentScope() != config.ScopeProject {
 		return
 	}
-	switch fieldIdx {
-	case 0:
-		m.projectOverrides[fieldProvider] = true
-	case 1:
-		m.projectOverrides[fieldTracker] = true
-	case 2:
-		m.projectOverrides[fieldAutoZoom] = true
-	case 3:
-		m.projectOverrides[fieldPickerWidth] = true
-	case 4:
-		m.projectOverrides[fieldIDE] = true
-	case 5:
-		m.projectOverrides[fieldTemplateConflict] = true
-	case 7:
-		m.projectOverrides[fieldWorktreeBasePath] = true
+	if key := generalFieldKey(fieldIdx); key != "" {
+		m.projectOverrides[key] = true
 	}
 }
 
@@ -350,60 +351,68 @@ func (m *SettingsModel) generalStateMarker(fieldIdx int) string {
 	if m.currentScope() != config.ScopeProject {
 		return ""
 	}
-	key := ""
-	switch fieldIdx {
-	case 0:
-		key = fieldProvider
-	case 1:
-		key = fieldTracker
-	case 2:
-		key = fieldAutoZoom
-	case 3:
-		key = fieldPickerWidth
-	case 4:
-		key = fieldIDE
-	case 5:
-		key = fieldTemplateConflict
-	case 7:
-		key = fieldWorktreeBasePath
-	}
+	key := generalFieldKey(fieldIdx)
 	if key == "" {
 		return ""
 	}
 	if m.projectOverrides[key] {
-		return lipgloss.NewStyle().Foreground(primaryColor).Render("  ● project")
+		return lipgloss.NewStyle().Foreground(primaryColor).Render("  ● local")
 	}
 	// Inheriting — also surface the user value.
-	userVal := ""
-	switch fieldIdx {
-	case 0:
-		userVal = m.userCfg.DefaultProvider
-	case 1:
-		userVal = m.userCfg.DefaultTracker
-	case 2:
-		if m.userCfg.IsAutoZoomEnabled() {
-			userVal = "on"
-		} else {
-			userVal = "off"
-		}
-	case 3:
-		userVal = fmt.Sprintf("%d%%", m.userCfg.GetPickerWidth())
-	case 4:
-		if m.userCfg.DefaultIDE != "" {
-			userVal = m.userCfg.DefaultIDE
-		} else {
-			userVal = ideNoneLabel
-		}
-	case 5:
-		userVal = m.userCfg.TemplateConflictPolicy()
-	case 7:
-		userVal = m.userCfg.WorktreeBasePath
-	}
+	userVal := m.generalInheritedValue(fieldIdx)
 	suffix := "  ○ inherit"
 	if userVal != "" {
-		suffix += " (user: " + userVal + ")"
+		suffix += " (global: " + userVal + ")"
 	}
 	return lipgloss.NewStyle().Foreground(dimColor).Render(suffix)
+}
+
+func generalFieldKey(fieldIdx int) string {
+	switch fieldIdx {
+	case generalFieldProvider:
+		return fieldProvider
+	case generalFieldTracker:
+		return fieldTracker
+	case generalFieldAutoZoom:
+		return fieldAutoZoom
+	case generalFieldPickerWidth:
+		return fieldPickerWidth
+	case generalFieldIDE:
+		return fieldIDE
+	case generalFieldTemplateConflict:
+		return fieldTemplateConflict
+	case generalFieldWorktreeBasePath:
+		return fieldWorktreeBasePath
+	default:
+		return ""
+	}
+}
+
+func (m *SettingsModel) generalInheritedValue(fieldIdx int) string {
+	switch fieldIdx {
+	case generalFieldProvider:
+		return m.userCfg.DefaultProvider
+	case generalFieldTracker:
+		return m.userCfg.DefaultTracker
+	case generalFieldAutoZoom:
+		if m.userCfg.IsAutoZoomEnabled() {
+			return "on"
+		}
+		return "off"
+	case generalFieldPickerWidth:
+		return fmt.Sprintf("%d%%", m.userCfg.GetPickerWidth())
+	case generalFieldIDE:
+		if m.userCfg.DefaultIDE != "" {
+			return m.userCfg.DefaultIDE
+		}
+		return ideNoneLabel
+	case generalFieldTemplateConflict:
+		return m.userCfg.TemplateConflictPolicy()
+	case generalFieldWorktreeBasePath:
+		return m.userCfg.WorktreeBasePath
+	default:
+		return ""
+	}
 }
 
 // trackerFieldStateMarker returns a state marker for a tracker/plugin field
@@ -413,7 +422,7 @@ func (m *SettingsModel) trackerFieldStateMarker(entryName, key, currentValue str
 		return ""
 	}
 	if currentValue != "" {
-		return lipgloss.NewStyle().Foreground(primaryColor).Render("  ● project")
+		return lipgloss.NewStyle().Foreground(primaryColor).Render("  ● local")
 	}
 	userVal := ""
 	if fields, ok := m.userCfg.Trackers[entryName]; ok {
@@ -426,7 +435,7 @@ func (m *SettingsModel) trackerFieldStateMarker(entryName, key, currentValue str
 			visible := userVal[max(0, len(userVal)-4):]
 			display = strings.Repeat("*", min(len(userVal), 8)) + visible
 		}
-		suffix += " (user: " + display + ")"
+		suffix += " (global: " + display + ")"
 	} else {
 		suffix += " (unset)"
 	}
@@ -449,50 +458,56 @@ func (m *SettingsModel) currentCfg() *config.Config {
 
 func (m *SettingsModel) rebuildItems() {
 	m.items = nil
+	isLocal := m.currentScope() == config.ScopeProject
+	showWorktree := isLocal && worktree.IsRepoMode(m.rootPath)
 
 	// Scope selector
 	m.items = append(m.items, flatItem{kind: "scope", section: -1, fieldIdx: -1})
 
 	// General: default provider
 	if len(m.providerNames) > 0 {
-		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 0})
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldProvider})
 	}
 	if len(m.trackerNames) > 0 {
-		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 1})
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldTracker})
 	}
 	// Default IDE — (none) at index 0 disables the default and always
 	// shows the selector on Ctrl+e.
 	if len(m.ideNames) > 1 {
-		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 4})
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldIDE})
 	}
-	// Auto zoom toggle
-	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 2})
-	// Picker width (free-form number input)
-	m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: 3})
+	if !isLocal {
+		// Auto zoom and picker width are global-only UI settings.
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldAutoZoom})
+		m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: generalFieldPickerWidth})
+	}
 
-	// Worktree section
-	m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: 5})
-	m.items = append(m.items, flatItem{kind: "text", section: -1, fieldIdx: 7})
-	m.items = append(m.items, flatItem{kind: "action", section: -1, fieldIdx: 6})
+	if showWorktree {
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldTemplateConflict})
+		m.items = append(m.items, flatItem{kind: "text", section: -1, fieldIdx: generalFieldWorktreeBasePath})
+		m.items = append(m.items, flatItem{kind: "action", section: -1, fieldIdx: generalFieldOpenTemplatesDir})
+	}
 
-	// Plugin fields
-	for ei, e := range m.entries {
-		for fi := range e.fields {
-			m.items = append(m.items, flatItem{kind: "text", section: ei, fieldIdx: fi})
+	if !isLocal {
+		// Plugin fields and IDE launcher definitions are global-only.
+		for ei, e := range m.entries {
+			for fi := range e.fields {
+				m.items = append(m.items, flatItem{kind: "text", section: ei, fieldIdx: fi})
+			}
 		}
-	}
 
-	// IDE entries. Each custom entry exposes all three fields (name,
-	// command, args); built-ins hide the name field since renaming a
-	// builtin would just create a phantom entry on save.
-	for i, e := range m.ideEntries {
-		if !e.IsBuiltin {
-			m.items = append(m.items, flatItem{kind: "ide-name", section: i})
+		// IDE entries. Each custom entry exposes all three fields (name,
+		// command, args); built-ins hide the name field since renaming a
+		// builtin would just create a phantom entry on save.
+		for i, e := range m.ideEntries {
+			if !e.IsBuiltin {
+				m.items = append(m.items, flatItem{kind: "ide-name", section: i})
+			}
+			m.items = append(m.items, flatItem{kind: "ide-cmd", section: i})
+			m.items = append(m.items, flatItem{kind: "ide-args", section: i})
 		}
-		m.items = append(m.items, flatItem{kind: "ide-cmd", section: i})
-		m.items = append(m.items, flatItem{kind: "ide-args", section: i})
+		m.items = append(m.items, flatItem{kind: "ide-add"})
 	}
-	m.items = append(m.items, flatItem{kind: "ide-add"})
 }
 
 // builtinValuesFromCfg returns the current scope's values for a built-in entry.
@@ -633,32 +648,36 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.entries[i].values = m.builtinValuesFromCfg(m.entries[i].entry)
 					}
 				}
+				m.rebuildItems()
+				if m.cursor >= len(m.items) {
+					m.cursor = max(0, len(m.items)-1)
+				}
 			} else if item.kind == "select" && item.section == -1 {
-				if item.fieldIdx == 0 && len(m.providerNames) > 0 {
+				if item.fieldIdx == generalFieldProvider && len(m.providerNames) > 0 {
 					if key == "right" {
 						m.selectedProvider = (m.selectedProvider + 1) % len(m.providerNames)
 					} else {
 						m.selectedProvider = (m.selectedProvider - 1 + len(m.providerNames)) % len(m.providerNames)
 					}
-				} else if item.fieldIdx == 1 && len(m.trackerNames) > 0 {
+				} else if item.fieldIdx == generalFieldTracker && len(m.trackerNames) > 0 {
 					if key == "right" {
 						m.selectedTracker = (m.selectedTracker + 1) % len(m.trackerNames)
 					} else {
 						m.selectedTracker = (m.selectedTracker - 1 + len(m.trackerNames)) % len(m.trackerNames)
 					}
-				} else if item.fieldIdx == 2 {
+				} else if item.fieldIdx == generalFieldAutoZoom {
 					if key == "right" {
 						m.autoZoomIdx = (m.autoZoomIdx + 1) % len(autoZoomOptions)
 					} else {
 						m.autoZoomIdx = (m.autoZoomIdx - 1 + len(autoZoomOptions)) % len(autoZoomOptions)
 					}
-				} else if item.fieldIdx == 4 && len(m.ideNames) > 0 {
+				} else if item.fieldIdx == generalFieldIDE && len(m.ideNames) > 0 {
 					if key == "right" {
 						m.selectedIDE = (m.selectedIDE + 1) % len(m.ideNames)
 					} else {
 						m.selectedIDE = (m.selectedIDE - 1 + len(m.ideNames)) % len(m.ideNames)
 					}
-				} else if item.fieldIdx == 5 {
+				} else if item.fieldIdx == generalFieldTemplateConflict {
 					if key == "right" {
 						m.templateConflictIdx = (m.templateConflictIdx + 1) % len(templateConflictOptions)
 					} else {
@@ -666,7 +685,7 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.markGeneralOverride(item.fieldIdx)
-			} else if item.kind == "number" && item.section == -1 && item.fieldIdx == 3 {
+			} else if item.kind == "number" && item.section == -1 && item.fieldIdx == generalFieldPickerWidth {
 				// ←/→ step picker width by 1, clamped
 				delta := 1
 				if key == "left" {
@@ -691,9 +710,9 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Enter on an "action" row invokes that action instead of saving.
 		if m.cursor < len(m.items) && m.items[m.cursor].kind == "action" {
 			item := m.items[m.cursor]
-			if item.section == -1 && item.fieldIdx == 6 {
+			if item.section == -1 && item.fieldIdx == generalFieldOpenTemplatesDir {
 				m.err = ""
-				if _, err := worktree.OpenTemplatesDir(m.rootPath); err != nil {
+				if _, err := worktree.OpenTemplatesDir(config.ProjectRoot(m.rootPath)); err != nil {
 					m.err = fmt.Sprintf("open templates dir failed: %v", err)
 				}
 			}
@@ -751,21 +770,8 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		item := m.items[m.cursor]
 		if item.section == -1 && (item.kind == "select" || item.kind == "number") {
-			switch item.fieldIdx {
-			case 0:
-				m.projectOverrides[fieldProvider] = false
-			case 1:
-				m.projectOverrides[fieldTracker] = false
-			case 2:
-				m.projectOverrides[fieldAutoZoom] = false
-			case 3:
-				m.projectOverrides[fieldPickerWidth] = false
-			case 4:
-				m.projectOverrides[fieldIDE] = false
-			case 5:
-				m.projectOverrides[fieldTemplateConflict] = false
-			case 7:
-				m.projectOverrides[fieldWorktreeBasePath] = false
+			if key := generalFieldKey(item.fieldIdx); key != "" {
+				m.projectOverrides[key] = false
 			}
 			m.loadGeneralFromScope()
 		} else if item.kind == "text" {
@@ -853,7 +859,7 @@ func (m SettingsModel) save() tea.Cmd {
 	// was called each time we switched away from it.)
 	m.persistGeneralToScope()
 
-	// IDEs are always user-scoped in the settings UI — project-scope
+	// IDEs are always global-scoped in the settings UI — target-local
 	// per-IDE overrides aren't worth the complexity right now.
 	saveIDEEntries(m.userCfg, m.ideEntries)
 
@@ -887,6 +893,8 @@ func (m SettingsModel) save() tea.Cmd {
 
 func (m SettingsModel) View() string {
 	title := renderDialogTitle("Settings", primaryColor)
+	isLocal := m.currentScope() == config.ScopeProject
+	showWorktree := isLocal && worktree.IsRepoMode(m.rootPath)
 
 	itemIdx := 0
 	var sections []string
@@ -896,7 +904,7 @@ func (m SettingsModel) View() string {
 	itemIdx++
 	sections = append(sections, "")
 
-	// General section (always shown — auto_zoom is always present)
+	// General section
 	{
 		header := lipgloss.NewStyle().Padding(0, 2).Render(
 			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("General"),
@@ -904,97 +912,101 @@ func (m SettingsModel) View() string {
 		sections = append(sections, header)
 
 		if len(m.providerNames) > 0 {
-			sections = append(sections, m.renderSelectField(itemIdx, "Default Provider", m.providerNames, m.selectedProvider)+m.generalStateMarker(0))
+			sections = append(sections, m.renderSelectField(itemIdx, "Default Provider", m.providerNames, m.selectedProvider)+m.generalStateMarker(generalFieldProvider))
 			itemIdx++
 		}
 		if len(m.trackerNames) > 0 {
-			sections = append(sections, m.renderSelectField(itemIdx, "Default Tracker", m.trackerNames, m.selectedTracker)+m.generalStateMarker(1))
+			sections = append(sections, m.renderSelectField(itemIdx, "Default Tracker", m.trackerNames, m.selectedTracker)+m.generalStateMarker(generalFieldTracker))
 			itemIdx++
 		}
 		if len(m.ideNames) > 1 {
-			sections = append(sections, m.renderSelectField(itemIdx, "Default IDE", m.ideNames, m.selectedIDE)+m.generalStateMarker(4))
+			sections = append(sections, m.renderSelectField(itemIdx, "Default IDE", m.ideNames, m.selectedIDE)+m.generalStateMarker(generalFieldIDE))
 			itemIdx++
 		}
-		sections = append(sections, m.renderSelectField(itemIdx, "Auto Zoom", autoZoomOptions, m.autoZoomIdx)+m.generalStateMarker(2))
-		itemIdx++
-		sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%")+m.generalStateMarker(3))
-		itemIdx++
+		if !isLocal {
+			sections = append(sections, m.renderSelectField(itemIdx, "Hide Picker On Open", autoZoomOptions, m.autoZoomIdx))
+			itemIdx++
+			sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%"))
+			itemIdx++
+		}
 		sections = append(sections, "")
 	}
 
 	// Worktree section
-	{
+	if showWorktree {
 		header := lipgloss.NewStyle().Padding(0, 2).Render(
 			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("Worktree"),
 		)
 		sections = append(sections, header)
 
-		sections = append(sections, m.renderSelectField(itemIdx, "Template on Conflict", templateConflictOptions, m.templateConflictIdx)+m.generalStateMarker(5))
+		sections = append(sections, m.renderSelectField(itemIdx, "Template on Conflict", templateConflictOptions, m.templateConflictIdx)+m.generalStateMarker(generalFieldTemplateConflict))
 		itemIdx++
-		sections = append(sections, m.renderTextField(itemIdx, "Worktree Base Path", m.worktreeBasePathStr, "default: ~/worktrees/{repo} — use {repo} to group by repo name")+m.generalStateMarker(7))
+		sections = append(sections, m.renderTextField(itemIdx, "Worktree Base Path", m.worktreeBasePathStr, "default: ~/worktrees/{repo} — use {repo} to group by repo name")+m.generalStateMarker(generalFieldWorktreeBasePath))
 		itemIdx++
-		sections = append(sections, m.renderActionField(itemIdx, "Open templates directory", worktree.TemplatesRoot(m.rootPath)))
+		sections = append(sections, m.renderActionField(itemIdx, "Open templates directory", worktree.TemplatesRoot(config.ProjectRoot(m.rootPath))))
 		itemIdx++
 		sections = append(sections, "")
 	}
 
 	// Plugin/built-in sections
-	for _, e := range m.entries {
-		if len(e.fields) == 0 {
-			continue
-		}
-
-		category := lipgloss.NewStyle().Foreground(dimColor).Render(e.entry.Category)
-		header := lipgloss.NewStyle().Padding(0, 2).Render(
-			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render(e.entry.Name) + " " + category,
-		)
-		sections = append(sections, header)
-
-		labelWidth := 0
-		for _, f := range e.fields {
-			if len(f.Label) > labelWidth {
-				labelWidth = len(f.Label)
+	if !isLocal {
+		for _, e := range m.entries {
+			if len(e.fields) == 0 {
+				continue
 			}
-		}
 
-		for _, f := range e.fields {
-			isCursor := itemIdx == m.cursor
-			padding := strings.Repeat(" ", labelWidth-len(f.Label))
-			indicator, labelStyle := fieldRowCursor(isCursor)
+			category := lipgloss.NewStyle().Foreground(dimColor).Render(e.entry.Category)
+			header := lipgloss.NewStyle().Padding(0, 2).Render(
+				lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render(e.entry.Name) + " " + category,
+			)
+			sections = append(sections, header)
 
-			value := e.values[f.Key]
-			valueStr := value
-			if f.Secret && len(value) > 0 && !isCursor {
-				visible := value[max(0, len(value)-4):]
-				valueStr = strings.Repeat("*", min(len(value), 8)) + visible
-			}
-			if isCursor {
-				valueStr += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
-			}
-			if value == "" && !isCursor {
-				if f.Placeholder != "" {
-					valueStr = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(" + f.Placeholder + ")")
-				} else {
-					valueStr = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("-")
+			labelWidth := 0
+			for _, f := range e.fields {
+				if len(f.Label) > labelWidth {
+					labelWidth = len(f.Label)
 				}
 			}
 
-			row := "  " + indicator + labelStyle.Render(padding+f.Label+": ") + valueStr
-			row += m.trackerFieldStateMarker(e.entry.Name, f.Key, value, f.Secret)
-			sections = append(sections, row)
-			itemIdx++
+			for _, f := range e.fields {
+				isCursor := itemIdx == m.cursor
+				padding := strings.Repeat(" ", labelWidth-len(f.Label))
+				indicator, labelStyle := fieldRowCursor(isCursor)
+
+				value := e.values[f.Key]
+				valueStr := value
+				if f.Secret && len(value) > 0 && !isCursor {
+					visible := value[max(0, len(value)-4):]
+					valueStr = strings.Repeat("*", min(len(value), 8)) + visible
+				}
+				if isCursor {
+					valueStr += lipgloss.NewStyle().Foreground(primaryColor).Render("▎")
+				}
+				if value == "" && !isCursor {
+					if f.Placeholder != "" {
+						valueStr = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(" + f.Placeholder + ")")
+					} else {
+						valueStr = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("-")
+					}
+				}
+
+				row := "  " + indicator + labelStyle.Render(padding+f.Label+": ") + valueStr
+				row += m.trackerFieldStateMarker(e.entry.Name, f.Key, value, f.Secret)
+				sections = append(sections, row)
+				itemIdx++
+			}
+			sections = append(sections, "")
 		}
-		sections = append(sections, "")
 	}
 
 	// IDEs section — editable list of command/args, plus a trailing
 	// "+ Add IDE" row. Built-ins show (builtin) tag; new (unsaved)
 	// entries show (new). Deleting a custom entry is Ctrl+X; on a
 	// built-in Ctrl+X restores the default command/args.
-	{
+	if !isLocal {
 		header := lipgloss.NewStyle().Padding(0, 2).Render(
 			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("IDEs") + " " +
-				lipgloss.NewStyle().Foreground(dimColor).Render("(user scope)"),
+				lipgloss.NewStyle().Foreground(dimColor).Render("(global scope)"),
 		)
 		sections = append(sections, header)
 
@@ -1092,7 +1104,7 @@ func (m *SettingsModel) generalTextPtr(item flatItem) *string {
 		return nil
 	}
 	switch item.fieldIdx {
-	case 7:
+	case generalFieldWorktreeBasePath:
 		return &m.worktreeBasePathStr
 	}
 	return nil

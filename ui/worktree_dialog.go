@@ -567,7 +567,7 @@ func applyTemplateBestEffort(rootPath, repoName, targetPath string) (int, []stri
 		cfg = config.DefaultConfig()
 	}
 	policy := worktree.ConflictPolicy(cfg.TemplateConflictPolicy())
-	res, err := worktree.ApplyTemplate(rootPath, repoName, targetPath, policy)
+	res, err := worktree.ApplyTemplate(config.ProjectRoot(rootPath), repoName, targetPath, policy)
 	warnings := res.Warnings
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("template copy error: %v", err))
@@ -608,6 +608,7 @@ func (m WorktreeRunnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// options. The picker reads these when it handles worktreeExitedMsg.
 		// Errors from tmux calls are intentionally ignored — template copy
 		// feedback is best-effort.
+		_ = asmtmux.SetSessionOption("asm-created-worktree-path", msg.Path)
 		_ = asmtmux.SetSessionOption("asm-worktree-copied", fmt.Sprintf("%d", msg.TemplateCopied))
 		_ = asmtmux.SetSessionOption("asm-worktree-warnings", strings.Join(msg.TemplateWarnings, "\n"))
 		return m, tea.Quit
