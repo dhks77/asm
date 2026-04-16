@@ -6,6 +6,7 @@ package ide
 import (
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 // IDE is a single launcher entry.
@@ -99,8 +100,36 @@ func Find(ides []IDE, name string) *IDE {
 // process keeps running after asm exits; the IDE's own windowing
 // handles focus.
 func (i IDE) Open(path string) error {
+	command, args := i.launchCommand(path)
+	cmd := exec.Command(command, args...)
+	return cmd.Start()
+}
+
+func (i IDE) launchCommand(path string) (string, []string) {
+	// On macOS, `open -a "IntelliJ IDEA" <path>` can simply refocus an
+	// existing window without actually opening the new project path. For
+	// IntelliJ, force a fresh app launch and pass the target as argv via
+	// `--args`, which reliably hands the path to the app.
+	if runtime.GOOS == "darwin" && i.Name == "intellij" && i.Command == "open" {
+		if appName, ok := openAppName(i.Args); ok {
+			return "open", []string{"-n", "-a", appName, "--args", path}
+		}
+	}
+
 	args := append([]string(nil), i.Args...)
 	args = append(args, path)
-	cmd := exec.Command(i.Command, args...)
-	return cmd.Start()
+	return i.Command, args
+}
+
+func openAppName(args []string) (string, bool) {
+	for idx := 0; idx+1 < len(args); idx++ {
+		if args[idx] == "-a" {
+			name := strings.TrimSpace(args[idx+1])
+			if name != "" {
+				return name, true
+			}
+			return "", false
+		}
+	}
+	return "", false
 }

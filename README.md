@@ -3,12 +3,9 @@
 tmux 기반 멀티 AI 세션 매니저. Claude Code, Codex 같은 AI CLI 세션과
 보조 터미널을 하나의 TUI 안에서 관리한다.
 
-현재 asm의 모델은 예전과 다르다.
-
-- picker는 더 이상 "디렉토리 브라우저"가 아니다
-- picker는 **지금 열려 있는 세션 목록**만 보여준다
-- 새 target을 여는 일은 `Ctrl+N` launcher가 맡는다
-- `--path` 는 단일 browse root가 아니라 **초기 진입 위치 힌트**에 가깝다
+- picker는 **지금 열려 있는 세션 목록**을 보여준다
+- 새 target은 `Ctrl+N` launcher에서 연다
+- `--path` 는 시작 컨텍스트와 asm session identity 기준으로 사용된다
 
 ## At A Glance
 
@@ -82,13 +79,11 @@ asm --path ~/projects
 asm --path ~/sandbox/billing-api
 ```
 
-`--path` 의 현재 의미:
+`--path` 는 다음에 사용된다:
 
 - launcher / settings 의 초기 컨텍스트
 - top-level asm tmux session name derivation 기준
 - project-local config 해석 기준점
-
-즉 예전처럼 "여기 아래만 탐색하는 browse root" 로 고정되지 않는다.
 
 `--path` 를 생략하면 `default_path` → 현재 작업 디렉토리 순으로 폴백한다.
 
