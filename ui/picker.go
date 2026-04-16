@@ -1859,19 +1859,33 @@ func (m *PickerModel) selectedDirectory() *worktree.Worktree {
 	return &m.directories[filtered[m.cursor]]
 }
 
-// contextDirectory returns the target currently displayed in working panel,
-// falling back to the cursor selection.
-func (m *PickerModel) contextDirectory() *worktree.Worktree {
+func (m *PickerModel) frontDirectory() *worktree.Worktree {
 	wtPath := m.workingPath
 	if wtPath == "" {
 		wtPath = m.termPath
 	}
-	if wtPath != "" {
-		for i := range m.directories {
-			if m.directories[i].Path == wtPath {
-				return &m.directories[i]
-			}
+	if wtPath == "" {
+		return nil
+	}
+	for i := range m.directories {
+		if m.directories[i].Path == wtPath {
+			return &m.directories[i]
 		}
+	}
+	return nil
+}
+
+// contextDirectory resolves the target for context-sensitive actions.
+// When the picker pane is focused, the cursor selection wins. When the
+// working pane is focused, the currently fronted target wins.
+func (m *PickerModel) contextDirectory() *worktree.Worktree {
+	if m.focused {
+		if wt := m.selectedDirectory(); wt != nil {
+			return wt
+		}
+	}
+	if wt := m.frontDirectory(); wt != nil {
+		return wt
 	}
 	return m.selectedDirectory()
 }

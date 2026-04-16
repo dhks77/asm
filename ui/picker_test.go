@@ -167,3 +167,43 @@ func TestEnsureDirectoryTrackedSeedsRepoMetadata(t *testing.T) {
 		t.Fatalf("repoColors should be populated for %q", "tc-dcm")
 	}
 }
+
+func TestContextDirectoryUsesCursorWhenPickerFocused(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{
+			{Name: "repo-a", Path: "/tmp/repo-a"},
+			{Name: "repo-b", Path: "/tmp/repo-b"},
+		},
+		branches:      map[string]string{},
+		taskInfos:     map[string]tracker.TaskInfo{},
+		selectedItems: map[string]bool{},
+		cursor:        1,
+		focused:       true,
+		workingPath:   "/tmp/repo-a",
+	}
+
+	got := m.contextDirectory()
+	if got == nil || got.Path != "/tmp/repo-b" {
+		t.Fatalf("contextDirectory() = %#v, want path %q", got, "/tmp/repo-b")
+	}
+}
+
+func TestContextDirectoryUsesFrontTargetWhenPickerBlurred(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{
+			{Name: "repo-a", Path: "/tmp/repo-a"},
+			{Name: "repo-b", Path: "/tmp/repo-b"},
+		},
+		branches:      map[string]string{},
+		taskInfos:     map[string]tracker.TaskInfo{},
+		selectedItems: map[string]bool{},
+		cursor:        1,
+		focused:       false,
+		workingPath:   "/tmp/repo-a",
+	}
+
+	got := m.contextDirectory()
+	if got == nil || got.Path != "/tmp/repo-a" {
+		t.Fatalf("contextDirectory() = %#v, want path %q", got, "/tmp/repo-a")
+	}
+}
