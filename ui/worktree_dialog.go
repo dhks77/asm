@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,12 +51,19 @@ type WorktreeErrorMsg struct {
 }
 
 type wtTaskResolvedMsg struct {
-	Branch string
-	Info   tracker.TaskInfo
+	RepoDir string
+	Branch  string
+	Info    tracker.TaskInfo
 }
 
 type wtTaskRetryTickMsg struct {
 	remaining int
+}
+
+type worktreeRepoChoice struct {
+	Path string
+	Root string
+	Name string
 }
 
 // WorktreeDialogModel handles branch selection and worktree creation.
@@ -72,15 +80,17 @@ type WorktreeDialogModel struct {
 	newBranchName string
 	baseBranch    string
 
-	rootPath  string
-	dirPath   string
-	repoDir   string
-	repoName  string
-	tracker   tracker.Tracker
-	taskInfos map[string]tracker.TaskInfo // branch name -> task info
-	width     int
-	height    int
-	err       string
+	rootPath    string
+	dirPath     string
+	repoDir     string
+	repoName    string
+	repoChoices []worktreeRepoChoice
+	repoIndex   int
+	tracker     tracker.Tracker
+	taskInfos   map[string]tracker.TaskInfo // branch name -> task info
+	width       int
+	height      int
+	err         string
 }
 
 func NewWorktreeDialogModel(t tracker.Tracker) WorktreeDialogModel {
@@ -101,41 +111,13 @@ func (m *WorktreeDialogModel) Show(rootPath, dirPath string) tea.Cmd {
 	m.baseBranch = ""
 	m.rootPath = rootPath
 	m.dirPath = dirPath
+	m.repoChoices = worktreeRepoChoices(dirPath)
+	m.repoIndex = currentRepoIndex(m.repoChoices, dirPath)
 	m.err = ""
 	m.branches = nil
 	m.filtered = nil
 
-	t := m.tracker
-	return func() tea.Msg {
-		// Refresh remotes before listing so newly-pushed branches appear
-		// without the user having to fetch in a shell first. Best-effort:
-		// offline / auth failure / slow remote shouldn't block opening
-		// the dialog — we fall through to the cached branch list.
-		_ = worktree.FetchAllRemotes(dirPath)
-		branches, err := worktree.ListBranches(dirPath)
-		if err != nil {
-			return BranchesLoadedMsg{Err: err}
-		}
-		repoName := worktree.RepoName(dirPath)
-		// Peek the persistent cache for all branches up front so the first
-		// render already has the known task names. Only branches missing
-		// from the cache will need async API lookups.
-		var cached map[string]tracker.TaskInfo
-		if peeker, ok := t.(tracker.Peeker); ok {
-			cached = make(map[string]tracker.TaskInfo, len(branches))
-			for _, b := range branches {
-				if info, ok := peeker.Peek(b.Name); ok {
-					cached[b.Name] = info
-				}
-			}
-		}
-		return BranchesLoadedMsg{
-			Branches:    branches,
-			RepoDir:     dirPath,
-			RepoName:    repoName,
-			CachedTasks: cached,
-		}
-	}
+	return m.loadBranches(dirPath)
 }
 
 func (m *WorktreeDialogModel) Hide() {
@@ -206,6 +188,129 @@ func (m *WorktreeDialogModel) applyFilter() {
 	m.adjustScrollOffset()
 }
 
+func worktreeRepoChoices(currentPath string) []worktreeRepoChoice {
+	type keyedChoice struct {
+		root   string
+		choice worktreeRepoChoice
+	}
+
+	seen := make(map[string]worktreeRepoChoice)
+	addChoice := func(path string) {
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		root, name := config.ProjectIdentity(clean)
+		if root == "" || root == "." {
+			root = clean
+		}
+		if name == "" || name == "." {
+			name = filepath.Base(clean)
+		}
+		if existing, ok := seen[root]; ok {
+			if clean == filepath.Clean(currentPath) {
+				existing.Path = clean
+				seen[root] = existing
+			}
+			return
+		}
+		seen[root] = worktreeRepoChoice{
+			Path: clean,
+			Root: root,
+			Name: name,
+		}
+	}
+
+	addChoice(currentPath)
+	for path := range asmtmux.ListActiveSessions() {
+		addChoice(path)
+	}
+
+	choices := make([]worktreeRepoChoice, 0, len(seen))
+	for _, choice := range seen {
+		choices = append(choices, choice)
+	}
+	sort.Slice(choices, func(i, j int) bool {
+		left := strings.ToLower(choices[i].Name)
+		right := strings.ToLower(choices[j].Name)
+		if left != right {
+			return left < right
+		}
+		return choices[i].Root < choices[j].Root
+	})
+	return choices
+}
+
+func currentRepoIndex(choices []worktreeRepoChoice, currentPath string) int {
+	currentRoot, _ := config.ProjectIdentity(filepath.Clean(currentPath))
+	if currentRoot == "" || currentRoot == "." {
+		currentRoot = filepath.Clean(currentPath)
+	}
+	for i, choice := range choices {
+		if choice.Root == currentRoot {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m *WorktreeDialogModel) loadBranches(dirPath string) tea.Cmd {
+	t := m.tracker
+	return func() tea.Msg {
+		// Refresh remotes before listing so newly-pushed branches appear
+		// without the user having to fetch in a shell first. Best-effort:
+		// offline / auth failure / slow remote shouldn't block opening
+		// the dialog — we fall through to the cached branch list.
+		_ = worktree.FetchAllRemotes(dirPath)
+		branches, err := worktree.ListBranches(dirPath)
+		if err != nil {
+			return BranchesLoadedMsg{Err: err}
+		}
+		repoName := worktree.RepoName(dirPath)
+		if repoName == "" {
+			_, repoName = config.ProjectIdentity(dirPath)
+		}
+		var cached map[string]tracker.TaskInfo
+		if peeker, ok := t.(tracker.Peeker); ok {
+			cached = make(map[string]tracker.TaskInfo, len(branches))
+			for _, b := range branches {
+				if info, ok := peeker.Peek(b.Name); ok {
+					cached[b.Name] = info
+				}
+			}
+		}
+		return BranchesLoadedMsg{
+			Branches:    branches,
+			RepoDir:     dirPath,
+			RepoName:    repoName,
+			CachedTasks: cached,
+		}
+	}
+}
+
+func (m *WorktreeDialogModel) switchRepo(delta int) tea.Cmd {
+	if len(m.repoChoices) <= 1 {
+		return nil
+	}
+	m.repoIndex = (m.repoIndex + delta + len(m.repoChoices)) % len(m.repoChoices)
+	choice := m.repoChoices[m.repoIndex]
+	m.mode = wtModeSelectBranch
+	m.filter = ""
+	m.cursor = 0
+	m.scrollOffset = 0
+	m.newBranchName = ""
+	m.baseBranch = ""
+	m.rootPath = choice.Path
+	m.dirPath = choice.Path
+	m.repoDir = choice.Path
+	m.repoName = choice.Name
+	m.err = ""
+	m.branches = nil
+	m.filtered = nil
+	m.taskInfos = make(map[string]tracker.TaskInfo)
+	return m.loadBranches(choice.Path)
+}
+
 func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) {
 	if !m.visible {
 		return m, nil
@@ -213,6 +318,9 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 
 	switch msg := msg.(type) {
 	case BranchesLoadedMsg:
+		if m.dirPath != "" && msg.RepoDir != "" && filepath.Clean(msg.RepoDir) != filepath.Clean(m.dirPath) {
+			return m, nil
+		}
 		if msg.Err != nil {
 			m.err = msg.Err.Error()
 			return m, nil
@@ -233,7 +341,7 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 				if _, ok := m.taskInfos[b.Name]; ok {
 					continue
 				}
-				cmds = append(cmds, m.fetchTaskName(b.Name))
+				cmds = append(cmds, m.fetchTaskName(m.repoDir, b.Name))
 			}
 			cmds = append(cmds, wtTaskRetryTickCmd(5))
 			return m, tea.Batch(cmds...)
@@ -241,6 +349,9 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 		return m, nil
 
 	case wtTaskResolvedMsg:
+		if m.repoDir != "" && msg.RepoDir != "" && filepath.Clean(msg.RepoDir) != filepath.Clean(m.repoDir) {
+			return m, nil
+		}
 		if msg.Info.Name != "" {
 			m.taskInfos[msg.Branch] = msg.Info
 			// Propagate to branches sharing the same base name (e.g., origin/feature/X → feature/X)
@@ -270,7 +381,7 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 						continue
 					}
 				}
-				cmds = append(cmds, m.fetchTaskName(b.Name))
+				cmds = append(cmds, m.fetchTaskName(m.repoDir, b.Name))
 			}
 		}
 		if len(cmds) > 0 {
@@ -331,6 +442,9 @@ func (m WorktreeDialogModel) handleSelectBranchKey(msg tea.KeyMsg) (WorktreeDial
 		return m, createWorktreeFromBranchCmd(repoDir, rootPath, repoName, selected.Name)
 
 	case "tab":
+		return m, m.switchRepo(+1)
+
+	case "ctrl+n", "ctrl+shift+n", "f10":
 		m.mode = wtModeSelectBase
 		m.filter = ""
 		m.cursor = 0
@@ -373,6 +487,9 @@ func (m WorktreeDialogModel) handleSelectBaseKey(msg tea.KeyMsg) (WorktreeDialog
 		m.cursor = 0
 		m.scrollOffset = 0
 		m.applyFilter()
+
+	case "tab":
+		return m, m.switchRepo(+1)
 
 	case "up":
 		if m.cursor > 0 {
@@ -426,6 +543,9 @@ func (m WorktreeDialogModel) handleNewBranchKey(msg tea.KeyMsg) (WorktreeDialogM
 		m.mode = wtModeSelectBranch
 		m.newBranchName = ""
 
+	case "tab":
+		return m, m.switchRepo(+1)
+
 	case "enter":
 		name := strings.TrimSpace(m.newBranchName)
 		if name == "" {
@@ -464,11 +584,11 @@ func wtTaskRetryTickCmd(remaining int) tea.Cmd {
 	})
 }
 
-func (m WorktreeDialogModel) fetchTaskName(branch string) tea.Cmd {
+func (m WorktreeDialogModel) fetchTaskName(repoDir, branch string) tea.Cmd {
 	t := m.tracker
 	return func() tea.Msg {
 		info := t.Resolve(branch)
-		return wtTaskResolvedMsg{Branch: branch, Info: info}
+		return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch, Info: info}
 	}
 }
 
@@ -664,6 +784,9 @@ func (m WorktreeDialogModel) repoLine() string {
 	if name == "" {
 		name = filepath.Base(m.dirPath)
 	}
+	if len(m.repoChoices) > 1 {
+		name = fmt.Sprintf("%s (%d/%d)", name, m.repoIndex+1, len(m.repoChoices))
+	}
 	return lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).Render("repo: ") +
 		lipgloss.NewStyle().Foreground(secondaryColor).Render(name)
 }
@@ -749,7 +872,7 @@ func (m WorktreeDialogModel) viewSelectBranch() string {
 	}
 
 	return m.renderFullScreen("Create Worktree", "", m.filter, rows,
-		"↑↓: navigate  Enter: checkout  Tab: new branch  Esc: cancel")
+		"↑↓: navigate  Tab: repo  Enter: checkout  ^n: new branch  Esc: cancel")
 }
 
 func (m WorktreeDialogModel) viewSelectBase() string {
@@ -801,7 +924,7 @@ func (m WorktreeDialogModel) viewSelectBase() string {
 	return m.renderFullScreen("New Branch",
 		"Select a base branch to create a new branch from",
 		m.filter, rows,
-		"↑↓: navigate  Enter: select base  Esc: back")
+		"↑↓: navigate  Tab: repo  Enter: select base  Esc: back")
 }
 
 func (m WorktreeDialogModel) viewNewBranch() string {
@@ -824,6 +947,6 @@ func (m WorktreeDialogModel) viewNewBranch() string {
 		titleStr+"\n"+repo+"\n\n"+baseLine+"\n\n"+nameInput,
 		m.height-3,
 	)
-	statusBar := renderDialogHintBar(m.width, " Enter: create  Esc: back")
+	statusBar := renderDialogHintBar(m.width, " Tab: repo  Enter: create  Esc: back")
 	return content + "\n" + statusBar
 }

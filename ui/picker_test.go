@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	asmtmux "github.com/nhn/asm/tmux"
@@ -59,6 +60,12 @@ func TestPickerFilteredDirectoriesGroupsByRepo(t *testing.T) {
 			{Name: "accounts-b", Path: "/tmp/accounts/b"},
 		},
 		repoRoots: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+			"/tmp/accounts/b": "accounts",
+		},
+		repoLabels: map[string]string{
 			"/tmp/billing/a":  "billing",
 			"/tmp/accounts/a": "accounts",
 			"/tmp/billing/b":  "billing",
@@ -151,6 +158,7 @@ func TestEnsureDirectoryTrackedSeedsRepoMetadata(t *testing.T) {
 	m := PickerModel{
 		branches:       map[string]string{},
 		repoRoots:      map[string]string{},
+		repoLabels:     map[string]string{},
 		repoColors:     map[string]string{},
 		queuedBranches: map[string]bool{},
 		branchVerified: map[string]bool{},
@@ -160,8 +168,11 @@ func TestEnsureDirectoryTrackedSeedsRepoMetadata(t *testing.T) {
 	if wt == nil {
 		t.Fatalf("ensureDirectoryTracked returned nil")
 	}
-	if got := m.repoRoots[repoPath]; got != "tc-dcm" {
-		t.Fatalf("repoRoots[%q] = %q, want %q", repoPath, got, "tc-dcm")
+	if got := m.repoRoots[repoPath]; got != repoPath {
+		t.Fatalf("repoRoots[%q] = %q, want %q", repoPath, got, repoPath)
+	}
+	if got := m.repoLabels[repoPath]; got != "tc-dcm" {
+		t.Fatalf("repoLabels[%q] = %q, want %q", repoPath, got, "tc-dcm")
 	}
 	if got := m.repoColors["tc-dcm"]; got == "" {
 		t.Fatalf("repoColors should be populated for %q", "tc-dcm")
@@ -205,5 +216,60 @@ func TestContextDirectoryUsesFrontTargetWhenPickerBlurred(t *testing.T) {
 	got := m.contextDirectory()
 	if got == nil || got.Path != "/tmp/repo-a" {
 		t.Fatalf("contextDirectory() = %#v, want path %q", got, "/tmp/repo-a")
+	}
+}
+
+type fakePickerTracker struct{}
+
+func (fakePickerTracker) Name() string { return "fake" }
+
+func (fakePickerTracker) Resolve(branch string) tracker.TaskInfo {
+	return tracker.TaskInfo{Name: "resolved:" + branch}
+}
+
+func TestHandleBranchResolvedReusesCachedBranchInfoOnPathSwitch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cache := tracker.NewTaskCache("/tmp/root", time.Hour)
+	cache.Set("/tmp/repo", "feature/old", tracker.TaskInfo{Name: "Old Task"})
+	cache.StoreBranch("feature/new", tracker.TaskInfo{Name: "New Task"})
+
+	m := PickerModel{
+		tracker:        fakePickerTracker{},
+		taskCache:      cache,
+		branches:       map[string]string{},
+		taskInfos:      map[string]tracker.TaskInfo{"/tmp/repo": {Name: "Old Task"}},
+		cachedBranches: map[string]string{"/tmp/repo": "feature/old"},
+		branchVerified: map[string]bool{},
+		queuedTasks:    map[string]bool{},
+		selectedItems:  map[string]bool{},
+	}
+
+	model, _ := m.handleBranchResolved(BranchResolvedMsg{
+		Path:   "/tmp/repo",
+		Branch: "feature/new",
+	})
+	got := model.(PickerModel)
+
+	if got.taskInfos["/tmp/repo"].Name != "New Task" {
+		t.Fatalf("taskInfos reused name = %q, want %q", got.taskInfos["/tmp/repo"].Name, "New Task")
+	}
+	if got.cachedBranches["/tmp/repo"] != "feature/new" {
+		t.Fatalf("cachedBranches = %q, want %q", got.cachedBranches["/tmp/repo"], "feature/new")
+	}
+	if len(got.taskFetchQueue) != 0 {
+		t.Fatalf("expected no queued task fetch, got %#v", got.taskFetchQueue)
+	}
+
+	entry, ok := cache.GetEntry("/tmp/repo")
+	if !ok {
+		t.Fatal("expected updated path cache entry")
+	}
+	if entry.Branch != "feature/new" {
+		t.Fatalf("path cache branch = %q, want %q", entry.Branch, "feature/new")
+	}
+	if entry.Info.Name != "New Task" {
+		t.Fatalf("path cache task name = %q, want %q", entry.Info.Name, "New Task")
 	}
 }

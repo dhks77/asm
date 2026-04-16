@@ -201,21 +201,9 @@ func setManagedWindowMetadata(winName, targetPath, displayName, kind string) err
 	return nil
 }
 
-// CreateSession creates a new tmux session and sets up pane-switching key bindings.
-func CreateSession(pickerCmd string) error {
-	// Chain set-option atomically with new-session via ";" so that
-	// destroy-unattached is disabled before tmux's event loop can destroy
-	// the detached session.
-	err := runTmuxCmd("new-session", "-d",
-		"-s", SessionName,
-		"-n", MainWindow,
-		"-x", "200", "-y", "50",
-		";", "set-option", "-t", SessionName, "destroy-unattached", "off",
-	)
-	if err != nil {
-		return err
-	}
-
+// InstallRootBindings refreshes asm's server-wide tmux key bindings so the
+// current binary's routing rules apply even to already-running asm sessions.
+func InstallRootBindings() {
 	// Key bindings are installed in the tmux root table, which is SERVER-WIDE.
 	// Multiple asm instances (one per project root) therefore can't each own
 	// their own hardcoded target session — whichever started last would
@@ -228,6 +216,7 @@ func CreateSession(pickerCmd string) error {
 	// key is passed through unchanged. Result: every asm session handles
 	// its own keys without cross-talk, and non-asm sessions aren't affected.
 	const inAsm = "#{m:asm-*,#{session_name}}"
+	const inUtility = "#{==:#{@asm-utility-open},1}"
 
 	// Simple routed key: inside asm session, deliver an F-key to the
 	// picker pane; outside, pass the key through unchanged.
@@ -243,18 +232,35 @@ func CreateSession(pickerCmd string) error {
 		).Run()
 	}
 
-	bindRouted("C-t", "F12") // toggle terminal/AI
-	bindRouted("C-n", "F10") // new AI session
-	bindRouted("C-s", "F9")  // settings
-	bindRouted("C-q", "F8")  // quit
-	bindRouted("C-w", "F7")  // create worktree
-	bindRouted("C-d", "F6")  // delete directory
-	bindRouted("C-p", "F4")  // provider selection
-	bindRouted("C-k", "F3")  // kill selected session
-	bindRouted("C-l", "C-l") // toggle picker panel visibility
-	bindRouted("C-o", "o")   // open task URL
-	bindRouted("C-]", "F1")  // rotate to next active session
-	bindRouted("C-e", "F2")  // open worktree in IDE
+	// Utility dialogs run in the working panel and need some keys to reach the
+	// dialog process itself instead of being swallowed by picker-level global
+	// shortcuts. When a utility window is focused, pass the original key
+	// through unchanged; otherwise route to the picker pane.
+	bindRoutedUnlessUtility := func(key, pickerKey, utilityKey string) {
+		utilityTarget := pickerRef
+		if utilityKey == "Tab" || utilityKey == "BTab" || strings.HasPrefix(utilityKey, "F") {
+			utilityTarget = workingTarget()
+		}
+		_ = exec.Command("tmux", "bind-key", "-T", "root", key,
+			"if-shell", "-F", inAsm,
+			fmt.Sprintf("if-shell -F '%s' 'send-keys -t %s %s' 'send-keys -t %s %s'", inUtility, utilityTarget, utilityKey, pickerRef, pickerKey),
+			"send-keys "+key,
+		).Run()
+	}
+
+	bindRouted("C-t", "F12")                     // toggle terminal/AI
+	bindRoutedUnlessUtility("C-n", "F10", "F10") // launcher in picker, new-branch in worktree dialog
+	bindRouted("C-s", "F9")                      // settings
+	bindRouted("C-q", "F8")                      // quit
+	bindRouted("C-w", "F7")                      // create worktree
+	bindRouted("C-d", "F6")                      // delete directory
+	bindRouted("C-p", "F4")                      // provider selection
+	bindRouted("C-k", "F3")                      // kill selected session
+	bindRouted("C-l", "C-l")                     // toggle picker panel visibility
+	bindRouted("C-o", "o")                       // open task URL
+	bindRouted("C-]", "F1")                      // rotate to next active session
+	bindRouted("C-e", "F2")                      // open worktree in IDE
+	bindRoutedUnlessUtility("Tab", "Tab", "Tab")
 
 	// Ctrl+g: toggle pane focus — pane-index dependent.
 	//   working panel → select picker
@@ -285,6 +291,24 @@ func CreateSession(pickerCmd string) error {
 		"send-keys -M",
 		"if-shell -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e'",
 	).Run()
+}
+
+// CreateSession creates a new tmux session and sets up pane-switching key bindings.
+func CreateSession(pickerCmd string) error {
+	// Chain set-option atomically with new-session via ";" so that
+	// destroy-unattached is disabled before tmux's event loop can destroy
+	// the detached session.
+	err := runTmuxCmd("new-session", "-d",
+		"-s", SessionName,
+		"-n", MainWindow,
+		"-x", "200", "-y", "50",
+		";", "set-option", "-t", SessionName, "destroy-unattached", "off",
+	)
+	if err != nil {
+		return err
+	}
+
+	InstallRootBindings()
 
 	return nil
 }
@@ -652,6 +676,7 @@ func KillDirectoryWindow(targetPath string) error {
 func RunInWorkingPanel(windowName, cmd string) error {
 	EnsureWorkingPanel()
 	asmlog.Debugf("tmux: run-dialog-window session=%q win=%q cmd=%q", SessionName, windowName, cmd)
+	_ = runTmuxCmd("set-option", "-t", SessionName, "@asm-utility-open", "1")
 	err := runTmuxCmd("new-window", "-d",
 		"-t", SessionName,
 		"-n", windowName,
@@ -659,6 +684,7 @@ func RunInWorkingPanel(windowName, cmd string) error {
 	if err != nil {
 		asmlog.Debugf("tmux: run-dialog-window new-window failed session=%q win=%q err=%v",
 			SessionName, windowName, err)
+		_ = runTmuxCmd("set-option", "-t", SessionName, "@asm-utility-open", "0")
 		return err
 	}
 
@@ -672,6 +698,7 @@ func RunInWorkingPanel(windowName, cmd string) error {
 	); err != nil {
 		asmlog.Debugf("tmux: run-dialog-window send-keys failed session=%q win=%q err=%v",
 			SessionName, windowName, err)
+		_ = runTmuxCmd("set-option", "-t", SessionName, "@asm-utility-open", "0")
 		return err
 	}
 
@@ -682,6 +709,7 @@ func RunInWorkingPanel(windowName, cmd string) error {
 	); err != nil {
 		asmlog.Debugf("tmux: run-dialog-window swap-pane failed session=%q win=%q err=%v",
 			SessionName, windowName, err)
+		_ = runTmuxCmd("set-option", "-t", SessionName, "@asm-utility-open", "0")
 		return err
 	}
 	asmlog.Debugf("tmux: run-dialog-window ready session=%q win=%q", SessionName, windowName)
@@ -713,6 +741,9 @@ func WaitAndCleanupWorkingPanel(windowName string) int {
 	)
 	runTmux("kill-window",
 		"-t", fmt.Sprintf("%s:%s", SessionName, windowName),
+	)
+	runTmux("set-option",
+		"-t", SessionName, "@asm-utility-open", "0",
 	)
 	FocusPickingPanel()
 	return exitCode

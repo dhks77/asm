@@ -11,49 +11,72 @@ import (
 	"time"
 )
 
-// pathCacheMaxEntries caps the on-disk cache to prevent unbounded growth on
-// long-lived projects. When exceeded, entries with the earliest ExpiresAt
-// are evicted (equivalent to oldest-first since TTL is constant).
-const pathCacheMaxEntries = 500
+// Both cache indexes are capped independently to prevent unbounded growth.
+const (
+	pathCacheMaxEntries   = 500
+	branchCacheMaxEntries = 500
+)
 
-// PathCache is a persistent task-info cache keyed by worktree path. It is
-// scoped per root path (one file per rootPath) so the picker can hydrate
-// taskInfos synchronously on startup and render every task name on the
-// first frame, instead of letting them trickle in one tea.Msg at a time.
+// TaskCache is the unified persistent task-info cache.
 //
-// Entries record the branch observed when the info was cached so a branch
-// change in a worktree invalidates the stale name without user action.
-type PathCache struct {
-	path    string
-	ttl     time.Duration
-	mu      sync.RWMutex
-	entries map[string]PathEntry
+// It keeps two indexes in one store:
+//   - path -> {branch, info}
+//   - branch -> info
+//
+// The path index lets the picker and launcher hydrate task names
+// synchronously on startup. The branch index avoids repeated tracker API
+// calls when multiple paths point at the same branch or when a path switches
+// to a branch we have already resolved before.
+type TaskCache struct {
+	path             string
+	legacyBranchPath string
+	ttl              time.Duration
+	mu               sync.RWMutex
+	pathEntries      map[string]PathEntry
+	branchEntries    map[string]BranchEntry
 }
 
-// PathEntry is a single cached task-info record.
+// PathEntry is a cached task-info record for a specific target path.
 type PathEntry struct {
 	Branch    string    `json:"branch"`
 	Info      TaskInfo  `json:"info"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// NewPathCache returns a cache persisted under ~/.asm/cache/<hash>.json for
-// the given rootPath. Read failures are silently tolerated — a missing or
-// corrupt file just starts with an empty cache.
-func NewPathCache(rootPath string, ttl time.Duration) *PathCache {
-	c := &PathCache{
-		path:    cacheFilePath(rootPath),
-		ttl:     ttl,
-		entries: make(map[string]PathEntry),
+// BranchEntry is a cached task-info record for a branch name.
+type BranchEntry struct {
+	Info      TaskInfo  `json:"info"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type taskCacheSnapshot struct {
+	Paths    map[string]PathEntry   `json:"paths,omitempty"`
+	Branches map[string]BranchEntry `json:"branches,omitempty"`
+}
+
+type legacyBranchEntry struct {
+	Value     TaskInfo  `json:"value"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// NewTaskCache returns a cache persisted under ~/.asm/cache/tasks-<hash>.json
+// for the given rootPath. Legacy path/branch cache files are read on first
+// load so older cached data keeps working after the unified-cache migration.
+func NewTaskCache(rootPath string, ttl time.Duration) *TaskCache {
+	c := &TaskCache{
+		path:             cacheFilePath(rootPath),
+		legacyBranchPath: legacyBranchCachePath(rootPath),
+		ttl:              ttl,
+		pathEntries:      make(map[string]PathEntry),
+		branchEntries:    make(map[string]BranchEntry),
 	}
 	c.load()
 	return c
 }
 
-// Get returns the cached TaskInfo for a worktree path if present and not
-// expired. The caller is expected to cross-check the branch via GetEntry
-// when git status becomes available.
-func (c *PathCache) Get(path string) (TaskInfo, bool) {
+// Get returns the cached TaskInfo for a target path if present and not
+// expired. Callers that need the cached branch should use GetEntry.
+func (c *TaskCache) Get(path string) (TaskInfo, bool) {
 	e, ok := c.GetEntry(path)
 	if !ok {
 		return TaskInfo{}, false
@@ -61,83 +84,89 @@ func (c *PathCache) Get(path string) (TaskInfo, bool) {
 	return e.Info, true
 }
 
-// GetEntry returns the raw cache entry (including branch) for validation.
-func (c *PathCache) GetEntry(path string) (PathEntry, bool) {
+// GetEntry returns the raw cache entry for a target path.
+func (c *TaskCache) GetEntry(path string) (PathEntry, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	e, ok := c.entries[path]
-	if !ok {
-		return PathEntry{}, false
-	}
-	if time.Now().After(e.ExpiresAt) {
+	e, ok := c.pathEntries[path]
+	if !ok || time.Now().After(e.ExpiresAt) {
 		return PathEntry{}, false
 	}
 	return e, true
 }
 
-// Set stores task info for a worktree path under a specific branch and
-// persists the cache file asynchronously.
-func (c *PathCache) Set(path, branch string, info TaskInfo) {
-	if info.Name == "" {
+// Peek returns cached task info for a branch if present and not expired.
+func (c *TaskCache) Peek(branch string) (TaskInfo, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, ok := c.branchEntries[branch]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return TaskInfo{}, false
+	}
+	return e.Info, true
+}
+
+// StoreBranch stores task info under a branch key and persists asynchronously.
+func (c *TaskCache) StoreBranch(branch string, info TaskInfo) {
+	if branch == "" || info.Name == "" {
 		return
 	}
 	c.mu.Lock()
-	c.entries[path] = PathEntry{
-		Branch:    branch,
+	c.branchEntries[branch] = BranchEntry{
 		Info:      info,
 		ExpiresAt: time.Now().Add(c.ttl),
 	}
-	c.evictLocked(pathCacheMaxEntries)
+	c.evictLocked()
 	c.mu.Unlock()
-	go c.save()
+	c.save()
 }
 
-// evictLocked drops expired entries, then trims to `max` by removing the
-// entries with the earliest ExpiresAt. Caller must hold c.mu.
-func (c *PathCache) evictLocked(max int) {
-	now := time.Now()
-	for k, e := range c.entries {
-		if now.After(e.ExpiresAt) {
-			delete(c.entries, k)
-		}
-	}
-	if len(c.entries) <= max {
+// Set stores task info for a target path and mirrors it into the branch index
+// when branch is non-empty.
+func (c *TaskCache) Set(path, branch string, info TaskInfo) {
+	if path == "" || info.Name == "" {
 		return
 	}
-	type kv struct {
-		key string
-		exp time.Time
+	exp := time.Now().Add(c.ttl)
+	c.mu.Lock()
+	c.pathEntries[path] = PathEntry{
+		Branch:    branch,
+		Info:      info,
+		ExpiresAt: exp,
 	}
-	all := make([]kv, 0, len(c.entries))
-	for k, e := range c.entries {
-		all = append(all, kv{k, e.ExpiresAt})
+	if branch != "" {
+		c.branchEntries[branch] = BranchEntry{
+			Info:      info,
+			ExpiresAt: exp,
+		}
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].exp.Before(all[j].exp) })
-	for i := 0; i < len(all)-max; i++ {
-		delete(c.entries, all[i].key)
-	}
+	c.evictLocked()
+	c.mu.Unlock()
+	c.save()
 }
 
-// Delete removes the cache entry for a path.
-func (c *PathCache) Delete(path string) {
+// Delete removes only the path binding. Branch cache entries remain available
+// so switching a path away from a branch doesn't throw away the branch's known
+// task info.
+func (c *TaskCache) Delete(path string) {
 	c.mu.Lock()
-	_, existed := c.entries[path]
+	_, existed := c.pathEntries[path]
 	if existed {
-		delete(c.entries, path)
+		delete(c.pathEntries, path)
 	}
 	c.mu.Unlock()
 	if existed {
-		go c.save()
+		c.save()
 	}
 }
 
-// All returns a snapshot of non-expired entries as path → TaskInfo.
-func (c *PathCache) All() map[string]TaskInfo {
+// All returns a snapshot of non-expired path entries as path -> TaskInfo.
+func (c *TaskCache) All() map[string]TaskInfo {
 	out := make(map[string]TaskInfo)
 	now := time.Now()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	for p, e := range c.entries {
+	for p, e := range c.pathEntries {
 		if now.After(e.ExpiresAt) {
 			continue
 		}
@@ -146,33 +175,152 @@ func (c *PathCache) All() map[string]TaskInfo {
 	return out
 }
 
-func (c *PathCache) load() {
-	data, err := os.ReadFile(c.path)
-	if err != nil {
-		return
-	}
-	var decoded map[string]PathEntry
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return
-	}
-	c.mu.Lock()
-	// Drop expired entries up front so they don't get re-persisted later.
+func (c *TaskCache) evictLocked() {
 	now := time.Now()
-	for p, e := range decoded {
+	for k, e := range c.pathEntries {
 		if now.After(e.ExpiresAt) {
-			continue
+			delete(c.pathEntries, k)
 		}
-		c.entries[p] = e
 	}
-	c.evictLocked(pathCacheMaxEntries)
+	for k, e := range c.branchEntries {
+		if now.After(e.ExpiresAt) {
+			delete(c.branchEntries, k)
+		}
+	}
+	trimOldestPathEntries(c.pathEntries, pathCacheMaxEntries)
+	trimOldestBranchEntries(c.branchEntries, branchCacheMaxEntries)
+}
+
+func trimOldestPathEntries(entries map[string]PathEntry, max int) {
+	if len(entries) <= max {
+		return
+	}
+	type kv struct {
+		key string
+		exp time.Time
+	}
+	all := make([]kv, 0, len(entries))
+	for k, e := range entries {
+		all = append(all, kv{key: k, exp: e.ExpiresAt})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].exp.Before(all[j].exp) })
+	for i := 0; i < len(all)-max; i++ {
+		delete(entries, all[i].key)
+	}
+}
+
+func trimOldestBranchEntries(entries map[string]BranchEntry, max int) {
+	if len(entries) <= max {
+		return
+	}
+	type kv struct {
+		key string
+		exp time.Time
+	}
+	all := make([]kv, 0, len(entries))
+	for k, e := range entries {
+		all = append(all, kv{key: k, exp: e.ExpiresAt})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].exp.Before(all[j].exp) })
+	for i := 0; i < len(all)-max; i++ {
+		delete(entries, all[i].key)
+	}
+}
+
+func (c *TaskCache) load() {
+	now := time.Now()
+
+	if data, err := os.ReadFile(c.path); err == nil {
+		paths, branches := decodeTaskCacheFile(data)
+		c.mu.Lock()
+		for path, entry := range paths {
+			if now.After(entry.ExpiresAt) {
+				continue
+			}
+			c.pathEntries[path] = entry
+			if entry.Branch != "" {
+				if existing, ok := c.branchEntries[entry.Branch]; !ok || existing.ExpiresAt.Before(entry.ExpiresAt) {
+					c.branchEntries[entry.Branch] = BranchEntry{
+						Info:      entry.Info,
+						ExpiresAt: entry.ExpiresAt,
+					}
+				}
+			}
+		}
+		for branch, entry := range branches {
+			if now.After(entry.ExpiresAt) {
+				continue
+			}
+			c.branchEntries[branch] = entry
+		}
+		c.mu.Unlock()
+	}
+
+	if data, err := os.ReadFile(c.legacyBranchPath); err == nil {
+		branches := decodeLegacyBranchCacheFile(data)
+		c.mu.Lock()
+		for branch, entry := range branches {
+			if now.After(entry.ExpiresAt) {
+				continue
+			}
+			if existing, ok := c.branchEntries[branch]; !ok || existing.ExpiresAt.Before(entry.ExpiresAt) {
+				c.branchEntries[branch] = entry
+			}
+		}
+		c.mu.Unlock()
+	}
+
+	c.mu.Lock()
+	c.evictLocked()
 	c.mu.Unlock()
 }
 
-func (c *PathCache) save() {
+func decodeTaskCacheFile(data []byte) (map[string]PathEntry, map[string]BranchEntry) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, nil
+	}
+	if _, hasPaths := raw["paths"]; hasPaths || raw["branches"] != nil {
+		var snap taskCacheSnapshot
+		if err := json.Unmarshal(data, &snap); err != nil {
+			return nil, nil
+		}
+		return snap.Paths, snap.Branches
+	}
+
+	var legacyPaths map[string]PathEntry
+	if err := json.Unmarshal(data, &legacyPaths); err != nil {
+		return nil, nil
+	}
+	return legacyPaths, nil
+}
+
+func decodeLegacyBranchCacheFile(data []byte) map[string]BranchEntry {
+	var legacy map[string]legacyBranchEntry
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return nil
+	}
+	out := make(map[string]BranchEntry, len(legacy))
+	for branch, entry := range legacy {
+		out[branch] = BranchEntry{
+			Info:      entry.Value,
+			ExpiresAt: entry.ExpiresAt,
+		}
+	}
+	return out
+}
+
+func (c *TaskCache) save() {
 	c.mu.RLock()
-	snapshot := make(map[string]PathEntry, len(c.entries))
-	for k, v := range c.entries {
-		snapshot[k] = v
+	snapshot := taskCacheSnapshot{
+		Paths:    make(map[string]PathEntry, len(c.pathEntries)),
+		Branches: make(map[string]BranchEntry, len(c.branchEntries)),
+	}
+	for k, v := range c.pathEntries {
+		snapshot.Paths[k] = v
+	}
+	for k, v := range c.branchEntries {
+		snapshot.Branches[k] = v
 	}
 	c.mu.RUnlock()
 
@@ -180,19 +328,17 @@ func (c *PathCache) save() {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
 		return
 	}
 	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return
 	}
-	os.Rename(tmp, c.path)
+	_ = os.Rename(tmp, c.path)
 }
 
-// cacheFilePath returns ~/.asm/cache/<sha1(rootPath)>.json. Hashing keeps
-// the filename filesystem-safe and avoids collisions between similarly
-// named roots.
+// cacheFilePath returns ~/.asm/cache/tasks-<sha1(rootPath)>.json.
 func cacheFilePath(rootPath string) string {
 	abs := rootPath
 	if a, err := filepath.Abs(rootPath); err == nil {
@@ -200,6 +346,22 @@ func cacheFilePath(rootPath string) string {
 	}
 	sum := sha1.Sum([]byte(abs))
 	name := "tasks-" + hex.EncodeToString(sum[:]) + ".json"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+	return filepath.Join(home, ".asm", "cache", name)
+}
+
+// legacyBranchCachePath matches the pre-unification branch-cache filename so
+// old persisted branch data can be imported on first load.
+func legacyBranchCachePath(rootPath string) string {
+	abs := rootPath
+	if a, err := filepath.Abs(rootPath); err == nil {
+		abs = a
+	}
+	sum := sha1.Sum([]byte(abs))
+	name := "branches-" + hex.EncodeToString(sum[:]) + ".json"
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = os.TempDir()

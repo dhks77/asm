@@ -190,6 +190,7 @@ func (m PickerModel) handleProviderSelectDone(msg providerSelectDoneMsg) (tea.Mo
 func (m PickerModel) handleDirectoriesScanned(msg DirectoriesScannedMsg) (tea.Model, tea.Cmd) {
 	m.directories = msg.Directories
 	m.repoRoots = msg.RepoRoots
+	m.repoLabels = msg.RepoLabels
 	m.repoColors = msg.RepoColors
 
 	validPaths := make(map[string]bool, len(msg.Directories))
@@ -244,6 +245,11 @@ func (m PickerModel) handleBranchResolved(msg BranchResolvedMsg) (tea.Model, tea
 			delete(m.cachedBranches, msg.Path)
 			if m.taskCache != nil {
 				m.taskCache.Delete(msg.Path)
+				if info, ok := m.taskCache.Peek(msg.Branch); ok {
+					m.taskInfos[msg.Path] = info
+					m.cachedBranches[msg.Path] = msg.Branch
+					m.taskCache.Set(msg.Path, msg.Branch, info)
+				}
 			}
 		}
 		if _, ok := m.taskInfos[msg.Path]; !ok {

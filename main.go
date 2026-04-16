@@ -116,9 +116,13 @@ func main() {
 	logDebug("main: root=%q picker=%t settings=%t delete=%q worktree_create=%t provider_select=%t ide_select=%t launcher=%t batch_confirm=%t session=%q source=%s inside_tmux=%t",
 		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, *batchConfirmMode, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
 
+	if sessionBoundMode && asmtmux.IsInsideTmux() {
+		asmtmux.InstallRootBindings()
+	}
+
 	registry := buildRegistry(cfg)
-	t := buildTracker(cfg, rootPath)
-	taskCache := tracker.NewPathCache(rootPath, 7*24*time.Hour)
+	taskCache := tracker.NewTaskCache(rootPath, 7*24*time.Hour)
+	t := buildTracker(cfg, rootPath, taskCache)
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
@@ -180,13 +184,13 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 }
 
 // buildTracker constructs the active tracker (built-in or plugin).
-func buildTracker(cfg *config.Config, rootPath string) tracker.Tracker {
+func buildTracker(cfg *config.Config, rootPath string, taskCache *tracker.TaskCache) tracker.Tracker {
 	name := cfg.DefaultTracker
 
 	// Try plugin first if name is not a built-in
 	if name != "" && !tracker.IsBuiltin(name) {
 		if t := tracker.LoadFromDir(config.TrackerDir(), name); t != nil {
-			return t
+			return tracker.NewCachedTracker(t, taskCache)
 		}
 	}
 
@@ -197,11 +201,14 @@ func buildTracker(cfg *config.Config, rootPath string) tracker.Tracker {
 			return saveDoorayConfig(dc, config.ScopeUser, rootPath)
 		}
 		dt := tracker.NewDoorayTracker(dc, saveFn)
-		return tracker.NewCachedTrackerWithStore(dt, 7*24*time.Hour, rootPath)
+		return tracker.NewCachedTracker(dt, taskCache)
 	}
 
 	// Fall back to any available plugin
-	return tracker.LoadFromDir(config.TrackerDir(), "")
+	if t := tracker.LoadFromDir(config.TrackerDir(), ""); t != nil {
+		return tracker.NewCachedTracker(t, taskCache)
+	}
+	return nil
 }
 
 func loadDoorayConfig(cfg *config.Config) *tracker.DoorayConfig {
@@ -340,7 +347,7 @@ func confirmRestorePreviousSession(rootPath string, snap *sessionstate.Snapshot)
 	}
 }
 
-func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
+func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.TaskCache, ides []ide.IDE) {
 	if !asmtmux.IsAvailable() {
 		logErr("Error: tmux is required. Install it with: brew install tmux\n")
 		os.Exit(1)
@@ -521,7 +528,7 @@ func runIDESelect(ides []ide.IDE) {
 	os.Exit(1)
 }
 
-func runLauncher(initialPath string, t tracker.Tracker, taskCache *tracker.PathCache) {
+func runLauncher(initialPath string, t tracker.Tracker, taskCache *tracker.TaskCache) {
 	logDebug("launcher: start initial_path=%q session=%q", initialPath, asmtmux.SessionName)
 	model := ui.NewLauncherModel(initialPath, t, taskCache)
 	p := tea.NewProgram(model, tea.WithAltScreen())
@@ -618,7 +625,7 @@ func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) 
 	return entries
 }
 
-func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE, restoreLast bool) {
+func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.TaskCache, ides []ide.IDE, restoreLast bool) {
 	model := ui.NewPickerModel(cfg, rootPath, registry, t, taskCache, ides, restoreLast)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 

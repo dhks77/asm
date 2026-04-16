@@ -92,7 +92,7 @@ func LoadFromDir(dir string, preferred string) Tracker {
 	if preferred != "" {
 		pluginPath := filepath.Join(dir, preferred)
 		if t, err := LoadTracker(pluginPath); err == nil {
-			return NewCachedTracker(t, time.Hour)
+			return t
 		}
 	}
 
@@ -106,7 +106,7 @@ func LoadFromDir(dir string, preferred string) Tracker {
 		if err != nil {
 			continue
 		}
-		return NewCachedTracker(t, time.Hour)
+		return t
 	}
 	return nil
 }

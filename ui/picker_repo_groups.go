@@ -8,8 +8,9 @@ import (
 	"github.com/nhn/asm/config"
 )
 
-func repoMetadataForPaths(paths []string) (map[string]string, map[string]string) {
+func repoMetadataForPaths(paths []string) (map[string]string, map[string]string, map[string]string) {
 	repoRoots := make(map[string]string, len(paths))
+	repoLabels := make(map[string]string, len(paths))
 	repoColors := make(map[string]string)
 	userCfg, _ := config.LoadScope(config.ScopeUser, "")
 	if userCfg == nil {
@@ -21,11 +22,15 @@ func repoMetadataForPaths(paths []string) (map[string]string, map[string]string)
 
 	dirty := false
 	for _, path := range paths {
-		_, label := config.ProjectIdentity(path)
+		root, label := config.ProjectIdentity(path)
+		if root == "" || root == "." {
+			root = filepath.Clean(path)
+		}
 		if label == "" || label == "." {
 			label = filepath.Base(path)
 		}
-		repoRoots[path] = label
+		repoRoots[path] = root
+		repoLabels[path] = label
 
 		color := strings.TrimSpace(userCfg.RepoColors[label])
 		if color == "" {
@@ -40,16 +45,19 @@ func repoMetadataForPaths(paths []string) (map[string]string, map[string]string)
 		_ = config.SaveScope(userCfg, config.ScopeUser, "")
 	}
 
-	return repoRoots, repoColors
+	return repoRoots, repoLabels, repoColors
 }
 
-func mergeRepoMetadataForPaths(paths []string, repoRoots, repoColors map[string]string) {
+func mergeRepoMetadataForPaths(paths []string, repoRoots, repoLabels, repoColors map[string]string) {
 	if len(paths) == 0 {
 		return
 	}
-	roots, colors := repoMetadataForPaths(paths)
-	for path, label := range roots {
-		repoRoots[path] = label
+	roots, labels, colors := repoMetadataForPaths(paths)
+	for path, root := range roots {
+		repoRoots[path] = root
+	}
+	for path, label := range labels {
+		repoLabels[path] = label
 	}
 	for label, color := range colors {
 		repoColors[label] = color
@@ -60,17 +68,19 @@ func (m *PickerModel) repoRootForPath(path string) string {
 	if root := m.repoRoots[path]; root != "" {
 		return root
 	}
-	return filepath.Base(path)
+	return filepath.Clean(path)
 }
 
 func (m *PickerModel) repoLabelForPath(path string) string {
-	return m.repoRootForPath(path)
+	if label := m.repoLabels[path]; label != "" {
+		return label
+	}
+	return filepath.Base(path)
 }
 
 func (m *PickerModel) repoAccentForPath(path string) lipgloss.Color {
-	root := m.repoRootForPath(path)
 	label := m.repoLabelForPath(path)
-	return resolveRepoAccentColor(label, m.repoColors[root])
+	return resolveRepoAccentColor(label, m.repoColors[label])
 }
 
 func (m *PickerModel) renderRepoHeader(path string) string {

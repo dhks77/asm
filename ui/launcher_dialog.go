@@ -56,10 +56,10 @@ type LauncherModel struct {
 	height          int
 	err             string
 	tracker         tracker.Tracker
-	taskCache       *tracker.PathCache
+	taskCache       *tracker.TaskCache
 }
 
-func NewLauncherModel(initialPath string, t tracker.Tracker, taskCache *tracker.PathCache) LauncherModel {
+func NewLauncherModel(initialPath string, t tracker.Tracker, taskCache *tracker.TaskCache) LauncherModel {
 	clean := filepath.Clean(initialPath)
 	if clean == "." || clean == "" {
 		if cwd, err := os.Getwd(); err == nil {
@@ -701,12 +701,12 @@ func launcherFavoriteKey(kind asmfavorites.Kind, path string) string {
 
 type launcherTaskResolver struct {
 	tracker   tracker.Tracker
-	taskCache *tracker.PathCache
+	taskCache *tracker.TaskCache
 	peeker    tracker.Peeker
 	taskNames map[string]string
 }
 
-func newLauncherTaskResolver(t tracker.Tracker, taskCache *tracker.PathCache) *launcherTaskResolver {
+func newLauncherTaskResolver(t tracker.Tracker, taskCache *tracker.TaskCache) *launcherTaskResolver {
 	r := &launcherTaskResolver{
 		tracker:   t,
 		taskCache: taskCache,

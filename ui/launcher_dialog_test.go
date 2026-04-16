@@ -21,7 +21,7 @@ func TestLauncherTaskResolverResolveRepoTaskNameCachesByPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	cache := tracker.NewPathCache("/tmp/root", time.Hour)
+	cache := tracker.NewTaskCache("/tmp/root", time.Hour)
 	resolver := newLauncherTaskResolver(fakeLauncherTracker{
 		values: map[string]tracker.TaskInfo{
 			"feature/123": {Name: "Task 123"},

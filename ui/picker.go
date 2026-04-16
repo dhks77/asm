@@ -33,10 +33,10 @@ type DirectoriesScannedMsg struct {
 	// CachedBranches records the branch each cached entry was observed
 	// under; used to invalidate stale names once the branch is re-resolved.
 	CachedBranches map[string]string
-	// RepoRoots maps target path -> grouping key. This is intentionally the
-	// repo/display name, not an absolute filesystem root, so all worktrees of
-	// the same repo group together even when checked out in different paths.
+	// RepoRoots maps target path -> stable project root/grouping key.
 	RepoRoots map[string]string
+	// RepoLabels maps target path -> human-facing repo label shown in headers.
+	RepoLabels map[string]string
 	// RepoColors maps grouping key -> configured terminal color value.
 	// Values may be presets, ANSI 0-255, or hex/rgb forms.
 	RepoColors map[string]string
@@ -131,6 +131,7 @@ type PickerModel struct {
 	branches           map[string]string // worktree path -> branch name (one-shot)
 	taskInfos          map[string]tracker.TaskInfo
 	repoRoots          map[string]string // target path -> group root
+	repoLabels         map[string]string // target path -> display label
 	repoColors         map[string]string // group root -> configured terminal color value
 	providerStates     map[string]provider.State
 	prevProviderStates map[string]provider.State
@@ -170,7 +171,7 @@ type PickerModel struct {
 	workingPath          string // target path shown in working panel (AI session)
 	termPath             string // target path shown in working panel (terminal)
 	tracker              tracker.Tracker
-	taskCache            *tracker.PathCache
+	taskCache            *tracker.TaskCache
 	ides                 []ide.IDE
 	// cachedBranches tracks the branch each seeded taskInfo was observed
 	// under; we invalidate the seed when the branch re-resolves differently.
@@ -202,13 +203,14 @@ type PickerModel struct {
 	statusBarEnabled  bool
 }
 
-func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE, restoreLast bool) PickerModel {
+func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.TaskCache, ides []ide.IDE, restoreLast bool) PickerModel {
 	return PickerModel{
 		cfg:                  cfg,
 		rootPath:             rootPath,
 		branches:             make(map[string]string),
 		taskInfos:            make(map[string]tracker.TaskInfo),
 		repoRoots:            make(map[string]string),
+		repoLabels:           make(map[string]string),
 		repoColors:           make(map[string]string),
 		providerStates:       make(map[string]provider.State),
 		prevProviderStates:   make(map[string]provider.State),
@@ -1155,11 +1157,14 @@ func (m *PickerModel) ensureDirectoryTracked(path string) (*worktree.Worktree, [
 	if m.repoRoots == nil {
 		m.repoRoots = make(map[string]string)
 	}
+	if m.repoLabels == nil {
+		m.repoLabels = make(map[string]string)
+	}
 	if m.repoColors == nil {
 		m.repoColors = make(map[string]string)
 	}
 	m.directories = append(m.directories, trackedWorktree(cleanPath))
-	mergeRepoMetadataForPaths([]string{cleanPath}, m.repoRoots, m.repoColors)
+	mergeRepoMetadataForPaths([]string{cleanPath}, m.repoRoots, m.repoLabels, m.repoColors)
 	wt := &m.directories[len(m.directories)-1]
 
 	var cmds []tea.Cmd
@@ -2183,12 +2188,13 @@ func (m PickerModel) scanDirectories() tea.Cmd {
 				}
 			}
 		}
-		repoRoots, repoColors := repoMetadataForPaths(paths)
+		repoRoots, repoLabels, repoColors := repoMetadataForPaths(paths)
 		return DirectoriesScannedMsg{
 			Directories:    wts,
 			CachedTasks:    tasks,
 			CachedBranches: branches,
 			RepoRoots:      repoRoots,
+			RepoLabels:     repoLabels,
 			RepoColors:     repoColors,
 		}
 	}
