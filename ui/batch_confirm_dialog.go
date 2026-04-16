@@ -1,11 +1,13 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	asmtmux "github.com/nhn/asm/tmux"
 )
 
 type BatchAction int
@@ -38,8 +40,8 @@ type BatchConfirmModel struct {
 	// too (via the post-exec orchestrator path).
 	targetSession string
 	cursor        int // 0=confirm, 1=cancel
-	width        int
-	height       int
+	width         int
+	height        int
 }
 
 type BatchConfirmedMsg struct {
@@ -49,8 +51,91 @@ type BatchConfirmedMsg struct {
 
 type BatchCancelledMsg struct{}
 
+type BatchConfirmRequest struct {
+	Action        BatchAction `json:"action"`
+	Items         []string    `json:"items"`
+	TaskNames     []string    `json:"task_names"`
+	Dirty         int         `json:"dirty"`
+	NavigatePath  string      `json:"navigate_path"`
+	TargetSession string      `json:"target_session"`
+}
+
+const batchConfirmRequestOption = "asm-batch-confirm-request"
+
 func NewBatchConfirmModel() BatchConfirmModel {
 	return BatchConfirmModel{}
+}
+
+func NewBatchConfirmModelFromRequest(req BatchConfirmRequest) BatchConfirmModel {
+	m := NewBatchConfirmModel()
+	switch req.Action {
+	case BatchNavigateRestart:
+		m.ShowNavigate(req.Items, req.TaskNames, req.NavigatePath, req.TargetSession)
+	default:
+		m.Show(req.Action, req.Items, req.TaskNames, req.Dirty)
+	}
+	return m
+}
+
+type BatchConfirmRunnerModel struct {
+	dialog    BatchConfirmModel
+	Confirmed bool
+}
+
+func NewBatchConfirmRunnerModel(req BatchConfirmRequest) BatchConfirmRunnerModel {
+	return BatchConfirmRunnerModel{
+		dialog: NewBatchConfirmModelFromRequest(req),
+	}
+}
+
+func (m BatchConfirmRunnerModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m BatchConfirmRunnerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.dialog.SetSize(msg.Width, msg.Height)
+		return m, nil
+	case BatchConfirmedMsg:
+		m.Confirmed = true
+		return m, tea.Quit
+	case BatchCancelledMsg:
+		m.Confirmed = false
+		return m, tea.Quit
+	default:
+		var cmd tea.Cmd
+		m.dialog, cmd = m.dialog.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m BatchConfirmRunnerModel) View() string {
+	return m.dialog.View()
+}
+
+func StoreBatchConfirmRequest(req BatchConfirmRequest) error {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	return asmtmux.SetSessionOption(batchConfirmRequestOption, string(data))
+}
+
+func LoadBatchConfirmRequest() (BatchConfirmRequest, error) {
+	raw := strings.TrimSpace(asmtmux.GetSessionOption(batchConfirmRequestOption))
+	if raw == "" {
+		return BatchConfirmRequest{}, fmt.Errorf("missing batch confirm request")
+	}
+	var req BatchConfirmRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		return BatchConfirmRequest{}, err
+	}
+	return req, nil
+}
+
+func ClearBatchConfirmRequest() error {
+	return asmtmux.SetSessionOption(batchConfirmRequestOption, "")
 }
 
 func (m *BatchConfirmModel) Show(action BatchAction, items, taskNames []string, dirtyCount int) {

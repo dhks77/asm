@@ -802,6 +802,7 @@ var utilityWindows = []string{
 	"asm-settings",
 	"asm-worktree",
 	"asm-delete",
+	"asm-batch-confirm",
 	"asm-provider-select",
 	"asm-ide-select",
 	"asm-launcher",

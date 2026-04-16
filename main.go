@@ -36,6 +36,7 @@ func main() {
 	providerSelect := flag.Bool("provider-select", false, "Run provider selection dialog")
 	ideSelect := flag.Bool("ide-select", false, "Run IDE selection dialog")
 	launcherMode := flag.Bool("launcher", false, "Run session launcher dialog")
+	batchConfirmMode := flag.Bool("batch-confirm", false, "Run batch confirmation dialog")
 	restoreLast := flag.Bool("restore-last", false, "Restore previously open sessions in picker mode")
 	flag.Parse()
 
@@ -90,7 +91,7 @@ func main() {
 	// still hash from --path, but picker/dialog subprocesses running inside an
 	// existing asm tmux session must target that CURRENT session even when they
 	// receive a different --path (launcher/settings local-scope context, etc.).
-	sessionBoundMode := *pickerMode || *settingsMode || *deleteMode != "" || *worktreeCreate || *providerSelect || *ideSelect || *launcherMode
+	sessionBoundMode := *pickerMode || *settingsMode || *deleteMode != "" || *worktreeCreate || *providerSelect || *ideSelect || *launcherMode || *batchConfirmMode
 	sessionSource := "derived-from-root"
 	if sessionBoundMode {
 		if inheritedSession := strings.TrimSpace(os.Getenv("ASM_SESSION_NAME")); strings.HasPrefix(inheritedSession, "asm-") {
@@ -112,8 +113,8 @@ func main() {
 	} else {
 		asmtmux.SetSessionName(rootPath)
 	}
-	logDebug("main: root=%q picker=%t settings=%t delete=%q worktree_create=%t provider_select=%t ide_select=%t launcher=%t session=%q source=%s inside_tmux=%t",
-		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
+	logDebug("main: root=%q picker=%t settings=%t delete=%q worktree_create=%t provider_select=%t ide_select=%t launcher=%t batch_confirm=%t session=%q source=%s inside_tmux=%t",
+		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, *batchConfirmMode, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
 
 	registry := buildRegistry(cfg)
 	t := buildTracker(cfg, rootPath)
@@ -129,6 +130,8 @@ func main() {
 		runIDESelect(buildIDEs(cfg))
 	} else if *launcherMode {
 		runLauncher(rootPath, t, taskCache)
+	} else if *batchConfirmMode {
+		runBatchConfirm()
 	} else if *settingsMode {
 		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
@@ -538,6 +541,27 @@ func runLauncher(initialPath string, t tracker.Tracker, taskCache *tracker.PathC
 		os.Exit(0)
 	}
 	logDebug("launcher: exited without selection session=%q result_type=%T", asmtmux.SessionName, result)
+	os.Exit(1)
+}
+
+func runBatchConfirm() {
+	req, err := ui.LoadBatchConfirmRequest()
+	if err != nil {
+		logErr("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	model := ui.NewBatchConfirmRunnerModel(req)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	result, err := p.Run()
+	if err != nil {
+		logErr("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if m, ok := result.(ui.BatchConfirmRunnerModel); ok && m.Confirmed {
+		os.Exit(0)
+	}
 	os.Exit(1)
 }
 

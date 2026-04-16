@@ -170,7 +170,6 @@ type PickerModel struct {
 	workingZoomed  bool
 	restoreLast    bool
 	selectedItems  map[string]bool
-	batchConfirm   BatchConfirmModel
 	// pendingNavigatePath is set when the user pressed ←/→ but we had to
 	// surface a confirmation first (active AI sessions would die). Cleared
 	// on confirm (right before navigateTo) or on cancel.
@@ -205,7 +204,6 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		terminalWidthPending: true,
 		pickerWidthDirty:     true,
 		selectedItems:        make(map[string]bool),
-		batchConfirm:         NewBatchConfirmModel(),
 		tracker:              t,
 		taskCache:            taskCache,
 		cachedBranches:       make(map[string]string),
@@ -442,26 +440,10 @@ func (m PickerModel) Init() tea.Cmd {
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Delegate to batch confirm dialog when visible. ONLY forward KeyMsgs —
-	// every other message (scrollTickMsg, providerStateTickMsg, spinnerTickMsg,
-	// sessionHealthTickMsg, statusSummaryWrittenMsg, …) must reach the main
-	// handler below so its tea.Tick chain stays armed. tea.Tick is a one-shot,
-	// so a tick that's consumed by batchConfirm (which ignores non-KeyMsgs and
-	// returns nil) dies on the spot — after the dialog closes the status bar,
-	// spinner, provider state, and session-health probe all remain frozen.
-	if m.batchConfirm.IsVisible() {
-		if _, ok := msg.(tea.KeyMsg); ok {
-			var cmd tea.Cmd
-			m.batchConfirm, cmd = m.batchConfirm.Update(msg)
-			return m, cmd
-		}
-	}
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.batchConfirm.SetSize(msg.Width, msg.Height)
 		m.ready = true
 		// Bubble Tea only reports picker-pane size changes. The outer tmux
 		// client can resize without changing this pane's width, so kick the
@@ -1053,6 +1035,9 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openWorktreeDialog(dir)
 
 	case "f6": // Ctrl+d: delete active directory
+		if len(m.selectedItems) > 0 {
+			return m, m.openBatchDelete()
+		}
 		wt := m.contextDirectory()
 		if wt == nil {
 			return m, nil
@@ -1095,6 +1080,9 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openIDESelect(wt.Path)
 
 	case "f3": // Ctrl+k: kill selected session
+		if len(m.selectedItems) > 0 {
+			return m, m.openBatchKill()
+		}
 		return m, m.openKillSession()
 
 	case "ctrl+o": // Open task URL in browser
@@ -1124,15 +1112,6 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	default:
-		// Batch action keys (only active when items are selected)
-		if len(m.selectedItems) > 0 && msg.Type == tea.KeyRunes {
-			switch string(msg.Runes) {
-			case "k":
-				return m, m.openBatchKill()
-			case "x":
-				return m, m.openBatchDelete()
-			}
-		}
 		if msg.Type == tea.KeyRunes {
 			m.searchQuery += string(msg.Runes)
 			m.cursor = 0
@@ -1207,8 +1186,19 @@ func (m *PickerModel) requestNavigate(newPath string) tea.Cmd {
 		return m.navigateTo(newPath)
 	}
 	m.pendingNavigatePath = newPath
-	m.batchConfirm.ShowNavigate(aiNames, m.taskNamesFor(aiNames), newPath, targetSession)
-	return nil
+	req := BatchConfirmRequest{
+		Action:        BatchNavigateRestart,
+		Items:         aiNames,
+		TaskNames:     m.taskNamesFor(aiNames),
+		NavigatePath:  newPath,
+		TargetSession: targetSession,
+	}
+	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
+		if exitCode == 0 {
+			return BatchConfirmedMsg{Action: BatchNavigateRestart, Items: aiNames}
+		}
+		return BatchCancelledMsg{}
+	})
 }
 
 // activeAINames returns the directory names of every live AI session in
@@ -1262,8 +1252,17 @@ func (m *PickerModel) selectedItemPaths() []string {
 
 func (m *PickerModel) openBatchKill() tea.Cmd {
 	paths := m.selectedItemPaths()
-	m.batchConfirm.Show(BatchKillSessions, paths, m.taskNamesFor(paths), 0)
-	return nil
+	req := BatchConfirmRequest{
+		Action:    BatchKillSessions,
+		Items:     paths,
+		TaskNames: m.taskNamesFor(paths),
+	}
+	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
+		if exitCode == 0 {
+			return BatchConfirmedMsg{Action: BatchKillSessions, Items: paths}
+		}
+		return BatchCancelledMsg{}
+	})
 }
 
 func (m *PickerModel) openKillSession() tea.Cmd {
@@ -1271,8 +1270,18 @@ func (m *PickerModel) openKillSession() tea.Cmd {
 	if wt == nil {
 		return nil
 	}
-	m.batchConfirm.Show(BatchKillSessions, []string{wt.Path}, m.taskNamesFor([]string{wt.Path}), 0)
-	return nil
+	paths := []string{wt.Path}
+	req := BatchConfirmRequest{
+		Action:    BatchKillSessions,
+		Items:     paths,
+		TaskNames: m.taskNamesFor(paths),
+	}
+	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
+		if exitCode == 0 {
+			return BatchConfirmedMsg{Action: BatchKillSessions, Items: paths}
+		}
+		return BatchCancelledMsg{}
+	})
 }
 
 func (m *PickerModel) openBatchDelete() tea.Cmd {
@@ -1283,8 +1292,18 @@ func (m *PickerModel) openBatchDelete() tea.Cmd {
 			dirtyCount++
 		}
 	}
-	m.batchConfirm.Show(BatchDeleteWorktrees, paths, m.taskNamesFor(paths), dirtyCount)
-	return nil
+	req := BatchConfirmRequest{
+		Action:    BatchDeleteWorktrees,
+		Items:     paths,
+		TaskNames: m.taskNamesFor(paths),
+		Dirty:     dirtyCount,
+	}
+	return m.openBatchConfirmDialog(req, func(exitCode int) tea.Msg {
+		if exitCode == 0 {
+			return BatchConfirmedMsg{Action: BatchDeleteWorktrees, Items: paths}
+		}
+		return BatchCancelledMsg{}
+	})
 }
 
 // taskNamesFor returns a parallel slice of resolved task names for the
@@ -1504,6 +1523,25 @@ func (m *PickerModel) runDialogInWorkingPanelAtPath(dialogPath, windowName strin
 
 func (m *PickerModel) runDialogInWorkingPanel(windowName string, args []string, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
 	return m.runDialogInWorkingPanelAtPath(m.rootPath, windowName, args, resultMsg)
+}
+
+func (m *PickerModel) openBatchConfirmDialog(req BatchConfirmRequest, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
+	if err := StoreBatchConfirmRequest(req); err != nil {
+		m.err = fmt.Sprintf("Failed to open confirmation: %v", err)
+		return nil
+	}
+	cmd := m.runDialogInWorkingPanel("asm-batch-confirm", []string{"--batch-confirm"}, func(exitCode int) tea.Msg {
+		if err := ClearBatchConfirmRequest(); err != nil {
+			asmlog.Debugf("picker: batch-confirm clear request failed session=%q err=%v", asmtmux.SessionName, err)
+		}
+		return resultMsg(exitCode)
+	})
+	if cmd == nil {
+		if err := ClearBatchConfirmRequest(); err != nil {
+			asmlog.Debugf("picker: batch-confirm clear request after open failure failed session=%q err=%v", asmtmux.SessionName, err)
+		}
+	}
+	return cmd
 }
 
 func (m *PickerModel) openProviderSelect() tea.Cmd {
@@ -1936,7 +1974,7 @@ func writeStatusSummaryCmd(enable, changed bool, line1, line2, shortcuts string)
 // is not valid for the current context, `^w: worktree` is omitted.
 func renderShortcutsPlain(selectedCount int, showWorktree bool) string {
 	if selectedCount > 0 {
-		return fmt.Sprintf(" %d selected  k: kill  x: delete  ^l: panel  ^x: toggle  Esc: clear", selectedCount)
+		return fmt.Sprintf(" %d selected  ^k: kill  ^d: delete  ^l: panel  ^x: toggle  Esc: clear", selectedCount)
 	}
 	if showWorktree {
 		return " ↵: open  ^g: focus  ^l: panel  ^k: kill  ^t: term  ^n: launch  ^]: rotate  ^x: select  ^o: task  ^e: IDE  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
@@ -2273,12 +2311,6 @@ func (m *PickerModel) contextSupportsWorktree() bool {
 func (m PickerModel) View() string {
 	if !m.ready {
 		return "Loading..."
-	}
-
-	// Batch confirm takes over the full pane (like the worktree/settings
-	// dialogs) instead of overlaying a small centered box on the picker.
-	if m.batchConfirm.IsVisible() {
-		return m.batchConfirm.View()
 	}
 
 	var title string

@@ -9,7 +9,7 @@ import (
 func RenderStatusBar(width int, focused bool, selectedCount int) string {
 	var keys string
 	if selectedCount > 0 {
-		keys = fmt.Sprintf(" %d selected  k: kill  x: delete  ^x: toggle  Esc: clear", selectedCount)
+		keys = fmt.Sprintf(" %d selected  ^k: kill  ^d: delete  ^x: toggle  Esc: clear", selectedCount)
 	} else {
 		keys = " ↵: open  ^g: focus  ^t: term  ^n: new  ^]: rotate  ^x: select  ^k: task  ^p: AI  ^w: worktree  ^d: remove  ^s: settings  ^q: quit"
 	}
