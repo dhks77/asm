@@ -17,6 +17,7 @@ import (
 	"github.com/nhn/asm/notification"
 	"github.com/nhn/asm/provider"
 	"github.com/nhn/asm/recent"
+	"github.com/nhn/asm/sessionstate"
 	"github.com/nhn/asm/shelljoin"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/tracker"
@@ -100,6 +101,15 @@ type launcherExitedMsg struct {
 	Path string
 }
 
+type restoreSnapshotDoneMsg struct {
+	Targets       []sessionstate.TargetSnapshot
+	FrontPath     string
+	FrontKind     string
+	FocusedPane   string
+	WorkingZoomed bool
+	Errors        []string
+}
+
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
@@ -157,6 +167,8 @@ type PickerModel struct {
 	ready          bool
 	err            string
 	searchQuery    string
+	workingZoomed  bool
+	restoreLast    bool
 	selectedItems  map[string]bool
 	batchConfirm   BatchConfirmModel
 	// pendingNavigatePath is set when the user pressed ←/→ but we had to
@@ -175,7 +187,7 @@ type PickerModel struct {
 	isRepoMode bool
 }
 
-func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) PickerModel {
+func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE, restoreLast bool) PickerModel {
 	return PickerModel{
 		cfg:                  cfg,
 		rootPath:             rootPath,
@@ -200,6 +212,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		ides:                 ides,
 		focused:              true,
 		isRepoMode:           worktree.IsRepoMode(rootPath),
+		restoreLast:          restoreLast,
 	}
 }
 
@@ -226,6 +239,101 @@ func (m *PickerModel) syncPickerWidthCmd(zoomed bool) tea.Cmd {
 	}
 	m.pickerWidthDirty = false
 	return resizePickerPanelCmd(m.cfg.GetPickerWidth())
+}
+
+func restoreSnapshotCmd(rootPath string, registry *provider.Registry) tea.Cmd {
+	return func() tea.Msg {
+		snap, err := sessionstate.Load(rootPath)
+		if err != nil || snap == nil || !snap.HasTargets() {
+			return nil
+		}
+
+		msg := restoreSnapshotDoneMsg{
+			FrontPath:     snap.FrontPath,
+			FrontKind:     snap.FrontKind,
+			FocusedPane:   snap.FocusedPane,
+			WorkingZoomed: snap.WorkingZoomed,
+		}
+
+		for _, target := range snap.Targets {
+			restored := sessionstate.TargetSnapshot{Path: target.Path}
+			if target.HasAI {
+				p := registry.Get(target.Provider)
+				if p == nil {
+					p = registry.Default()
+				}
+				args := p.Args()
+				if extra := p.ResumeArgs(target.Path); len(extra) > 0 {
+					args = append(append([]string(nil), extra...), args...)
+				}
+				if err := asmtmux.CreateDirectoryWindow(target.Path, target.Path, p.Command(), args); err != nil {
+					msg.Errors = append(msg.Errors, fmt.Sprintf("%s (AI): %v", filepath.Base(target.Path), err))
+				} else {
+					_ = asmtmux.SetWindowOption(target.Path, "asm-provider", p.Name())
+					restored.HasAI = true
+					restored.Provider = p.Name()
+				}
+			}
+			if target.HasTerm {
+				if err := asmtmux.CreateTerminalWindow(target.Path, target.Path); err != nil {
+					msg.Errors = append(msg.Errors, fmt.Sprintf("%s (term): %v", filepath.Base(target.Path), err))
+				} else {
+					restored.HasTerm = true
+				}
+			}
+			if restored.HasAI || restored.HasTerm {
+				msg.Targets = append(msg.Targets, restored)
+			}
+		}
+
+		return msg
+	}
+}
+
+func (m *PickerModel) buildSessionSnapshot(activeKinds map[string]asmtmux.SessionKind) sessionstate.Snapshot {
+	snap := sessionstate.Snapshot{
+		RootPath:      m.rootPath,
+		FrontPath:     m.workingPath,
+		FrontKind:     "ai",
+		FocusedPane:   "working",
+		WorkingZoomed: m.workingZoomed,
+	}
+	if m.termPath != "" {
+		snap.FrontPath = m.termPath
+		snap.FrontKind = "term"
+	}
+	if m.focused {
+		snap.FocusedPane = "picker"
+	}
+
+	for _, wt := range m.directories {
+		kind := activeKinds[wt.Path]
+		if kind == 0 {
+			continue
+		}
+		target := sessionstate.TargetSnapshot{
+			Path:    wt.Path,
+			HasAI:   kind.HasAI(),
+			HasTerm: kind.HasTerm(),
+		}
+		if kind.HasAI() {
+			target.Provider = m.worktreeProviders[wt.Path]
+			if target.Provider == "" {
+				target.Provider = m.registry.Default().Name()
+			}
+		}
+		snap.Targets = append(snap.Targets, target)
+	}
+
+	return snap
+}
+
+func (m *PickerModel) persistSessionSnapshotCmd(activeKinds map[string]asmtmux.SessionKind) tea.Cmd {
+	snap := m.buildSessionSnapshot(activeKinds)
+	return func() tea.Msg {
+		_ = sessionstate.Save(m.rootPath, snap)
+		return nil
+	}
 }
 
 func (m *PickerModel) focusWorkingPanel() {
@@ -319,14 +427,18 @@ func (m *PickerModel) filteredDirectories() []int {
 }
 
 func (m PickerModel) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.scanDirectories(),
 		providerStateTickCmd(),
 		spinnerTickCmd(),
 		scrollTickCmd(),
 		sessionHealthTickCmd(),
 		fetchTerminalLayoutCmd(),
-	)
+	}
+	if m.restoreLast {
+		cmds = append(cmds, restoreSnapshotCmd(m.rootPath, m.registry))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -361,6 +473,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case terminalLayoutResolvedMsg:
 		m.terminalWidthPending = false
+		m.workingZoomed = msg.zoomed
 		if msg.width > 0 && msg.width != m.terminalWidth {
 			m.terminalWidth = msg.width
 			m.pickerWidthDirty = true
@@ -372,6 +485,59 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 		cmds = append(cmds, terminalLayoutTickCmd())
+		return m, tea.Batch(cmds...)
+
+	case restoreSnapshotDoneMsg:
+		var cmds []tea.Cmd
+		for _, target := range msg.Targets {
+			wt, extraCmds := m.ensureDirectoryTracked(target.Path)
+			if wt == nil {
+				continue
+			}
+			cmds = append(cmds, extraCmds...)
+			if target.HasAI {
+				providerName := target.Provider
+				if providerName == "" {
+					providerName = m.registry.Default().Name()
+				}
+				m.worktreeProviders[target.Path] = providerName
+				m.sessionStartTimes[target.Path] = time.Now()
+				m.activeKinds[target.Path] |= asmtmux.SessionAI
+				cmds = append(cmds, waitForExitCmd(target.Path))
+			}
+			if target.HasTerm {
+				m.terminalStartTimes[target.Path] = time.Now()
+				m.activeKinds[target.Path] |= asmtmux.SessionTerm
+				cmds = append(cmds, waitForTermExitCmd(target.Path))
+			}
+		}
+		if msg.FrontPath != "" {
+			if wt := m.worktreeByPath(msg.FrontPath); wt != nil {
+				switch msg.FrontKind {
+				case "term":
+					if m.swapTermToWorkingPanel(msg.FrontPath) {
+						m.focusWorkingPanel()
+					}
+				default:
+					m.showInWorkingPanel(wt)
+				}
+			}
+		}
+		if msg.WorkingZoomed {
+			m.workingZoomed = true
+			_ = asmtmux.ZoomWorkingPanel()
+		} else {
+			m.workingZoomed = false
+			if msg.FocusedPane == "working" && (m.workingPath != "" || m.termPath != "") {
+				m.focusWorkingPanel()
+			} else {
+				asmtmux.FocusPickingPanel()
+			}
+		}
+		if len(msg.Errors) > 0 {
+			m.err = "Restore issues:\n" + strings.Join(msg.Errors, "\n")
+		}
+		cmds = append(cmds, m.scanDirectories())
 		return m, tea.Batch(cmds...)
 
 	case statusSummaryWrittenMsg:
@@ -446,10 +612,14 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.stabilizeCursor(cursorPath)
+		if cmd := m.persistSessionSnapshotCmd(activeKinds); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if pending == 0 {
 			// Nothing to wait for — re-arm the tick directly so we keep
 			// polling once sessions come online.
-			return m, providerStateTickCmd()
+			cmds = append(cmds, providerStateTickCmd())
+			return m, tea.Batch(cmds...)
 		}
 		m.providerStatePending = pending
 		return m, tea.Batch(cmds...)
@@ -1555,6 +1725,7 @@ func (m *PickerModel) showInWorkingPanel(wt *worktree.Worktree) {
 		m.focusWorkingPanel()
 		if wasZoomed {
 			_ = asmtmux.ZoomWorkingPanel()
+			m.workingZoomed = true
 		}
 		_ = recent.Record(wt.Path)
 	}
@@ -1573,6 +1744,7 @@ func (m *PickerModel) openOrFocusWorktree(wt *worktree.Worktree) tea.Cmd {
 
 func (m *PickerModel) togglePickerPanel() tea.Cmd {
 	if asmtmux.IsWorkingPanelZoomed() {
+		m.workingZoomed = false
 		asmtmux.FocusPickingPanel()
 		return nil
 	}
@@ -1581,6 +1753,7 @@ func (m *PickerModel) togglePickerPanel() tea.Cmd {
 	}
 	asmtmux.FocusWorkingPanel()
 	asmtmux.ZoomWorkingPanel()
+	m.workingZoomed = true
 	return nil
 }
 

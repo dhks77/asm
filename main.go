@@ -15,6 +15,7 @@ import (
 	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/plugincfg"
 	"github.com/nhn/asm/provider"
+	"github.com/nhn/asm/sessionstate"
 	"github.com/nhn/asm/shelljoin"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/tracker"
@@ -35,6 +36,7 @@ func main() {
 	providerSelect := flag.Bool("provider-select", false, "Run provider selection dialog")
 	ideSelect := flag.Bool("ide-select", false, "Run IDE selection dialog")
 	launcherMode := flag.Bool("launcher", false, "Run session launcher dialog")
+	restoreLast := flag.Bool("restore-last", false, "Restore previously open sessions in picker mode")
 	flag.Parse()
 
 	initLog()
@@ -130,7 +132,7 @@ func main() {
 	} else if *settingsMode {
 		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
-		runPicker(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg))
+		runPicker(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg), *restoreLast)
 	} else {
 		runOrchestrator(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg))
 	}
@@ -305,6 +307,36 @@ func confirmRestartExistingSession(rootPath string) bool {
 	}
 }
 
+func confirmRestorePreviousSession(rootPath string, snap *sessionstate.Snapshot) bool {
+	if snap == nil || !snap.HasTargets() {
+		return false
+	}
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return false
+	}
+	aiCount, termCount := 0, 0
+	for _, target := range snap.Targets {
+		if target.HasAI {
+			aiCount++
+		}
+		if target.HasTerm {
+			termCount++
+		}
+	}
+	fmt.Printf("Restore previous asm sessions for %s?\n", rootPath)
+	fmt.Printf("Found %d AI and %d terminal session(s) from the last run.\n", aiCount, termCount)
+	fmt.Print("Restore them now? [Y/n]: ")
+	var answer string
+	_, _ = fmt.Fscanln(os.Stdin, &answer)
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
 	if !asmtmux.IsAvailable() {
 		logErr("Error: tmux is required. Install it with: brew install tmux\n")
@@ -313,7 +345,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 
 	// If already inside the asm tmux session, run picker directly
 	if asmtmux.IsInsideTmux() && asmtmux.SessionExists() {
-		runPicker(cfg, rootPath, registry, t, taskCache, ides)
+		runPicker(cfg, rootPath, registry, t, taskCache, ides, false)
 		return
 	}
 
@@ -334,7 +366,17 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 			fmt.Println("Cancelled.")
 			return
 		}
+		_ = sessionstate.Delete(rootPath)
 		asmtmux.KillSession()
+	}
+
+	restoreLast := false
+	if snap, err := sessionstate.Load(rootPath); err == nil && snap != nil && snap.HasTargets() {
+		if confirmRestorePreviousSession(rootPath, snap) {
+			restoreLast = true
+		} else {
+			_ = sessionstate.Delete(rootPath)
+		}
 	}
 
 	// Get current executable path for picker command
@@ -345,7 +387,11 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	}
 
 	// Create tmux session (starts with default shell)
-	pickerCmd := shelljoin.Join(exe, "--picker", "--path", rootPath)
+	pickerArgs := []string{exe, "--picker", "--path", rootPath}
+	if restoreLast {
+		pickerArgs = append(pickerArgs, "--restore-last")
+	}
+	pickerCmd := shelljoin.Join(pickerArgs...)
 	if err := asmtmux.CreateSession(pickerCmd); err != nil {
 		logErr("Error creating tmux session: %v\n", err)
 		os.Exit(1)
@@ -548,8 +594,8 @@ func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) 
 	return entries
 }
 
-func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE) {
-	model := ui.NewPickerModel(cfg, rootPath, registry, t, taskCache, ides)
+func runPicker(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.PathCache, ides []ide.IDE, restoreLast bool) {
+	model := ui.NewPickerModel(cfg, rootPath, registry, t, taskCache, ides, restoreLast)
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithReportFocus())
 
 	if _, err := p.Run(); err != nil {
