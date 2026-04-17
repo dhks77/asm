@@ -74,8 +74,9 @@ type terminalLayoutTickMsg time.Time
 // terminalLayoutResolvedMsg delivers the attached tmux client width plus the
 // main-window zoom flag, measured off the Update goroutine.
 type terminalLayoutResolvedMsg struct {
-	width  int
-	zoomed bool
+	width         int
+	zoomed        bool
+	clientFocused bool
 }
 
 // statusSummaryWrittenMsg is returned by writeStatusSummaryCmd once its
@@ -162,6 +163,10 @@ type PickerModel struct {
 	// layoutSyncPending forces a hidden-window size resync after a picker
 	// WindowSizeMsg even when the tmux client width itself didn't change.
 	layoutSyncPending bool
+	// clientFocused tracks whether the attached tmux client is currently
+	// focused. While unfocused we ignore layout churn from cmux workspace
+	// switches and resync only when focus returns.
+	clientFocused bool
 	// statusSummaryWriting is true while a writeStatusSummaryCmd goroutine
 	// is still flushing set-option calls to tmux. scrollTick skips issuing
 	// a new write while this is set, so a slow tmux server can't snowball
@@ -227,6 +232,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		terminalWidthPending: true,
 		pickerWidthDirty:     true,
 		layoutSyncPending:    true,
+		clientFocused:        true,
 		selectedItems:        make(map[string]bool),
 		tracker:              t,
 		taskCache:            taskCache,
@@ -356,9 +362,9 @@ func (m *PickerModel) requestTerminalLayout() tea.Cmd {
 	return fetchTerminalLayoutCmd()
 }
 
-func (m *PickerModel) syncLayoutCmd(zoomed bool, syncHidden bool) tea.Cmd {
+func (m *PickerModel) syncLayoutCmd(zoomed bool, syncMain bool) tea.Cmd {
 	resizePicker := m.pickerWidthDirty && !zoomed && m.cfg != nil
-	if !resizePicker && !syncHidden {
+	if !resizePicker && !syncMain {
 		return nil
 	}
 	pickerPct := 0
@@ -367,10 +373,13 @@ func (m *PickerModel) syncLayoutCmd(zoomed bool, syncHidden bool) tea.Cmd {
 		pickerPct = m.cfg.GetPickerWidth()
 	}
 	return func() tea.Msg {
+		if syncMain {
+			asmtmux.SyncMainWindowSize()
+		}
 		if resizePicker {
 			_ = asmtmux.ResizePickerPanel(pickerPct)
 		}
-		if resizePicker || syncHidden {
+		if resizePicker || syncMain {
 			asmtmux.SyncManagedWindowSizes()
 		}
 		return nil
@@ -606,9 +615,15 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case terminalLayoutResolvedMsg:
 		m.terminalWidthPending = false
+		prevClientFocused := m.clientFocused
+		m.clientFocused = msg.clientFocused
+		if !msg.clientFocused {
+			m.layoutSyncPending = true
+			return m, terminalLayoutTickCmd()
+		}
 		prevZoomed := m.workingZoomed
 		m.workingZoomed = msg.zoomed
-		layoutChanged := prevZoomed != msg.zoomed || m.layoutSyncPending
+		layoutChanged := prevZoomed != msg.zoomed || m.layoutSyncPending || !prevClientFocused
 		if msg.width > 0 && msg.width != m.terminalWidth {
 			m.terminalWidth = msg.width
 			m.pickerWidthDirty = true
@@ -2414,8 +2429,9 @@ func terminalLayoutTickCmd() tea.Cmd {
 func fetchTerminalLayoutCmd() tea.Cmd {
 	return func() tea.Msg {
 		return terminalLayoutResolvedMsg{
-			width:  asmtmux.TerminalWidth(),
-			zoomed: asmtmux.IsWorkingPanelZoomed(),
+			width:         asmtmux.TerminalWidth(),
+			zoomed:        asmtmux.IsWorkingPanelZoomed(),
+			clientFocused: asmtmux.ClientFocused(),
 		}
 	}
 }

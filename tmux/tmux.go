@@ -281,6 +281,13 @@ func InstallRootBindings() {
 
 	// Enable focus events so Bubble Tea can detect pane focus/blur
 	exec.Command("tmux", "set-option", "-t", SessionName, "focus-events", "on").Run()
+	exec.Command("tmux", "set-option", "-t", SessionName, "@asm-client-focused", "1").Run()
+	exec.Command("tmux", "set-hook", "-t", SessionName, "client-focus-out",
+		fmt.Sprintf("set-option -t %s @asm-client-focused 0", SessionName),
+	).Run()
+	exec.Command("tmux", "set-hook", "-t", SessionName, "client-focus-in",
+		fmt.Sprintf("set-option -t %s @asm-client-focused 1", SessionName),
+	).Run()
 
 	// Enable mouse support for scrollback in working panel
 	exec.Command("tmux", "set-option", "-t", SessionName, "mouse", "on").Run()
@@ -510,6 +517,41 @@ func runTmux(args ...string) {
 	_ = exec.CommandContext(ctx, "tmux", args...).Run()
 }
 
+func clientSize() (int, int, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message",
+		"-t", SessionName, "-p", "#{client_width}x#{client_height}").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	var w, h int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%dx%d", &w, &h); err != nil {
+		return 0, 0, false
+	}
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
+}
+
+// SyncMainWindowSize pins the visible main window to the currently attached
+// client size. The session uses a 3-line tmux status bar, so the content area
+// is client-height minus those 3 lines.
+func SyncMainWindowSize() {
+	w, h, ok := clientSize()
+	if !ok {
+		return
+	}
+	h -= 3
+	if h <= 0 {
+		h = 1
+	}
+	target := fmt.Sprintf("%s:%s", SessionName, MainWindow)
+	runTmux("set-option", "-w", "-t", target, "window-size", "manual")
+	runTmux("resize-window", "-t", target, "-x", fmt.Sprintf("%d", w), "-y", fmt.Sprintf("%d", h))
+}
+
 // workingSlotSize returns the current width/height of the main working pane.
 // Hidden AI/terminal/dialog windows are pinned to this size so swapping panes
 // doesn't force a reflow in the provider TUI.
@@ -587,19 +629,15 @@ func SyncManagedWindowSizes() {
 // TerminalWidth returns the attached client's terminal width in columns.
 // Falls back to 120 if it can't be queried.
 func TerminalWidth() int {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-t", SessionName,
-		"-p", "#{client_width}").Output()
-	if err != nil {
-		return 120
-	}
-	var w int
-	_, err = fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &w)
-	if err != nil || w <= 0 {
+	w, _, ok := clientSize()
+	if !ok {
 		return 120
 	}
 	return w
+}
+
+func ClientFocused() bool {
+	return GetSessionOption("asm-client-focused") != "0"
 }
 
 // FocusWorkingPanel focuses the working panel (session).
