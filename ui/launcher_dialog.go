@@ -20,12 +20,12 @@ type launcherTab int
 
 const (
 	launcherTabFavorites launcherTab = iota
-	launcherTabRecent
 	launcherTabDirectories
+	launcherTabRecent
 	launcherTabRepos
 )
 
-var launcherTabs = []string{"Favorites", "Recent", "Directories"}
+var launcherTabs = []string{"Favorites", "Directories", "Recent"}
 
 type launcherEntry struct {
 	label    string

@@ -188,6 +188,30 @@ func TestLauncherEntriesLoadedRestoresPendingSelectionPath(t *testing.T) {
 	}
 }
 
+func TestLauncherAdvanceTabUsesFavoritesDirectoriesRecentOrder(t *testing.T) {
+	m := LauncherModel{tab: launcherTabFavorites}
+
+	m.advanceTab(+1)
+	if m.tab != launcherTabDirectories {
+		t.Fatalf("first tab advance = %v, want %v", m.tab, launcherTabDirectories)
+	}
+
+	m.advanceTab(+1)
+	if m.tab != launcherTabRecent {
+		t.Fatalf("second tab advance = %v, want %v", m.tab, launcherTabRecent)
+	}
+
+	m.advanceTab(+1)
+	if m.tab != launcherTabFavorites {
+		t.Fatalf("third tab advance = %v, want %v", m.tab, launcherTabFavorites)
+	}
+
+	m.advanceTab(-1)
+	if m.tab != launcherTabRecent {
+		t.Fatalf("reverse tab advance = %v, want %v", m.tab, launcherTabRecent)
+	}
+}
+
 func TestHandleBackDirectoriesStoresSelectionPath(t *testing.T) {
 	m := LauncherModel{
 		tab:         launcherTabDirectories,
