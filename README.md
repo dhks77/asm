@@ -121,8 +121,10 @@ launcher 탭:
 picker 검색은 **열려 있는 세션들**에만 적용되며 다음을 매칭한다.
 
 - 폴더명
+- repo명
 - task명
 - branch명
+- path
 
 ## Keybindings
 

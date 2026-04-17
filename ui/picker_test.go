@@ -98,6 +98,40 @@ func TestPickerFilteredDirectoriesGroupsByRepo(t *testing.T) {
 	}
 }
 
+func TestPickerFilteredDirectoriesMatchesRepoLabelAndPath(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{
+			{Name: "feature-123", Path: "/tmp/worktrees/a"},
+			{Name: "bugfix-456", Path: "/tmp/custom/location-b"},
+		},
+		repoRoots: map[string]string{
+			"/tmp/worktrees/a":       "/src/billing-main",
+			"/tmp/custom/location-b": "/src/accounts-main",
+		},
+		repoLabels: map[string]string{
+			"/tmp/worktrees/a":       "billing",
+			"/tmp/custom/location-b": "accounts",
+		},
+		repoColors:    map[string]string{},
+		activeKinds:   map[string]asmtmux.SessionKind{},
+		branches:      map[string]string{},
+		taskInfos:     map[string]tracker.TaskInfo{},
+		selectedItems: map[string]bool{},
+		searchQuery:   "billing",
+	}
+
+	filtered := m.filteredDirectories()
+	if len(filtered) != 1 || m.directories[filtered[0]].Path != "/tmp/worktrees/a" {
+		t.Fatalf("repo label filter matched %v, want only billing repo", filtered)
+	}
+
+	m.searchQuery = "location-b"
+	filtered = m.filteredDirectories()
+	if len(filtered) != 1 || m.directories[filtered[0]].Path != "/tmp/custom/location-b" {
+		t.Fatalf("path filter matched %v, want only custom path", filtered)
+	}
+}
+
 func TestPickerSeedsCachedBranchAndQueuesMetadataSequentially(t *testing.T) {
 	m := PickerModel{
 		branches:       map[string]string{},

@@ -537,21 +537,8 @@ func (m *PickerModel) filteredDirectories() []int {
 	} else {
 		query := strings.ToLower(m.searchQuery)
 		for i, wt := range m.directories {
-			if strings.Contains(strings.ToLower(wt.Name), query) {
+			if m.matchesSearchQuery(wt, query) {
 				matched = append(matched, i)
-				continue
-			}
-			if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
-				if strings.Contains(strings.ToLower(info.Name), query) {
-					matched = append(matched, i)
-					continue
-				}
-			}
-			if branch, ok := m.branches[wt.Path]; ok && branch != "" {
-				if strings.Contains(strings.ToLower(branch), query) {
-					matched = append(matched, i)
-					continue
-				}
 			}
 		}
 	}
@@ -581,6 +568,28 @@ func (m *PickerModel) filteredDirectories() []int {
 		return false
 	})
 	return matched
+}
+
+func (m *PickerModel) matchesSearchQuery(wt worktree.Worktree, query string) bool {
+	if strings.Contains(strings.ToLower(wt.Name), query) {
+		return true
+	}
+	if label := m.repoLabelForPath(wt.Path); label != "" && strings.Contains(strings.ToLower(label), query) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(wt.Path), query) {
+		return true
+	}
+	if root := m.repoRootForPath(wt.Path); root != "" && strings.Contains(strings.ToLower(root), query) {
+		return true
+	}
+	if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" && strings.Contains(strings.ToLower(info.Name), query) {
+		return true
+	}
+	if branch, ok := m.branches[wt.Path]; ok && branch != "" && strings.Contains(strings.ToLower(branch), query) {
+		return true
+	}
+	return false
 }
 
 func (m PickerModel) Init() tea.Cmd {
