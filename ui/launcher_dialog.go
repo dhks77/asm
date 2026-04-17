@@ -25,7 +25,7 @@ const (
 	launcherTabRepos
 )
 
-var launcherTabs = []string{"Favorites", "Recent", "Directories", "Repos"}
+var launcherTabs = []string{"Favorites", "Recent", "Directories"}
 
 type launcherEntry struct {
 	label    string
@@ -44,19 +44,24 @@ type launcherActiveTargets struct {
 
 // LauncherModel is a standalone launcher for the working panel.
 type LauncherModel struct {
-	tab             launcherTab
-	currentPath     string
-	repoPath        string
-	favoriteDirRoot string
-	entries         []launcherEntry
-	cursor          int
-	filter          string
-	SelectedPath    string
-	width           int
-	height          int
-	err             string
-	tracker         tracker.Tracker
-	taskCache       *tracker.TaskCache
+	tab                  launcherTab
+	currentPath          string
+	repoPath             string
+	favoriteDirRoot      string
+	entries              []launcherEntry
+	cursor               int
+	viewTop              int
+	filter               string
+	SelectedPath         string
+	width                int
+	height               int
+	err                  string
+	tracker              tracker.Tracker
+	taskCache            *tracker.TaskCache
+	loadVersion          int
+	taskFetchQueue       []string
+	taskFetchPending     bool
+	pendingSelectionPath string
 }
 
 func NewLauncherModel(initialPath string, t tracker.Tracker, taskCache *tracker.TaskCache) LauncherModel {
@@ -75,7 +80,7 @@ func NewLauncherModel(initialPath string, t tracker.Tracker, taskCache *tracker.
 }
 
 func (m LauncherModel) Init() tea.Cmd {
-	return m.reload()
+	return m.reload(m.loadVersion)
 }
 
 func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -86,10 +91,16 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case launcherEntriesLoadedMsg:
+		if msg.version != m.loadVersion {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.entries = nil
 			m.cursor = 0
+			m.viewTop = 0
+			m.taskFetchQueue = nil
+			m.taskFetchPending = false
 			return m, nil
 		}
 		m.err = ""
@@ -97,23 +108,44 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor >= len(m.entries) {
 			m.cursor = max(0, len(m.entries)-1)
 		}
-		return m, nil
+		m.applyPendingSelection()
+		m.clampViewTop()
+		m.taskFetchQueue = dedupeLauncherPaths(msg.pendingPaths)
+		m.taskFetchPending = false
+		return m, m.startNextTaskFetch()
+
+	case launcherTaskResolvedMsg:
+		if msg.version != m.loadVersion {
+			return m, nil
+		}
+		m.taskFetchPending = false
+		for i := range m.entries {
+			if filepath.Clean(m.entries[i].path) != msg.path {
+				continue
+			}
+			m.entries[i].taskName = msg.taskName
+		}
+		return m, m.startNextTaskFetch()
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "tab":
 			m.advanceTab(+1)
-			return m, m.reload()
+			return m, m.triggerReload()
 		case "shift+tab":
 			m.advanceTab(-1)
-			return m, m.reload()
+			return m, m.triggerReload()
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
+				if m.cursor < m.viewTop {
+					m.viewTop = m.cursor
+				}
 			}
 		case "down", "j":
 			if m.cursor < len(m.entries)-1 {
 				m.cursor++
+				m.adjustViewTop()
 			}
 		case "left", "h":
 			return m.handleBack()
@@ -130,7 +162,7 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			runes := []rune(m.filter)
 			m.filter = string(runes[:len(runes)-1])
 			m.cursor = 0
-			return m, m.reload()
+			return m, m.triggerReload()
 		case "esc", "q", "ctrl+c":
 			return m, tea.Quit
 		default:
@@ -138,11 +170,11 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyRunes:
 				m.filter += string(msg.Runes)
 				m.cursor = 0
-				return m, m.reload()
+				return m, m.triggerReload()
 			case tea.KeySpace:
 				m.filter += " "
 				m.cursor = 0
-				return m, m.reload()
+				return m, m.triggerReload()
 			}
 		}
 	}
@@ -156,7 +188,9 @@ func (m LauncherModel) View() string {
 	filterLine := lipgloss.NewStyle().Padding(0, 2).Foreground(primaryColor).Render("/ " + m.filter)
 
 	var rows []string
-	for i, entry := range m.entries {
+	start, end := m.visibleRange()
+	for i := start; i < end; i++ {
+		entry := m.entries[i]
 		cursor := "  "
 		style := normalItemStyle
 		if i == m.cursor {
@@ -174,6 +208,8 @@ func (m LauncherModel) View() string {
 			case "favorite-repo":
 				label += " " + lipgloss.NewStyle().Foreground(activeColor).Render("[repo]")
 			}
+		} else if entry.kind == "repo" || entry.kind == "open-current-repo" {
+			label += " " + lipgloss.NewStyle().Foreground(activeColor).Render("[repo]")
 		}
 		if entry.favorite && !m.isFavoritesRootView() {
 			label += " " + lipgloss.NewStyle().Foreground(warnColor).Render("[fav]")
@@ -210,8 +246,16 @@ func (m LauncherModel) View() string {
 }
 
 type launcherEntriesLoadedMsg struct {
-	entries []launcherEntry
-	err     error
+	version      int
+	entries      []launcherEntry
+	pendingPaths []string
+	err          error
+}
+
+type launcherTaskResolvedMsg struct {
+	version  int
+	path     string
+	taskName string
 }
 
 func (m *LauncherModel) advanceTab(delta int) {
@@ -220,58 +264,57 @@ func (m *LauncherModel) advanceTab(delta int) {
 	m.favoriteDirRoot = ""
 	m.filter = ""
 	m.cursor = 0
+	m.viewTop = 0
 }
 
 func (m LauncherModel) handleBack() (LauncherModel, tea.Cmd) {
 	switch m.tab {
 	case launcherTabFavorites:
 		if m.repoPath != "" {
+			prevRepoPath := m.repoPath
 			m.repoPath = ""
 			m.cursor = 0
 			m.filter = ""
-			return m, m.reload()
+			return m, m.triggerReloadSelecting(prevRepoPath)
 		}
 		if m.favoriteDirRoot != "" {
 			if filepath.Clean(m.currentPath) == filepath.Clean(m.favoriteDirRoot) {
+				prevFavoriteRoot := m.favoriteDirRoot
 				m.favoriteDirRoot = ""
 				m.cursor = 0
 				m.filter = ""
-				return m, m.reload()
+				return m, m.triggerReloadSelecting(prevFavoriteRoot)
 			}
+			childPath := m.currentPath
 			parent := filepath.Dir(m.currentPath)
 			if parent == m.currentPath {
+				prevFavoriteRoot := m.favoriteDirRoot
 				m.favoriteDirRoot = ""
 				m.cursor = 0
 				m.filter = ""
-				return m, m.reload()
+				return m, m.triggerReloadSelecting(prevFavoriteRoot)
 			}
 			m.currentPath = parent
 			m.cursor = 0
 			m.filter = ""
-			return m, m.reload()
+			return m, m.triggerReloadSelecting(childPath)
 		}
 		return m, nil
 	case launcherTabDirectories:
-		parent := filepath.Dir(m.currentPath)
-		if parent == m.currentPath {
-			return m, nil
-		}
-		m.currentPath = parent
-		m.cursor = 0
-		return m, m.reload()
-	case launcherTabRepos:
 		if m.repoPath != "" {
+			prevRepoPath := m.repoPath
 			m.repoPath = ""
 			m.cursor = 0
-			return m, m.reload()
+			return m, m.triggerReloadSelecting(prevRepoPath)
 		}
+		childPath := m.currentPath
 		parent := filepath.Dir(m.currentPath)
 		if parent == m.currentPath {
 			return m, nil
 		}
 		m.currentPath = parent
 		m.cursor = 0
-		return m, m.reload()
+		return m, m.triggerReloadSelecting(childPath)
 	default:
 		return m, nil
 	}
@@ -292,7 +335,7 @@ func (m LauncherModel) handleForward() (LauncherModel, tea.Cmd) {
 				m.currentPath = entry.path
 				m.cursor = 0
 				m.filter = ""
-				return m, m.reload()
+				return m, m.triggerReload()
 			}
 			return m, nil
 		}
@@ -302,26 +345,25 @@ func (m LauncherModel) handleForward() (LauncherModel, tea.Cmd) {
 			m.favoriteDirRoot = entry.path
 			m.cursor = 0
 			m.filter = ""
-			return m, m.reload()
+			return m, m.triggerReload()
 		case "favorite-repo":
 			m.repoPath = entry.path
 			m.cursor = 0
 			m.filter = ""
-			return m, m.reload()
+			return m, m.triggerReload()
 		}
 	case launcherTabDirectories:
-		if entry.kind == "dir" {
-			m.currentPath = entry.path
-			m.cursor = 0
-			m.filter = ""
-			return m, m.reload()
-		}
-	case launcherTabRepos:
-		if entry.kind == "repo" {
+		switch entry.kind {
+		case "repo", "open-current-repo":
 			m.repoPath = entry.path
 			m.cursor = 0
 			m.filter = ""
-			return m, m.reload()
+			return m, m.triggerReload()
+		case "dir":
+			m.currentPath = entry.path
+			m.cursor = 0
+			m.filter = ""
+			return m, m.triggerReload()
 		}
 	}
 	return m, nil
@@ -340,14 +382,14 @@ func (m LauncherModel) handleEnter() (LauncherModel, tea.Cmd) {
 		m.cursor = 0
 		m.filter = ""
 		asmlog.Debugf("launcher: drilling into favorite repo session=%q repo_path=%q", asmtmux.SessionName, m.repoPath)
-		return m, m.reload()
+		return m, m.triggerReload()
 	}
 	if m.tab == launcherTabRepos && entry.kind == "repo" {
 		m.repoPath = entry.path
 		m.cursor = 0
 		m.filter = ""
 		asmlog.Debugf("launcher: drilling into repo session=%q repo_path=%q", asmtmux.SessionName, m.repoPath)
-		return m, m.reload()
+		return m, m.triggerReload()
 	}
 	m.SelectedPath = entry.path
 	asmlog.Debugf("launcher: selected path=%q session=%q", m.SelectedPath, asmtmux.SessionName)
@@ -378,7 +420,7 @@ func (m LauncherModel) toggleFavorite() (LauncherModel, tea.Cmd) {
 			m.filter = ""
 		}
 	}
-	return m, m.reload()
+	return m, m.triggerReload()
 }
 
 func (m LauncherModel) favoriteToggleTarget() (asmfavorites.Kind, string, bool) {
@@ -407,12 +449,22 @@ func (m LauncherModel) favoriteToggleTarget() (asmfavorites.Kind, string, bool) 
 		if entry == nil {
 			return "", "", false
 		}
-		return asmfavorites.KindDir, entry.path, true
+		return launcherFavoriteKindForPath(entry.path), entry.path, true
 	case launcherTabDirectories:
-		if entry == nil || (entry.kind != "open-current" && entry.kind != "dir") {
+		if m.repoPath != "" {
+			return asmfavorites.KindRepo, m.repoPath, true
+		}
+		if entry == nil {
 			return "", "", false
 		}
-		return asmfavorites.KindDir, entry.path, true
+		switch entry.kind {
+		case "repo", "open-current-repo":
+			return asmfavorites.KindRepo, entry.path, true
+		case "open-current", "dir":
+			return asmfavorites.KindDir, entry.path, true
+		default:
+			return "", "", false
+		}
 	case launcherTabRepos:
 		if m.repoPath != "" {
 			return asmfavorites.KindRepo, m.repoPath, true
@@ -425,7 +477,26 @@ func (m LauncherModel) favoriteToggleTarget() (asmfavorites.Kind, string, bool) 
 	return "", "", false
 }
 
-func (m LauncherModel) reload() tea.Cmd {
+func (m *LauncherModel) triggerReload() tea.Cmd {
+	return m.beginReload("")
+}
+
+func (m *LauncherModel) triggerReloadSelecting(path string) tea.Cmd {
+	return m.beginReload(path)
+}
+
+func (m *LauncherModel) beginReload(path string) tea.Cmd {
+	m.pendingSelectionPath = ""
+	if strings.TrimSpace(path) != "" {
+		m.pendingSelectionPath = filepath.Clean(path)
+	}
+	m.loadVersion++
+	m.taskFetchQueue = nil
+	m.taskFetchPending = false
+	return m.reload(m.loadVersion)
+}
+
+func (m LauncherModel) reload(version int) tea.Cmd {
 	tab := m.tab
 	currentPath := m.currentPath
 	repoPath := m.repoPath
@@ -437,53 +508,52 @@ func (m LauncherModel) reload() tea.Cmd {
 		activeTargets := newLauncherActiveTargets(asmtmux.ListActiveSessions())
 		favoriteEntries, err := asmfavorites.Load()
 		if err != nil {
-			return launcherEntriesLoadedMsg{err: err}
+			return launcherEntriesLoadedMsg{version: version, err: err}
 		}
 		favoriteSet := launcherFavoriteSet(favoriteEntries)
 		resolver := newLauncherTaskResolver(t, taskCache)
 		switch tab {
 		case launcherTabFavorites:
 			if repoPath != "" {
-				entries, err := loadRepoWorktreeEntries(repoPath, filter, activeTargets, favoriteSet, resolver)
-				return launcherEntriesLoadedMsg{entries: entries, err: err}
+				entries, pendingPaths, err := loadRepoWorktreeEntries(repoPath, filter, activeTargets, favoriteSet, resolver)
+				return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
 			}
 			if favoriteDirRoot != "" {
-				entries, err := loadDirectoryEntries(currentPath, filter, activeTargets, favoriteSet, resolver)
-				return launcherEntriesLoadedMsg{entries: entries, err: err}
+				entries, pendingPaths, err := loadDirectoryEntries(currentPath, filter, activeTargets, favoriteSet, resolver, true)
+				return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
 			}
-			entries, err := loadFavoriteEntries(filter, activeTargets, resolver, favoriteEntries)
-			return launcherEntriesLoadedMsg{entries: entries, err: err}
+			entries, pendingPaths, err := loadFavoriteEntries(filter, activeTargets, resolver, favoriteEntries)
+			return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
 		case launcherTabRecent:
-			entries, err := loadRecentEntries(filter, activeTargets, favoriteSet, resolver)
-			return launcherEntriesLoadedMsg{entries: entries, err: err}
-		case launcherTabRepos:
+			entries, pendingPaths, err := loadRecentEntries(filter, activeTargets, favoriteSet, resolver)
+			return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
+		case launcherTabDirectories, launcherTabRepos:
 			if repoPath != "" {
-				entries, err := loadRepoWorktreeEntries(repoPath, filter, activeTargets, favoriteSet, resolver)
-				return launcherEntriesLoadedMsg{entries: entries, err: err}
+				entries, pendingPaths, err := loadRepoWorktreeEntries(repoPath, filter, activeTargets, favoriteSet, resolver)
+				return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
 			}
-			entries, err := loadRepoEntries(currentPath, filter, activeTargets, favoriteSet, resolver)
-			return launcherEntriesLoadedMsg{entries: entries, err: err}
-		default:
-			entries, err := loadDirectoryEntries(currentPath, filter, activeTargets, favoriteSet, resolver)
-			return launcherEntriesLoadedMsg{entries: entries, err: err}
+			entries, pendingPaths, err := loadDirectoryEntries(currentPath, filter, activeTargets, favoriteSet, resolver, false)
+			return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
 		}
+		return launcherEntriesLoadedMsg{version: version}
 	}
 }
 
-func loadRecentEntries(filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, error) {
+func loadRecentEntries(filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, []string, error) {
 	items, err := recent.Load()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var entries []launcherEntry
+	var pendingPaths []string
 	for _, item := range items {
 		info, err := os.Stat(item.Path)
 		if err != nil || !info.IsDir() {
 			continue
 		}
 		base := filepath.Base(item.Path)
-		taskName := resolver.taskName(item.Path)
-		if filter != "" && !matchesLauncherFilter(filter, base, taskName, item.Path) {
+		taskName, needsResolve, include := launcherTaskNameForEntry(filter, base, item.Path, resolver)
+		if !include {
 			continue
 		}
 		entries = append(entries, launcherEntry{
@@ -495,33 +565,57 @@ func loadRecentEntries(filter string, activeTargets launcherActiveTargets, favor
 			active:   activeTargets.hasPath(item.Path),
 			favorite: favoriteSet[launcherFavoriteKey(asmfavorites.KindDir, item.Path)],
 		})
+		if needsResolve {
+			pendingPaths = append(pendingPaths, item.Path)
+		}
 	}
-	return entries, nil
+	return entries, pendingPaths, nil
 }
 
-func loadDirectoryEntries(currentPath, filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, error) {
+func loadDirectoryEntries(currentPath, filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver, resolveTasks bool) ([]launcherEntry, []string, error) {
 	entries, err := os.ReadDir(currentPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	currentTask := resolver.taskName(currentPath)
+	currentKind := "open-current"
+	if worktree.IsRepoMode(currentPath) {
+		currentKind = "open-current-repo"
+	}
+	currentTask, currentNeedsResolve, includeCurrent := launcherDirectoryTaskNameForEntry(filter, "[Open current directory]", currentPath, resolver, resolveTasks)
+	currentFavoriteKind := asmfavorites.KindDir
+	if currentKind == "open-current-repo" {
+		currentFavoriteKind = asmfavorites.KindRepo
+	}
 	rows := []launcherEntry{{
 		label:    "[Open current directory]",
 		taskName: currentTask,
 		subtitle: currentPath,
 		path:     currentPath,
-		kind:     "open-current",
+		kind:     currentKind,
 		active:   activeTargets.hasPath(currentPath),
-		favorite: favoriteSet[launcherFavoriteKey(asmfavorites.KindDir, currentPath)],
+		favorite: favoriteSet[launcherFavoriteKey(currentFavoriteKind, currentPath)],
 	}}
+	var pendingPaths []string
+	if currentNeedsResolve {
+		pendingPaths = append(pendingPaths, currentPath)
+	}
+	if filter != "" && !includeCurrent {
+		rows = nil
+	}
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		path := filepath.Join(currentPath, entry.Name())
-		taskName := resolver.taskName(path)
-		if filter != "" && !matchesLauncherFilter(filter, entry.Name(), taskName, path) {
+		entryKind := "dir"
+		favoriteKind := asmfavorites.KindDir
+		if worktree.IsRepoMode(path) {
+			entryKind = "repo"
+			favoriteKind = asmfavorites.KindRepo
+		}
+		taskName, needsResolve, include := launcherDirectoryTaskNameForEntry(filter, entry.Name(), path, resolver, resolveTasks)
+		if !include {
 			continue
 		}
 		rows = append(rows, launcherEntry{
@@ -529,16 +623,20 @@ func loadDirectoryEntries(currentPath, filter string, activeTargets launcherActi
 			taskName: taskName,
 			subtitle: path,
 			path:     path,
-			kind:     "dir",
+			kind:     entryKind,
 			active:   activeTargets.hasPath(path),
-			favorite: favoriteSet[launcherFavoriteKey(asmfavorites.KindDir, path)],
+			favorite: favoriteSet[launcherFavoriteKey(favoriteKind, path)],
 		})
+		if needsResolve {
+			pendingPaths = append(pendingPaths, path)
+		}
 	}
-	return rows, nil
+	return rows, pendingPaths, nil
 }
 
-func loadRepoEntries(currentPath, filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, error) {
+func loadRepoEntries(currentPath, filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, []string, error) {
 	var rows []launcherEntry
+	var pendingPaths []string
 	seen := make(map[string]bool)
 	addRepo := func(path string) {
 		clean := filepath.Clean(path)
@@ -550,8 +648,8 @@ func loadRepoEntries(currentPath, filter string, activeTargets launcherActiveTar
 		if label == "" {
 			label = filepath.Base(clean)
 		}
-		taskName := resolver.taskName(clean)
-		if filter != "" && !matchesLauncherFilter(filter, label, taskName, clean) {
+		taskName, needsResolve, include := launcherTaskNameForEntry(filter, label, clean, resolver)
+		if !include {
 			return
 		}
 		rows = append(rows, launcherEntry{
@@ -563,12 +661,15 @@ func loadRepoEntries(currentPath, filter string, activeTargets launcherActiveTar
 			active:   activeTargets.hasRepo(clean),
 			favorite: favoriteSet[launcherFavoriteKey(asmfavorites.KindRepo, clean)],
 		})
+		if needsResolve {
+			pendingPaths = append(pendingPaths, clean)
+		}
 	}
 
 	addRepo(currentPath)
 	entries, err := os.ReadDir(currentPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || entry.Type()&os.ModeSymlink != 0 {
@@ -576,22 +677,23 @@ func loadRepoEntries(currentPath, filter string, activeTargets launcherActiveTar
 		}
 		addRepo(filepath.Join(currentPath, entry.Name()))
 	}
-	return rows, nil
+	return rows, pendingPaths, nil
 }
 
-func loadRepoWorktreeEntries(repoPath, filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, error) {
+func loadRepoWorktreeEntries(repoPath, filter string, activeTargets launcherActiveTargets, favoriteSet map[string]bool, resolver *launcherTaskResolver) ([]launcherEntry, []string, error) {
 	wts, err := worktree.ScanRepo(repoPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var rows []launcherEntry
+	var pendingPaths []string
 	for _, wt := range wts {
 		label := worktree.CurrentBranch(wt.Path)
 		if label == "" {
 			label = wt.Name
 		}
-		taskName := resolver.taskName(wt.Path)
-		if filter != "" && !matchesLauncherFilter(filter, label, taskName, wt.Path) {
+		taskName, needsResolve, include := launcherTaskNameForEntry(filter, label, wt.Path, resolver)
+		if !include {
 			continue
 		}
 		rows = append(rows, launcherEntry{
@@ -603,23 +705,27 @@ func loadRepoWorktreeEntries(repoPath, filter string, activeTargets launcherActi
 			active:   activeTargets.hasPath(wt.Path),
 			favorite: favoriteSet[launcherFavoriteKey(asmfavorites.KindDir, wt.Path)],
 		})
+		if needsResolve {
+			pendingPaths = append(pendingPaths, wt.Path)
+		}
 	}
-	return rows, nil
+	return rows, pendingPaths, nil
 }
 
-func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, resolver *launcherTaskResolver, items []asmfavorites.Entry) ([]launcherEntry, error) {
+func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, resolver *launcherTaskResolver, items []asmfavorites.Entry) ([]launcherEntry, []string, error) {
 	var rows []launcherEntry
+	var pendingPaths []string
 	for _, item := range items {
 		info, err := os.Stat(item.Path)
 		if err != nil || !info.IsDir() {
 			continue
 		}
 		clean := filepath.Clean(item.Path)
-		switch item.Kind {
+		switch launcherFavoriteKindForPath(clean) {
 		case asmfavorites.KindDir:
 			label := filepath.Base(clean)
-			taskName := resolver.taskName(clean)
-			if filter != "" && !matchesLauncherFilter(filter, label, taskName, clean) {
+			taskName, needsResolve, include := launcherTaskNameForEntry(filter, label, clean, resolver)
+			if !include {
 				continue
 			}
 			rows = append(rows, launcherEntry{
@@ -631,16 +737,16 @@ func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, res
 				active:   activeTargets.hasPath(clean),
 				favorite: true,
 			})
-		case asmfavorites.KindRepo:
-			if !worktree.IsRepoMode(clean) {
-				continue
+			if needsResolve {
+				pendingPaths = append(pendingPaths, clean)
 			}
+		case asmfavorites.KindRepo:
 			_, label := config.ProjectIdentity(clean)
 			if label == "" {
 				label = filepath.Base(clean)
 			}
-			taskName := resolver.taskName(clean)
-			if filter != "" && !matchesLauncherFilter(filter, label, taskName, clean) {
+			taskName, needsResolve, include := launcherTaskNameForEntry(filter, label, clean, resolver)
+			if !include {
 				continue
 			}
 			rows = append(rows, launcherEntry{
@@ -652,9 +758,29 @@ func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, res
 				active:   activeTargets.hasRepo(clean),
 				favorite: true,
 			})
+			if needsResolve {
+				pendingPaths = append(pendingPaths, clean)
+			}
 		}
 	}
-	return rows, nil
+	return rows, pendingPaths, nil
+}
+
+func dedupeLauncherPaths(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(path)
+		if clean == "" || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, clean)
+	}
+	return out
 }
 
 func newLauncherActiveTargets(activeKinds map[string]asmtmux.SessionKind) launcherActiveTargets {
@@ -690,13 +816,20 @@ func (a launcherActiveTargets) hasRepo(repoPath string) bool {
 func launcherFavoriteSet(entries []asmfavorites.Entry) map[string]bool {
 	set := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		set[launcherFavoriteKey(entry.Kind, entry.Path)] = true
+		set[launcherFavoriteKey(launcherFavoriteKindForPath(entry.Path), entry.Path)] = true
 	}
 	return set
 }
 
 func launcherFavoriteKey(kind asmfavorites.Kind, path string) string {
 	return string(kind) + ":" + filepath.Clean(path)
+}
+
+func launcherFavoriteKindForPath(path string) asmfavorites.Kind {
+	if worktree.IsRepoMode(path) {
+		return asmfavorites.KindRepo
+	}
+	return asmfavorites.KindDir
 }
 
 type launcherTaskResolver struct {
@@ -718,6 +851,23 @@ func newLauncherTaskResolver(t tracker.Tracker, taskCache *tracker.TaskCache) *l
 	return r
 }
 
+func (r *launcherTaskResolver) cachedTaskName(path string) (string, bool) {
+	clean := filepath.Clean(path)
+	if name, ok := r.taskNames[clean]; ok {
+		return name, false
+	}
+	if r.taskCache != nil {
+		if entry, ok := r.taskCache.GetEntry(clean); ok {
+			r.taskNames[clean] = entry.Info.Name
+			return entry.Info.Name, false
+		}
+	}
+	if !worktree.IsRepoMode(clean) {
+		return "", false
+	}
+	return "", true
+}
+
 func (r *launcherTaskResolver) taskName(path string) string {
 	clean := filepath.Clean(path)
 	if name, ok := r.taskNames[clean]; ok {
@@ -726,6 +876,31 @@ func (r *launcherTaskResolver) taskName(path string) string {
 	name := r.resolveTaskName(clean)
 	r.taskNames[clean] = name
 	return name
+}
+
+func launcherTaskNameForEntry(filter, label, path string, resolver *launcherTaskResolver) (string, bool, bool) {
+	taskName, needsResolve := resolver.cachedTaskName(path)
+	if filter == "" {
+		return taskName, needsResolve, true
+	}
+	if matchesLauncherFilter(filter, label, path) {
+		return taskName, needsResolve, true
+	}
+	if taskName == "" && needsResolve {
+		taskName = resolver.taskName(path)
+		needsResolve = false
+	}
+	return taskName, needsResolve, matchesLauncherFilter(filter, label, taskName, path)
+}
+
+func launcherDirectoryTaskNameForEntry(filter, label, path string, resolver *launcherTaskResolver, resolveTasks bool) (string, bool, bool) {
+	if !resolveTasks {
+		if filter == "" {
+			return "", false, true
+		}
+		return "", false, matchesLauncherFilter(filter, label, path)
+	}
+	return launcherTaskNameForEntry(filter, label, path, resolver)
 }
 
 func (r *launcherTaskResolver) resolveTaskName(path string) string {
@@ -790,6 +965,97 @@ func matchesLauncherFilter(filter string, parts ...string) bool {
 	return strings.Contains(strings.ToLower(strings.Join(joined, " ")), filter)
 }
 
+func (m LauncherModel) startNextTaskFetch() tea.Cmd {
+	if m.taskFetchPending || len(m.taskFetchQueue) == 0 {
+		return nil
+	}
+	path := m.taskFetchQueue[0]
+	m.taskFetchQueue = m.taskFetchQueue[1:]
+	m.taskFetchPending = true
+	return m.fetchTaskName(m.loadVersion, path)
+}
+
+func (m LauncherModel) fetchTaskName(version int, path string) tea.Cmd {
+	t := m.tracker
+	taskCache := m.taskCache
+	return func() tea.Msg {
+		resolver := newLauncherTaskResolver(t, taskCache)
+		return launcherTaskResolvedMsg{
+			version:  version,
+			path:     filepath.Clean(path),
+			taskName: resolver.taskName(path),
+		}
+	}
+}
+
+func (m *LauncherModel) applyPendingSelection() {
+	if m.pendingSelectionPath == "" {
+		return
+	}
+	target := filepath.Clean(m.pendingSelectionPath)
+	m.pendingSelectionPath = ""
+	for i := range m.entries {
+		if filepath.Clean(m.entries[i].path) == target {
+			m.cursor = i
+			return
+		}
+	}
+}
+
+func (m *LauncherModel) adjustViewTop() {
+	visible := m.visibleEntryCount()
+	if visible <= 0 {
+		return
+	}
+	if m.cursor < m.viewTop {
+		m.viewTop = m.cursor
+	}
+	if m.cursor >= m.viewTop+visible {
+		m.viewTop = m.cursor - visible + 1
+	}
+	m.clampViewTop()
+}
+
+func (m *LauncherModel) clampViewTop() {
+	visible := m.visibleEntryCount()
+	if visible <= 0 {
+		m.viewTop = 0
+		return
+	}
+	maxTop := max(0, len(m.entries)-visible)
+	if m.viewTop > maxTop {
+		m.viewTop = maxTop
+	}
+	if m.viewTop < 0 {
+		m.viewTop = 0
+	}
+	if m.cursor < m.viewTop {
+		m.viewTop = m.cursor
+	}
+}
+
+func (m LauncherModel) visibleEntryCount() int {
+	if m.height <= 0 {
+		return 12
+	}
+	return max(1, m.height-9)
+}
+
+func (m LauncherModel) visibleRange() (int, int) {
+	if len(m.entries) == 0 {
+		return 0, 0
+	}
+	start := m.viewTop
+	if start < 0 {
+		start = 0
+	}
+	if start > len(m.entries) {
+		start = len(m.entries)
+	}
+	end := min(len(m.entries), start+m.visibleEntryCount())
+	return start, end
+}
+
 func (m LauncherModel) selectedEntry() *launcherEntry {
 	if len(m.entries) == 0 || m.cursor < 0 || m.cursor >= len(m.entries) {
 		return nil
@@ -810,11 +1076,11 @@ func (m LauncherModel) contextLabel() string {
 		return "Favorite targets"
 	case launcherTabRecent:
 		return "Recent targets"
-	case launcherTabRepos:
+	case launcherTabDirectories:
 		if m.repoPath != "" {
 			return "Repo: " + m.repoPath
 		}
-		return "Browse repos in " + m.currentPath
+		return m.currentPath
 	default:
 		return m.currentPath
 	}
@@ -832,11 +1098,11 @@ func (m LauncherModel) hint() string {
 		return " Tab: switch view  ↑↓: move  ←→: browse  Enter: open/select  Ctrl+F: remove favorite  Backspace: filter  Esc: cancel"
 	case launcherTabRecent:
 		return " Tab: switch view  ↑↓: move  Enter: launch  Ctrl+F: favorite  Backspace: filter  Esc: cancel"
-	case launcherTabRepos:
+	case launcherTabDirectories:
 		if m.repoPath != "" {
-			return " Tab: switch view  ↑↓: move  ←: back to repos  Enter: launch  Ctrl+F: favorite repo  Backspace: filter  Esc: cancel"
+			return " Tab: switch view  ↑↓: move  ←: back to directories  Enter: launch  Ctrl+F: favorite repo  Backspace: filter  Esc: cancel"
 		}
-		return " Tab: switch view  ↑↓: move  ←→: parent/open repo  Enter: select repo  Ctrl+F: favorite repo  Backspace: filter  Esc: cancel"
+		return " Tab: switch view  ↑↓: move  ←→: parent/open dir or repo  Enter: launch  Ctrl+F: favorite  Backspace: filter  Esc: cancel"
 	default:
 		return " Tab: switch view  ↑↓: move  ←→: parent/enter dir  Enter: launch  Ctrl+F: favorite  Backspace: filter  Esc: cancel"
 	}

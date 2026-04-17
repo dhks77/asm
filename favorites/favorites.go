@@ -57,6 +57,15 @@ func Toggle(kind Kind, path string) (bool, error) {
 		}
 	}
 
+	filtered := entries[:0]
+	for _, entry := range entries {
+		if entry.Path == cleanPath {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	entries = filtered
+
 	entries = append(entries, Entry{
 		Kind:      kind,
 		Path:      cleanPath,

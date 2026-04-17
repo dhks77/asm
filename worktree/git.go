@@ -3,7 +3,9 @@ package worktree
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -22,11 +24,60 @@ const gitFetchTimeout = 30 * time.Second
 // CurrentBranch returns the current branch name of the git work tree at dir,
 // or an empty string if it cannot be resolved.
 func CurrentBranch(dir string) string {
+	if headPath, ok := gitHeadPath(dir); ok {
+		if branch, ok := readBranchFromHead(headPath); ok {
+			return branch
+		}
+	}
 	out, err := runGit(dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+func gitHeadPath(dir string) (string, bool) {
+	gitPath := filepath.Join(dir, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", false
+	}
+	if info.IsDir() {
+		return filepath.Join(gitPath, "HEAD"), true
+	}
+
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", false
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir:") {
+		return "", false
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if gitDir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+	return filepath.Join(filepath.Clean(gitDir), "HEAD"), true
+}
+
+func readBranchFromHead(headPath string) (string, bool) {
+	data, err := os.ReadFile(headPath)
+	if err != nil {
+		return "", false
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "ref:") {
+		return "", false
+	}
+	ref := strings.TrimSpace(strings.TrimPrefix(line, "ref:"))
+	if ref == "" {
+		return "", false
+	}
+	return strings.TrimPrefix(ref, "refs/heads/"), true
 }
 
 // HasChanges returns true if the work tree has any modified, staged or

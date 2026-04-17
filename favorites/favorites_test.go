@@ -49,7 +49,7 @@ func TestToggleAddsAndRemovesEntries(t *testing.T) {
 	}
 }
 
-func TestToggleKeepsDirAndRepoFavoritesSeparate(t *testing.T) {
+func TestToggleReplacesOtherKindForSamePath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -64,19 +64,15 @@ func TestToggleKeepsDirAndRepoFavoritesSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load failed: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %#v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %#v", entries)
 	}
-
-	found := map[Kind]bool{}
-	for _, entry := range entries {
-		if entry.Path != filepath.Clean("/tmp/demo") {
-			t.Fatalf("unexpected path: %#v", entry)
-		}
-		found[entry.Kind] = true
+	entry := entries[0]
+	if entry.Path != filepath.Clean("/tmp/demo") {
+		t.Fatalf("unexpected path: %#v", entry)
 	}
-	if !found[KindDir] || !found[KindRepo] {
-		t.Fatalf("expected dir and repo favorites, got %#v", entries)
+	if entry.Kind != KindRepo {
+		t.Fatalf("expected repo favorite to replace dir favorite, got %#v", entries)
 	}
 }
 
