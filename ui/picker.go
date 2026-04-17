@@ -1693,10 +1693,10 @@ func (m *PickerModel) buildLine1(activeKinds map[string]asmtmux.SessionKind) (st
 	elapsedPart := padToWidth(elapsed, 6)
 
 	// Render with tmux format codes
-	icon := "#[fg=colour81,bold]▶#[default]"
-	sep := "#[fg=colour240]│#[default]"
-	return fmt.Sprintf(" %s #[fg=colour252,bold]%s#[default] %s %s #[fg=colour141]%s#[default] %s #[fg=%s,bold]%s#[default] #[fg=colour244]%s#[default] ",
-		icon, folder, badge, sep, taskPart, sep, stateColor, statePart, elapsedPart), target
+	icon := "#[fg=" + tmuxToolUseColor + ",bold]▶#[default]"
+	sep := "#[fg=" + tmuxDimColor + "]│#[default]"
+	return fmt.Sprintf(" %s #[fg=%s,bold]%s#[default] %s %s #[fg=%s]%s#[default] %s #[fg=%s,bold]%s#[default] #[fg=%s]%s#[default] ",
+		icon, tmuxTextColor, folder, badge, sep, tmuxPrimaryColor, taskPart, sep, stateColor, statePart, tmuxDimColor, elapsedPart), target
 }
 
 // buildLine2 returns the active-session overview as an adaptive strip:
@@ -1724,7 +1724,7 @@ func (m *PickerModel) buildLine2(activeKinds map[string]asmtmux.SessionKind, lin
 	if len(items) == 0 {
 		return ""
 	}
-	sep := "#[fg=colour240] │ #[default]"
+	sep := "#[fg=" + tmuxDimColor + "] │ #[default]"
 
 	numPages := (len(items) + statusLine2MaxPerPage - 1) / statusLine2MaxPerPage
 	page := (m.scrollTick / statusLine2TicksPerPage) % numPages
@@ -1739,7 +1739,7 @@ func (m *PickerModel) buildLine2(activeKinds map[string]asmtmux.SessionKind, lin
 	prefixWidth := 1
 	if numPages > 1 {
 		rawIndicator := fmt.Sprintf("%d/%d", page+1, numPages)
-		prefix += fmt.Sprintf("#[fg=colour240](%s)#[default] ", rawIndicator)
+		prefix += fmt.Sprintf("#[fg=%s](%s)#[default] ", tmuxDimColor, rawIndicator)
 		prefixWidth += lipgloss.Width(rawIndicator) + 3
 	}
 
@@ -1784,8 +1784,8 @@ func (m *PickerModel) renderStatusItem(wt worktree.Worktree, kind asmtmux.Sessio
 	displayName := m.scrollPadName(rawName, nameWidth)
 	badge := renderKindBadgeTmuxPadded(kind)
 
-	cell := fmt.Sprintf("#[fg=colour42]●#[default] #[fg=colour252]%s#[default] %s",
-		displayName, badge)
+	cell := fmt.Sprintf("#[fg=%s]●#[default] #[fg=%s]%s#[default] %s",
+		tmuxActiveColor, tmuxTextColor, displayName, badge)
 	if stateWidth > 0 {
 		stateLabel, stateColor := m.stateLabelColor(wt.Path)
 		cell += fmt.Sprintf(" #[fg=%s]%s#[default]", stateColor, padToWidth(stateLabel, stateWidth))
@@ -1838,7 +1838,7 @@ func (m *PickerModel) scrollPadName(raw string, width int) string {
 // session. When `showState` is false (e.g. for terminal-only rows or when the
 // terminal is fronted), the label is blank and the color is neutral.
 func (m *PickerModel) statePaddedColumn(targetPath string, showState bool) (string, string) {
-	label, color := "", "colour244"
+	label, color := "", tmuxDimColor
 	if showState {
 		label, color = m.stateLabelColor(targetPath)
 	}
@@ -1848,25 +1848,25 @@ func (m *PickerModel) statePaddedColumn(targetPath string, showState bool) (stri
 // stateLabelColor returns the provider-state label and tmux color code for a session.
 func (m *PickerModel) stateLabelColor(targetPath string) (string, string) {
 	if _, flashing := m.flashItems[targetPath]; flashing {
-		return "done", "colour42"
+		return "done", tmuxActiveColor
 	}
 	st, ok := m.providerStates[targetPath]
 	if !ok {
-		return "", "colour244"
+		return "", tmuxDimColor
 	}
 	switch st {
 	case provider.StateThinking:
-		return st.Label(), "colour220"
+		return st.Label(), tmuxWarnColor
 	case provider.StateResponding:
-		return st.Label(), "colour114"
+		return st.Label(), tmuxRespondingColor
 	case provider.StateToolUse:
-		return st.Label(), "colour81"
+		return st.Label(), tmuxToolUseColor
 	case provider.StateBusy:
-		return st.Label(), "colour220"
+		return st.Label(), tmuxWarnColor
 	case provider.StateIdle:
-		return st.Label(), "colour244"
+		return st.Label(), tmuxDimColor
 	}
-	return st.Label(), "colour244"
+	return st.Label(), tmuxDimColor
 }
 
 // tmuxEscape doubles '#' so tmux format parser treats it as a literal.
@@ -2176,7 +2176,7 @@ func (m PickerModel) overlayCenter(base, overlay string) string {
 		lipgloss.Center, lipgloss.Center,
 		overlay,
 		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(lipgloss.Color("0")),
+		lipgloss.WithWhitespaceForeground(surfaceTextColor),
 	)
 }
 
@@ -2191,7 +2191,7 @@ func (m PickerModel) renderErrorOverlay(view string) string {
 		Width(min(50, m.width-4)).
 		Render(
 			lipgloss.NewStyle().Bold(true).Foreground(dangerColor).Render("Error") + "\n\n" +
-				lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Render(m.err) + "\n\n" +
+				lipgloss.NewStyle().Foreground(whiteColor).Render(m.err) + "\n\n" +
 				statusBarStyle.Render("Press any key to dismiss"))
 	return m.overlayCenter(view, errDialog)
 }

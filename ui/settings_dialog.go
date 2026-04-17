@@ -47,6 +47,7 @@ type flatItem struct {
 }
 
 var scopeOptions = []string{"global", "local"}
+var uiThemeOptions = themeOptions
 var templateConflictOptions = []string{"skip", "overwrite"}
 
 const pickerWidthMin = 10
@@ -56,6 +57,7 @@ const pickerWidthMax = 50
 const (
 	fieldProvider         = "provider"
 	fieldTracker          = "tracker"
+	fieldTheme            = "theme"
 	fieldPickerWidth      = "pickerWidth"
 	fieldIDE              = "ide"
 	fieldTemplateConflict = "templateConflict"
@@ -68,8 +70,9 @@ const (
 const (
 	generalFieldProvider = iota
 	generalFieldTracker
-	generalFieldPickerWidth
 	generalFieldIDE
+	generalFieldTheme
+	generalFieldPickerWidth
 	generalFieldTemplateConflict
 	generalFieldOpenTemplatesDir
 	generalFieldWorktreeBasePath
@@ -99,7 +102,8 @@ type SettingsModel struct {
 	repoColorStr        string
 	selectedProvider    int
 	selectedTracker     int
-	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
+	selectedIDE         int // 0 = none, 1+ = ideNames[i]
+	selectedTheme       int
 	pickerWidthStr      string // free-form percentage input (e.g. "22")
 	templateConflictIdx int    // 0=skip, 1=overwrite
 	worktreeBasePathStr string // free-form path for repo-mode worktree creation
@@ -210,6 +214,15 @@ func (m *SettingsModel) loadGeneralFromScope() {
 	}
 	m.pickerWidthStr = fmt.Sprintf("%d", pw)
 
+	m.selectedTheme = 0
+	themeName := m.userCfg.ThemeMode()
+	for i, name := range uiThemeOptions {
+		if name == themeName {
+			m.selectedTheme = i
+			break
+		}
+	}
+
 	tcPolicy := m.userCfg.TemplateConflictPolicy()
 	if isProject && m.projectOverrides[fieldTemplateConflict] {
 		tcPolicy = m.projectCfg.TemplateConflictPolicy()
@@ -282,6 +295,9 @@ func (m *SettingsModel) persistGeneralToScope() {
 			cfg.DefaultIDE = m.ideNames[m.selectedIDE]
 		} else {
 			cfg.DefaultIDE = ""
+		}
+		if len(uiThemeOptions) > 0 {
+			cfg.Theme = uiThemeOptions[m.selectedTheme]
 		}
 		if w := parsePickerWidth(m.pickerWidthStr); w > 0 {
 			cfg.PickerWidth = w
@@ -359,6 +375,8 @@ func generalFieldKey(fieldIdx int) string {
 		return fieldProvider
 	case generalFieldTracker:
 		return fieldTracker
+	case generalFieldTheme:
+		return fieldTheme
 	case generalFieldPickerWidth:
 		return fieldPickerWidth
 	case generalFieldIDE:
@@ -385,6 +403,8 @@ func (m *SettingsModel) generalInheritedValue(fieldIdx int) string {
 			return m.userCfg.DefaultIDE
 		}
 		return ideNoneLabel
+	case generalFieldTheme:
+		return m.userCfg.ThemeMode()
 	case generalFieldTemplateConflict:
 		return m.userCfg.TemplateConflictPolicy()
 	case generalFieldWorktreeBasePath:
@@ -457,6 +477,7 @@ func (m *SettingsModel) rebuildItems() {
 		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldIDE})
 	}
 	if !isLocal {
+		m.items = append(m.items, flatItem{kind: "select", section: -1, fieldIdx: generalFieldTheme})
 		// Picker width is a global-only UI setting.
 		m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: generalFieldPickerWidth})
 	}
@@ -685,6 +706,13 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					} else {
 						m.selectedIDE = (m.selectedIDE - 1 + len(m.ideNames)) % len(m.ideNames)
 					}
+				} else if item.fieldIdx == generalFieldTheme && len(uiThemeOptions) > 0 {
+					if key == "right" {
+						m.selectedTheme = (m.selectedTheme + 1) % len(uiThemeOptions)
+					} else {
+						m.selectedTheme = (m.selectedTheme - 1 + len(uiThemeOptions)) % len(uiThemeOptions)
+					}
+					ApplyTheme(uiThemeOptions[m.selectedTheme])
 				} else if item.fieldIdx == generalFieldTemplateConflict {
 					if key == "right" {
 						m.templateConflictIdx = (m.templateConflictIdx + 1) % len(templateConflictOptions)
@@ -923,6 +951,8 @@ func (m SettingsModel) View() string {
 			itemIdx++
 		}
 		if !isLocal {
+			sections = append(sections, m.renderSelectField(itemIdx, "Theme", uiThemeOptions, m.selectedTheme))
+			itemIdx++
 			sections = append(sections, m.renderNumberField(itemIdx, "Picker Width", m.pickerWidthStr, "%"))
 			itemIdx++
 		}

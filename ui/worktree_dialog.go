@@ -770,7 +770,7 @@ func (m WorktreeRunnerModel) View() string {
 
 		body := lipgloss.NewStyle().
 			Padding(0, 2).
-			Foreground(lipgloss.Color("255")).
+			Foreground(whiteColor).
 			Render(m.err)
 
 		inlineHint := statusBarStyle.Render("Press any key to dismiss")

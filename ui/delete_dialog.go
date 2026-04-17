@@ -94,12 +94,12 @@ func (m DeleteModel) View() string {
 			if i == 0 {
 				style = style.
 					Background(dangerColor).
-					Foreground(lipgloss.Color("0")).
+					Foreground(surfaceTextColor).
 					Bold(true)
 			} else {
 				style = style.
 					Background(primaryColor).
-					Foreground(lipgloss.Color("0")).
+					Foreground(surfaceTextColor).
 					Bold(true)
 			}
 		} else {

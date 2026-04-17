@@ -224,7 +224,7 @@ func (m BatchConfirmModel) View() string {
 		if i == m.cursor {
 			style = style.
 				Background(dangerColor).
-				Foreground(lipgloss.Color("0")).
+				Foreground(surfaceTextColor).
 				Bold(true)
 		} else {
 			style = style.Foreground(dimColor)

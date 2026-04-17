@@ -1124,7 +1124,7 @@ func (m LauncherModel) renderTabs() string {
 	for i, label := range launcherTabs {
 		style := lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor)
 		if launcherTab(i) == m.tab {
-			style = style.Background(primaryColor).Foreground(lipgloss.Color("0")).Bold(true)
+			style = style.Background(primaryColor).Foreground(surfaceTextColor).Bold(true)
 		}
 		tabs = append(tabs, style.Render(label))
 	}

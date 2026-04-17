@@ -21,6 +21,12 @@ var SessionName = "asm"
 
 const MainWindow = "main"
 
+var (
+	statusBarBgTmuxColor          = "colour236"
+	statusBarFgTmuxColor          = "colour252"
+	statusBarShortcutsFgTmuxColor = "colour244"
+)
+
 // paneBaseIndex caches the global pane-base-index so we don't query tmux
 // repeatedly. Populated lazily by PaneBase().
 var paneBaseIndex = -1
@@ -481,7 +487,7 @@ func UnzoomWorkingPanel() error {
 func EnableStatusBar() {
 	runTmux("set-option", "-t", SessionName, "status", "3")
 	runTmux("set-option", "-t", SessionName, "status-position", "bottom")
-	runTmux("set-option", "-t", SessionName, "status-style", "bg=colour236,fg=colour252")
+	runTmux("set-option", "-t", SessionName, "status-style", "bg="+statusBarBgTmuxColor+",fg="+statusBarFgTmuxColor)
 	runTmux("set-option", "-t", SessionName, "status-left-length", "500")
 	runTmux("set-option", "-t", SessionName, "status-right", "")
 	runTmux("set-option", "-t", SessionName, "status-format[0]", "")
@@ -504,8 +510,26 @@ func SetStatusLines(line1, line2 string) {
 // area, full terminal width).
 func SetShortcutsLine(line string) {
 	runTmux("set-option", "-t", SessionName,
-		"status-format[2]", "#[align=left,bg=colour236,fg=colour244]"+line,
+		"status-format[2]", "#[align=left,bg="+statusBarBgTmuxColor+",fg="+statusBarShortcutsFgTmuxColor+"]"+line,
 	)
+}
+
+// ConfigureStatusTheme updates the tmux status-bar palette used by asm.
+// Best-effort: when the session is already running, the new colors are applied
+// immediately; otherwise EnableStatusBar will pick them up later.
+func ConfigureStatusTheme(bg, fg, shortcutsFg string) {
+	if strings.TrimSpace(bg) != "" {
+		statusBarBgTmuxColor = bg
+	}
+	if strings.TrimSpace(fg) != "" {
+		statusBarFgTmuxColor = fg
+	}
+	if strings.TrimSpace(shortcutsFg) != "" {
+		statusBarShortcutsFgTmuxColor = shortcutsFg
+	}
+	runTmux("set-option", "-t", SessionName, "status-style", "bg="+statusBarBgTmuxColor+",fg="+statusBarFgTmuxColor)
+	runTmux("set-option", "-t", SessionName,
+		"status-format[2]", "#[align=left,bg="+statusBarBgTmuxColor+",fg="+statusBarShortcutsFgTmuxColor+"]")
 }
 
 // runTmux is a best-effort tmux invocation guarded by tmuxCallTimeout so a

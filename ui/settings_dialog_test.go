@@ -98,3 +98,44 @@ func TestSettingsSaveWritesRepoColorToProjectScopeOnly(t *testing.T) {
 		t.Fatalf("expected global settings view to hide repo color field:\n%s", view)
 	}
 }
+
+func TestSettingsGlobalThemeSavesToUserScopeOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	m := NewSettingsModel(nil, "", []string{"claude"}, nil, nil, nil)
+	m.scopeIdx = 0
+	m.loadGeneralFromScope()
+	m.rebuildItems()
+	if !strings.Contains(m.View(), "Theme") {
+		t.Fatalf("expected global settings view to show Theme field:\n%s", m.View())
+	}
+
+	m.selectedTheme = 1 // light
+	if cmd := m.save(); cmd != nil {
+		_ = cmd()
+	}
+
+	userCfg, err := config.LoadScope(config.ScopeUser, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := userCfg.ThemeMode(); got != "light" {
+		t.Fatalf("user theme = %q, want %q", got, "light")
+	}
+}
+
+func TestSettingsLocalViewHidesThemeField(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	rootPath := t.TempDir()
+	m := NewSettingsModel(nil, rootPath, []string{"claude"}, nil, nil, nil)
+	m.scopeIdx = 1
+	m.loadGeneralFromScope()
+	m.rebuildItems()
+
+	if strings.Contains(m.View(), "Theme") {
+		t.Fatalf("expected local settings view to hide Theme field:\n%s", m.View())
+	}
+}

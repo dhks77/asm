@@ -278,6 +278,7 @@ func (m PickerModel) handleSettingsExited() (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m, nil
 	}
+	ApplyTheme(newCfg.ThemeMode())
 	m.cfg = newCfg
 	defaultName := newCfg.DefaultProvider
 	if defaultName == "" {

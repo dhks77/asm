@@ -148,3 +148,36 @@ func TestProjectIdentityUsesOriginRepoNameForLinkedWorktree(t *testing.T) {
 		t.Fatalf("name = %q, want %q", name, "tc-dcm")
 	}
 }
+
+func TestThemeModeDefaultsToDarkAndNormalizesLight(t *testing.T) {
+	if got := (&Config{}).ThemeMode(); got != "dark" {
+		t.Fatalf("ThemeMode() = %q, want %q", got, "dark")
+	}
+	if got := (&Config{Theme: "light"}).ThemeMode(); got != "light" {
+		t.Fatalf("ThemeMode(light) = %q, want %q", got, "light")
+	}
+	if got := (&Config{Theme: "LIGHT"}).ThemeMode(); got != "light" {
+		t.Fatalf("ThemeMode(LIGHT) = %q, want %q", got, "light")
+	}
+}
+
+func TestLoadMergedKeepsUserThemeWhenProjectConfigDefinesTheme(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	root := t.TempDir()
+	if err := SaveScope(&Config{Theme: "light"}, ScopeUser, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveScope(&Config{Theme: "dark"}, ScopeProject, root); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadMerged(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ThemeMode(); got != "light" {
+		t.Fatalf("ThemeMode() = %q, want %q", got, "light")
+	}
+}

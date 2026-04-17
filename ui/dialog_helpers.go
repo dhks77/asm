@@ -6,14 +6,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Package-level styles for fieldRowCursor. Hoisted so Settings doesn't
-// reallocate a lipgloss.Style for every field row on every render tick.
-var (
-	cursorActiveIndicator    = lipgloss.NewStyle().Foreground(primaryColor).Render("▸ ")
-	cursorActiveLabelStyle   = lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
-	cursorInactiveLabelStyle = lipgloss.NewStyle().Foreground(dimColor)
-)
-
 func renderDialogHintBar(width int, hint string) string {
 	return statusBarStyle.
 		Width(width).
@@ -40,7 +32,8 @@ func renderDialogTitle(text string, color lipgloss.Color) string {
 
 func fieldRowCursor(active bool) (indicator string, labelStyle lipgloss.Style) {
 	if active {
-		return cursorActiveIndicator, cursorActiveLabelStyle
+		return lipgloss.NewStyle().Foreground(primaryColor).Render("▸ "),
+			lipgloss.NewStyle().Foreground(whiteColor).Bold(true)
 	}
-	return "  ", cursorInactiveLabelStyle
+	return "  ", lipgloss.NewStyle().Foreground(dimColor)
 }

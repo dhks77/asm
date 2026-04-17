@@ -38,14 +38,17 @@ type WorktreeTemplateConfig struct {
 }
 
 type Config struct {
-	DefaultPath          string                       `toml:"default_path"`
-	DesktopNotifications *bool                        `toml:"desktop_notifications"`
-	PickerWidth          int                          `toml:"picker_width"` // picker pane width in %
-	DefaultProvider      string                       `toml:"default_provider"`
-	DefaultTracker       string                       `toml:"default_tracker"`
-	Providers            map[string]ProviderConfig    `toml:"providers"`
-	Trackers             map[string]map[string]string `toml:"trackers"`
-	IDEs                 map[string]IDEConfig         `toml:"ides"`
+	DefaultPath          string `toml:"default_path"`
+	DesktopNotifications *bool  `toml:"desktop_notifications"`
+	PickerWidth          int    `toml:"picker_width"` // picker pane width in %
+	// Theme is a user-scope UI preference. Valid values are "dark" and
+	// "light"; anything else falls back to dark.
+	Theme           string                       `toml:"theme"`
+	DefaultProvider string                       `toml:"default_provider"`
+	DefaultTracker  string                       `toml:"default_tracker"`
+	Providers       map[string]ProviderConfig    `toml:"providers"`
+	Trackers        map[string]map[string]string `toml:"trackers"`
+	IDEs            map[string]IDEConfig         `toml:"ides"`
 	// DefaultIDE, if set, skips the IDE selector and opens directly.
 	DefaultIDE       string                 `toml:"default_ide"`
 	WorktreeTemplate WorktreeTemplateConfig `toml:"worktree_template"`
@@ -322,4 +325,12 @@ func (c *Config) GetPickerWidth() int {
 		w = 50
 	}
 	return w
+}
+
+// ThemeMode returns the normalized UI theme name. The default is "dark".
+func (c *Config) ThemeMode() string {
+	if strings.EqualFold(strings.TrimSpace(c.Theme), "light") {
+		return "light"
+	}
+	return "dark"
 }
