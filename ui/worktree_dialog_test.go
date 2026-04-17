@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -59,6 +60,53 @@ func TestWorktreeDialogF10StartsNewBranchFlow(t *testing.T) {
 	}
 }
 
+func TestWorktreeDialogCtrlNTogglesBackToExistingBranchFlow(t *testing.T) {
+	m := WorktreeDialogModel{
+		visible:       true,
+		mode:          wtModeSelectBase,
+		branches:      []worktree.Branch{{Name: "main"}},
+		filtered:      []worktree.Branch{{Name: "main"}},
+		filter:        "feat",
+		cursor:        1,
+		scrollOffset:  1,
+		newBranchName: "feature/x",
+		baseBranch:    "main",
+		taskInfos: map[string]tracker.TaskInfo{
+			"main": {Name: "Task"},
+		},
+	}
+
+	got, _ := m.handleSelectBaseKey(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if got.mode != wtModeSelectBranch {
+		t.Fatalf("mode = %v, want %v", got.mode, wtModeSelectBranch)
+	}
+	if got.filter != "" || got.cursor != 0 || got.scrollOffset != 0 {
+		t.Fatalf("expected reset state, got filter=%q cursor=%d scroll=%d", got.filter, got.cursor, got.scrollOffset)
+	}
+	if got.newBranchName != "" || got.baseBranch != "" {
+		t.Fatalf("expected new-branch state cleared, got name=%q base=%q", got.newBranchName, got.baseBranch)
+	}
+}
+
+func TestWorktreeDialogCtrlNInNameInputTogglesBackToExistingBranchFlow(t *testing.T) {
+	m := WorktreeDialogModel{
+		visible:       true,
+		mode:          wtModeNewBranch,
+		branches:      []worktree.Branch{{Name: "main"}},
+		filtered:      []worktree.Branch{{Name: "main"}},
+		newBranchName: "feature/x",
+		baseBranch:    "main",
+	}
+
+	got, _ := m.handleNewBranchKey(tea.KeyMsg{Type: tea.KeyCtrlN})
+	if got.mode != wtModeSelectBranch {
+		t.Fatalf("mode = %v, want %v", got.mode, wtModeSelectBranch)
+	}
+	if got.newBranchName != "" || got.baseBranch != "" {
+		t.Fatalf("expected new-branch state cleared, got name=%q base=%q", got.newBranchName, got.baseBranch)
+	}
+}
+
 func TestWorktreeDialogTabSwitchesRepo(t *testing.T) {
 	m := WorktreeDialogModel{
 		visible:       true,
@@ -97,4 +145,38 @@ func TestWorktreeDialogTabSwitchesRepo(t *testing.T) {
 	if len(got.taskInfos) != 0 {
 		t.Fatalf("taskInfos should reset on repo switch, got %#v", got.taskInfos)
 	}
+}
+
+func TestWorktreeDialogNewBranchViewsShowWorktreeTitle(t *testing.T) {
+	baseView := WorktreeDialogModel{
+		visible:  true,
+		mode:     wtModeSelectBase,
+		repoName: "accounts",
+		width:    80,
+		height:   12,
+	}.View()
+	if !containsAll(baseView, "Create Worktree from New Branch", "^n: existing branch") {
+		t.Fatalf("unexpected base view:\n%s", baseView)
+	}
+
+	newBranchView := WorktreeDialogModel{
+		visible:    true,
+		mode:       wtModeNewBranch,
+		repoName:   "accounts",
+		baseBranch: "main",
+		width:      80,
+		height:     12,
+	}.View()
+	if !containsAll(newBranchView, "Create Worktree from New Branch", "^n: existing branch") {
+		t.Fatalf("unexpected new-branch view:\n%s", newBranchView)
+	}
+}
+
+func containsAll(s string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(s, part) {
+			return false
+		}
+	}
+	return true
 }

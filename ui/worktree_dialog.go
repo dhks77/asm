@@ -311,6 +311,26 @@ func (m *WorktreeDialogModel) switchRepo(delta int) tea.Cmd {
 	return m.loadBranches(choice.Path)
 }
 
+func (m *WorktreeDialogModel) enterExistingBranchMode() {
+	m.mode = wtModeSelectBranch
+	m.filter = ""
+	m.cursor = 0
+	m.scrollOffset = 0
+	m.newBranchName = ""
+	m.baseBranch = ""
+	m.applyFilter()
+}
+
+func (m *WorktreeDialogModel) enterNewBranchMode() {
+	m.mode = wtModeSelectBase
+	m.filter = ""
+	m.cursor = 0
+	m.scrollOffset = 0
+	m.newBranchName = ""
+	m.baseBranch = ""
+	m.applyFilter()
+}
+
 func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) {
 	if !m.visible {
 		return m, nil
@@ -444,12 +464,8 @@ func (m WorktreeDialogModel) handleSelectBranchKey(msg tea.KeyMsg) (WorktreeDial
 	case "tab":
 		return m, m.switchRepo(+1)
 
-	case "ctrl+n", "ctrl+shift+n", "f10":
-		m.mode = wtModeSelectBase
-		m.filter = ""
-		m.cursor = 0
-		m.scrollOffset = 0
-		m.applyFilter()
+	case "ctrl+n", "f10":
+		m.enterNewBranchMode()
 
 	case "backspace":
 		if m.filter != "" {
@@ -482,11 +498,10 @@ func (m WorktreeDialogModel) handleSelectBaseKey(msg tea.KeyMsg) (WorktreeDialog
 
 	switch key {
 	case "esc":
-		m.mode = wtModeSelectBranch
-		m.filter = ""
-		m.cursor = 0
-		m.scrollOffset = 0
-		m.applyFilter()
+		m.enterExistingBranchMode()
+
+	case "ctrl+n", "f10":
+		m.enterExistingBranchMode()
 
 	case "tab":
 		return m, m.switchRepo(+1)
@@ -540,8 +555,10 @@ func (m WorktreeDialogModel) handleNewBranchKey(msg tea.KeyMsg) (WorktreeDialogM
 
 	switch key {
 	case "esc":
-		m.mode = wtModeSelectBranch
-		m.newBranchName = ""
+		m.enterExistingBranchMode()
+
+	case "ctrl+n", "f10":
+		m.enterExistingBranchMode()
 
 	case "tab":
 		return m, m.switchRepo(+1)
@@ -921,14 +938,14 @@ func (m WorktreeDialogModel) viewSelectBase() string {
 		}
 	}
 
-	return m.renderFullScreen("New Branch",
-		"Select a base branch to create a new branch from",
+	return m.renderFullScreen("Create Worktree from New Branch",
+		"Select a base branch for the new branch",
 		m.filter, rows,
-		"↑↓: navigate  Tab: repo  Enter: select base  Esc: back")
+		"↑↓: navigate  Tab: repo  Enter: select base  ^n: existing branch  Esc: back")
 }
 
 func (m WorktreeDialogModel) viewNewBranch() string {
-	titleStr := renderDialogTitle("New Branch", primaryColor)
+	titleStr := renderDialogTitle("Create Worktree from New Branch", primaryColor)
 
 	repo := m.repoLine()
 
@@ -947,6 +964,6 @@ func (m WorktreeDialogModel) viewNewBranch() string {
 		titleStr+"\n"+repo+"\n\n"+baseLine+"\n\n"+nameInput,
 		m.height-3,
 	)
-	statusBar := renderDialogHintBar(m.width, " Tab: repo  Enter: create  Esc: back")
+	statusBar := renderDialogHintBar(m.width, " Tab: repo  ^n: existing branch  Enter: create  Esc: back")
 	return content + "\n" + statusBar
 }
