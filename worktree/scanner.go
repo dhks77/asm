@@ -74,7 +74,7 @@ func Scan(root string) ([]Worktree, error) {
 // rendering.
 //
 // Stale entries (git metadata exists but the worktree directory has been
-// deleted on disk — e.g., removed with rm -rf or by an older asm/csm build
+// deleted on disk — e.g., removed with rm -rf or by an older asm build
 // that bypassed `git worktree remove`) are filtered out. Git itself only
 // cleans these up on `git worktree prune`; asm stays read-only and just
 // hides them from the picker.
