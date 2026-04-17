@@ -2,7 +2,7 @@ package ui
 
 import (
 	"fmt"
-	"sort"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -26,11 +26,6 @@ type settingsEntry struct {
 	entry  plugincfg.Entry
 	fields []plugincfg.Field
 	values map[string]string // current UI values (user + scope changes)
-}
-
-type repoColorEntry struct {
-	Name  string
-	Color string
 }
 
 type textEditTarget struct {
@@ -100,7 +95,8 @@ type SettingsModel struct {
 	// ideNames is the display list for Default IDE. Index 0 is always
 	// ideNoneLabel; indices 1.. are the configured IDEs in order.
 	ideNames            []string
-	repoColorEntries    []repoColorEntry
+	repoColorName       string
+	repoColorStr        string
 	selectedProvider    int
 	selectedTracker     int
 	selectedIDE         int    // 0 = none, 1+ = ideNames[i]
@@ -135,15 +131,14 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 	displayIDEs := append([]string{ideNoneLabel}, ideNames...)
 
 	m := SettingsModel{
-		userCfg:          userCfg,
-		projectCfg:       projectCfg,
-		rootPath:         rootPath,
-		entries:          entries,
-		ideEntries:       loadIDEEntries(userCfg),
-		repoColorEntries: loadRepoColorEntries(userCfg),
-		providerNames:    providerNames,
-		trackerNames:     trackerNames,
-		ideNames:         displayIDEs,
+		userCfg:       userCfg,
+		projectCfg:    projectCfg,
+		rootPath:      rootPath,
+		entries:       entries,
+		ideEntries:    loadIDEEntries(userCfg),
+		providerNames: providerNames,
+		trackerNames:  trackerNames,
+		ideNames:      displayIDEs,
 		projectOverrides: map[string]bool{
 			fieldProvider:         projectCfg.DefaultProvider != "",
 			fieldTracker:          projectCfg.DefaultTracker != "",
@@ -158,6 +153,7 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 	if rootPath != "" {
 		m.scopeIdx = 1
 	}
+	m.repoColorName, m.repoColorStr = loadRepoColorState(userCfg, projectCfg, rootPath)
 	m.loadGeneralFromScope()
 	m.rebuildItems()
 	return m
@@ -442,7 +438,8 @@ func (m *SettingsModel) currentCfg() *config.Config {
 func (m *SettingsModel) rebuildItems() {
 	m.items = nil
 	isLocal := m.currentScope() == config.ScopeProject
-	showWorktree := isLocal && worktree.IsRepoMode(m.rootPath)
+	showRepoSettings := isLocal && worktree.IsRepoMode(m.rootPath)
+	showWorktree := showRepoSettings
 
 	// Scope selector
 	m.items = append(m.items, flatItem{kind: "scope", section: -1, fieldIdx: -1})
@@ -462,9 +459,10 @@ func (m *SettingsModel) rebuildItems() {
 	if !isLocal {
 		// Picker width is a global-only UI setting.
 		m.items = append(m.items, flatItem{kind: "number", section: -1, fieldIdx: generalFieldPickerWidth})
-		for i := range m.repoColorEntries {
-			m.items = append(m.items, flatItem{kind: "repo-color", section: i})
-		}
+	}
+
+	if showRepoSettings && m.repoColorName != "" {
+		m.items = append(m.items, flatItem{kind: "repo-color", section: -1})
 	}
 
 	if showWorktree {
@@ -520,47 +518,42 @@ func copyMap(m map[string]string) map[string]string {
 	return out
 }
 
-func loadRepoColorEntries(cfg *config.Config) []repoColorEntry {
-	if cfg == nil || len(cfg.RepoColors) == 0 {
-		return nil
+func loadRepoColorState(userCfg, projectCfg *config.Config, rootPath string) (string, string) {
+	if rootPath == "" || !worktree.IsRepoMode(rootPath) {
+		return "", ""
 	}
-	names := make([]string, 0, len(cfg.RepoColors))
-	for name := range cfg.RepoColors {
-		names = append(names, name)
+	_, repoName := config.ProjectIdentity(rootPath)
+	if repoName == "" || repoName == "." {
+		repoName = filepath.Base(config.ProjectRoot(rootPath))
 	}
-	sort.Strings(names)
-	entries := make([]repoColorEntry, 0, len(names))
-	for _, name := range names {
-		entries = append(entries, repoColorEntry{
-			Name:  name,
-			Color: cfg.RepoColors[name],
-		})
+	color := ""
+	if projectCfg != nil {
+		color = strings.TrimSpace(projectCfg.RepoColor)
 	}
-	return entries
+	if color == "" && userCfg != nil {
+		color = strings.TrimSpace(userCfg.RepoColors[repoName])
+	}
+	return repoName, color
 }
 
-func repoColorsMap(entries []repoColorEntry) map[string]string {
-	if len(entries) == 0 {
-		return nil
+func repoColorConfigValue(repoName, configured string) string {
+	raw := strings.TrimSpace(configured)
+	if raw == "" || strings.EqualFold(raw, repoColorAuto) {
+		return ""
 	}
-	out := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		if entry.Name == "" {
-			continue
-		}
-		out[entry.Name] = repoColorSaveValue(entry.Name, entry.Color)
+	state := buildRepoColorState(repoName, configured)
+	if state.Valid {
+		return state.Normalized
 	}
-	return out
+	return ""
 }
 
-func (m SettingsModel) validateRepoColors() error {
-	for _, entry := range m.repoColorEntries {
-		if entry.Name == "" {
-			continue
-		}
-		if !buildRepoColorState(entry.Name, entry.Color).Valid {
-			return fmt.Errorf("invalid repo color for %s: use auto, #RRGGBB, rgb(r,g,b), or ANSI 0-255", entry.Name)
-		}
+func (m SettingsModel) validateRepoColor() error {
+	if m.repoColorName == "" || strings.TrimSpace(m.repoColorStr) == "" {
+		return nil
+	}
+	if !buildRepoColorState(m.repoColorName, m.repoColorStr).Valid {
+		return fmt.Errorf("invalid repo color: use auto, #RRGGBB, rgb(r,g,b), or ANSI 0-255")
 	}
 	return nil
 }
@@ -719,7 +712,7 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "ctrl+s":
-		if err := m.validateRepoColors(); err != nil {
+		if err := m.validateRepoColor(); err != nil {
 			m.err = err.Error()
 			return m, nil
 		}
@@ -753,7 +746,7 @@ func (m SettingsModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if err := m.validateRepoColors(); err != nil {
+		if err := m.validateRepoColor(); err != nil {
 			m.err = err.Error()
 			return m, nil
 		}
@@ -858,11 +851,19 @@ func (m SettingsModel) save() tea.Cmd {
 	// IDEs are always global-scoped in the settings UI — target-local
 	// per-IDE overrides aren't worth the complexity right now.
 	saveIDEEntries(m.userCfg, m.ideEntries)
-	m.userCfg.RepoColors = repoColorsMap(m.repoColorEntries)
 
 	userCfg := *m.userCfg
 	projectCfg := *m.projectCfg
 	rootPath := m.rootPath
+	if m.repoColorName != "" {
+		projectCfg.RepoColor = repoColorConfigValue(m.repoColorName, m.repoColorStr)
+		if userCfg.RepoColors != nil {
+			delete(userCfg.RepoColors, m.repoColorName)
+			if len(userCfg.RepoColors) == 0 {
+				userCfg.RepoColors = nil
+			}
+		}
+	}
 
 	type saveItem struct {
 		entry  plugincfg.Entry
@@ -891,7 +892,8 @@ func (m SettingsModel) save() tea.Cmd {
 func (m SettingsModel) View() string {
 	title := renderDialogTitle("Settings", primaryColor)
 	isLocal := m.currentScope() == config.ScopeProject
-	showWorktree := isLocal && worktree.IsRepoMode(m.rootPath)
+	showRepoSettings := isLocal && worktree.IsRepoMode(m.rootPath)
+	showWorktree := showRepoSettings
 
 	itemIdx := 0
 	var sections []string
@@ -927,15 +929,13 @@ func (m SettingsModel) View() string {
 		sections = append(sections, "")
 	}
 
-	if !isLocal && len(m.repoColorEntries) > 0 {
+	if showRepoSettings && m.repoColorName != "" {
 		header := lipgloss.NewStyle().Padding(0, 2).Render(
-			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("Repo Colors"),
+			lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render("Repository"),
 		)
 		sections = append(sections, header)
-		for _, entry := range m.repoColorEntries {
-			sections = append(sections, m.renderRepoColorField(itemIdx, entry))
-			itemIdx++
-		}
+		sections = append(sections, m.renderRepoColorField(itemIdx, "Repo Color", m.repoColorName, m.repoColorStr))
+		itemIdx++
 		sections = append(sections, "")
 	}
 
@@ -1115,11 +1115,11 @@ func (m *SettingsModel) textEditTarget(item flatItem) (textEditTarget, bool) {
 			}, true
 		}
 	}
-	if item.kind == "repo-color" && item.section >= 0 && item.section < len(m.repoColorEntries) {
+	if item.kind == "repo-color" && m.repoColorName != "" {
 		return textEditTarget{
-			get: func() string { return m.repoColorEntries[item.section].Color },
+			get: func() string { return m.repoColorStr },
 			set: func(v string) {
-				m.repoColorEntries[item.section].Color = v
+				m.repoColorStr = v
 				m.err = ""
 			},
 		}, true
@@ -1165,11 +1165,11 @@ func (m SettingsModel) renderTextField(itemIdx int, label, value, placeholder st
 	return "  " + indicator + labelStyle.Render(label+": ") + display
 }
 
-func (m SettingsModel) renderRepoColorField(itemIdx int, entry repoColorEntry) string {
+func (m SettingsModel) renderRepoColorField(itemIdx int, label, repoName, value string) string {
 	isCursor := itemIdx == m.cursor
 	indicator, labelStyle := fieldRowCursor(isCursor)
 
-	state := buildRepoColorState(entry.Name, entry.Color)
+	state := buildRepoColorState(repoName, value)
 	display := state.Raw
 	if display == "" && !isCursor {
 		display = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(" + repoColorInputPlaceholder + ")")
@@ -1189,7 +1189,7 @@ func (m SettingsModel) renderRepoColorField(itemIdx int, entry repoColorEntry) s
 		preview = lipgloss.NewStyle().Foreground(dangerColor).Render("  invalid")
 	}
 
-	return "  " + indicator + labelStyle.Render(entry.Name+": ") + display + preview
+	return "  " + indicator + labelStyle.Render(label+": ") + display + preview
 }
 
 // renderActionField renders an "invokable" row: a label followed by a path or

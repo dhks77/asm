@@ -37,7 +37,7 @@ type DirectoriesScannedMsg struct {
 	RepoRoots map[string]string
 	// RepoLabels maps target path -> human-facing repo label shown in headers.
 	RepoLabels map[string]string
-	// RepoColors maps grouping key -> configured terminal color value.
+	// RepoColors maps project root -> configured terminal color value.
 	// Values may be presets, ANSI 0-255, or hex/rgb forms.
 	RepoColors map[string]string
 }
@@ -132,7 +132,7 @@ type PickerModel struct {
 	taskInfos          map[string]tracker.TaskInfo
 	repoRoots          map[string]string // target path -> group root
 	repoLabels         map[string]string // target path -> display label
-	repoColors         map[string]string // group root -> configured terminal color value
+	repoColors         map[string]string // project root -> configured terminal color value
 	providerStates     map[string]provider.State
 	prevProviderStates map[string]provider.State
 	worktreeProviders  map[string]string // worktree name -> provider name

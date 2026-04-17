@@ -55,8 +55,11 @@ type Config struct {
 	// (standard git sibling convention). Leading `~` is expanded to the
 	// user's home directory when resolved via GetWorktreeBasePath.
 	WorktreeBasePath string `toml:"worktree_base_path"`
-	// RepoColors stores per-repository accent colors keyed by repository label.
+	// RepoColor stores the current repo's accent color in project scope.
 	// Values may be ANSI 0-255, hex, rgb(r,g,b), or preset aliases.
+	RepoColor string `toml:"repo_color"`
+	// RepoColors is the legacy user-scope repo color map. Kept only so old
+	// ~/.asm/config.toml entries can be migrated into project scope.
 	RepoColors map[string]string `toml:"repo_colors"`
 }
 
@@ -167,6 +170,9 @@ func merge(base, overlay *Config) {
 	if overlay.WorktreeBasePath != "" {
 		base.WorktreeBasePath = overlay.WorktreeBasePath
 	}
+	if overlay.RepoColor != "" {
+		base.RepoColor = overlay.RepoColor
+	}
 	// Merge Providers (wholesale per key)
 	if len(overlay.Providers) > 0 {
 		if base.Providers == nil {
@@ -204,7 +210,7 @@ func merge(base, overlay *Config) {
 		}
 	}
 
-	// Merge repo colors by repository label.
+	// Merge legacy repo colors by repository label.
 	if len(overlay.RepoColors) > 0 {
 		if base.RepoColors == nil {
 			base.RepoColors = make(map[string]string)

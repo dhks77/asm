@@ -174,8 +174,8 @@ func TestEnsureDirectoryTrackedSeedsRepoMetadata(t *testing.T) {
 	if got := m.repoLabels[repoPath]; got != "tc-dcm" {
 		t.Fatalf("repoLabels[%q] = %q, want %q", repoPath, got, "tc-dcm")
 	}
-	if got := m.repoColors["tc-dcm"]; got == "" {
-		t.Fatalf("repoColors should be populated for %q", "tc-dcm")
+	if got := m.repoColors[repoPath]; got == "" {
+		t.Fatalf("repoColors should be populated for root %q", repoPath)
 	}
 }
 

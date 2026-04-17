@@ -16,11 +16,8 @@ func repoMetadataForPaths(paths []string) (map[string]string, map[string]string,
 	if userCfg == nil {
 		userCfg = config.DefaultConfig()
 	}
-	if userCfg.RepoColors == nil {
-		userCfg.RepoColors = make(map[string]string)
-	}
-
-	dirty := false
+	projectCfgs := make(map[string]*config.Config)
+	migratedLegacyLabels := make(map[string]bool)
 	for _, path := range paths {
 		root, label := config.ProjectIdentity(path)
 		if root == "" || root == "." {
@@ -32,16 +29,38 @@ func repoMetadataForPaths(paths []string) (map[string]string, map[string]string,
 		repoRoots[path] = root
 		repoLabels[path] = label
 
-		color := strings.TrimSpace(userCfg.RepoColors[label])
+		if _, ok := repoColors[root]; ok {
+			continue
+		}
+
+		projectCfg := projectCfgs[root]
+		if projectCfg == nil {
+			projectCfg, _ = config.LoadScope(config.ScopeProject, root)
+			if projectCfg == nil {
+				projectCfg = config.DefaultConfig()
+			}
+			projectCfgs[root] = projectCfg
+		}
+
+		color := strings.TrimSpace(projectCfg.RepoColor)
+		if color == "" {
+			color = strings.TrimSpace(userCfg.RepoColors[label])
+			if color != "" {
+				projectCfg.RepoColor = color
+				_ = config.SaveScope(projectCfg, config.ScopeProject, root)
+				migratedLegacyLabels[label] = true
+			}
+		}
 		if color == "" {
 			color = generatedRepoColorValue(label)
-			userCfg.RepoColors[label] = color
-			dirty = true
 		}
-		repoColors[label] = color
+		repoColors[root] = color
 	}
 
-	if dirty {
+	if len(migratedLegacyLabels) > 0 && len(userCfg.RepoColors) > 0 {
+		for label := range migratedLegacyLabels {
+			delete(userCfg.RepoColors, label)
+		}
 		_ = config.SaveScope(userCfg, config.ScopeUser, "")
 	}
 
@@ -59,8 +78,8 @@ func mergeRepoMetadataForPaths(paths []string, repoRoots, repoLabels, repoColors
 	for path, label := range labels {
 		repoLabels[path] = label
 	}
-	for label, color := range colors {
-		repoColors[label] = color
+	for root, color := range colors {
+		repoColors[root] = color
 	}
 }
 
@@ -79,8 +98,9 @@ func (m *PickerModel) repoLabelForPath(path string) string {
 }
 
 func (m *PickerModel) repoAccentForPath(path string) lipgloss.Color {
+	root := m.repoRootForPath(path)
 	label := m.repoLabelForPath(path)
-	return resolveRepoAccentColor(label, m.repoColors[label])
+	return resolveRepoAccentColor(label, m.repoColors[root])
 }
 
 func (m *PickerModel) renderRepoHeader(path string) string {
