@@ -159,6 +159,9 @@ type PickerModel struct {
 	// configured picker percentage and should be re-applied once the main
 	// window is not zoomed.
 	pickerWidthDirty bool
+	// layoutSyncPending forces a hidden-window size resync after a picker
+	// WindowSizeMsg even when the tmux client width itself didn't change.
+	layoutSyncPending bool
 	// statusSummaryWriting is true while a writeStatusSummaryCmd goroutine
 	// is still flushing set-option calls to tmux. scrollTick skips issuing
 	// a new write while this is set, so a slow tmux server can't snowball
@@ -223,6 +226,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		terminalWidth:        120, // sane default until the first tmux query lands
 		terminalWidthPending: true,
 		pickerWidthDirty:     true,
+		layoutSyncPending:    true,
 		selectedItems:        make(map[string]bool),
 		tracker:              t,
 		taskCache:            taskCache,
@@ -352,12 +356,25 @@ func (m *PickerModel) requestTerminalLayout() tea.Cmd {
 	return fetchTerminalLayoutCmd()
 }
 
-func (m *PickerModel) syncPickerWidthCmd(zoomed bool) tea.Cmd {
-	if !m.pickerWidthDirty || zoomed || m.cfg == nil {
+func (m *PickerModel) syncLayoutCmd(zoomed bool, syncHidden bool) tea.Cmd {
+	resizePicker := m.pickerWidthDirty && !zoomed && m.cfg != nil
+	if !resizePicker && !syncHidden {
 		return nil
 	}
-	m.pickerWidthDirty = false
-	return resizePickerPanelCmd(m.cfg.GetPickerWidth())
+	pickerPct := 0
+	if resizePicker {
+		m.pickerWidthDirty = false
+		pickerPct = m.cfg.GetPickerWidth()
+	}
+	return func() tea.Msg {
+		if resizePicker {
+			_ = asmtmux.ResizePickerPanel(pickerPct)
+		}
+		if resizePicker || syncHidden {
+			asmtmux.SyncManagedWindowSizes()
+		}
+		return nil
+	}
 }
 
 func restoreSnapshotCmd(rootPath string, registry *provider.Registry) tea.Cmd {
@@ -578,6 +595,7 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
+		m.layoutSyncPending = true
 		// Bubble Tea only reports picker-pane size changes. The outer tmux
 		// client can resize without changing this pane's width, so kick the
 		// async tmux-side layout probe here and also keep a background watcher.
@@ -588,15 +606,19 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case terminalLayoutResolvedMsg:
 		m.terminalWidthPending = false
+		prevZoomed := m.workingZoomed
 		m.workingZoomed = msg.zoomed
+		layoutChanged := prevZoomed != msg.zoomed || m.layoutSyncPending
 		if msg.width > 0 && msg.width != m.terminalWidth {
 			m.terminalWidth = msg.width
 			m.pickerWidthDirty = true
+			layoutChanged = true
 		} else if msg.width > 0 {
 			m.terminalWidth = msg.width
 		}
+		m.layoutSyncPending = false
 		var cmds []tea.Cmd
-		if cmd := m.syncPickerWidthCmd(msg.zoomed); cmd != nil {
+		if cmd := m.syncLayoutCmd(msg.zoomed, layoutChanged); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 		cmds = append(cmds, terminalLayoutTickCmd())
@@ -2395,13 +2417,6 @@ func fetchTerminalLayoutCmd() tea.Cmd {
 			width:  asmtmux.TerminalWidth(),
 			zoomed: asmtmux.IsWorkingPanelZoomed(),
 		}
-	}
-}
-
-func resizePickerPanelCmd(pickerPct int) tea.Cmd {
-	return func() tea.Msg {
-		_ = asmtmux.ResizePickerPanel(pickerPct)
-		return nil
 	}
 }
 

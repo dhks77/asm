@@ -510,6 +510,80 @@ func runTmux(args ...string) {
 	_ = exec.CommandContext(ctx, "tmux", args...).Run()
 }
 
+// workingSlotSize returns the current width/height of the main working pane.
+// Hidden AI/terminal/dialog windows are pinned to this size so swapping panes
+// doesn't force a reflow in the provider TUI.
+func workingSlotSize() (int, int, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "display-message",
+		"-t", workingTarget(), "-p", "#{pane_width}x#{pane_height}").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	var w, h int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%dx%d", &w, &h); err != nil {
+		return 0, 0, false
+	}
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
+}
+
+func syncHiddenWindowSize(winName string) {
+	if winName == "" || !WindowExists(winName) {
+		return
+	}
+	w, h, ok := workingSlotSize()
+	if !ok {
+		return
+	}
+	target := fmt.Sprintf("%s:%s", SessionName, winName)
+	runTmux("set-option", "-w", "-t", target, "window-size", "manual")
+	runTmux("resize-window", "-t", target, "-x", fmt.Sprintf("%d", w), "-y", fmt.Sprintf("%d", h))
+}
+
+func managedHiddenWindowNames() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-windows", "-t", SessionName, "-F", "#{window_name}\t#{@asm-kind}").Output()
+	if err != nil {
+		return nil
+	}
+	utilitySet := make(map[string]bool, len(utilityWindows))
+	for _, name := range utilityWindows {
+		utilitySet[name] = true
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		name := strings.TrimSpace(parts[0])
+		if name == "" || name == MainWindow {
+			continue
+		}
+		kind := ""
+		if len(parts) > 1 {
+			kind = strings.TrimSpace(parts[1])
+		}
+		if kind == "ai" || kind == "term" || utilitySet[name] {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// SyncManagedWindowSizes pins every hidden AI/terminal/dialog window to the
+// current working-pane size. Best-effort only.
+func SyncManagedWindowSizes() {
+	for _, winName := range managedHiddenWindowNames() {
+		syncHiddenWindowSize(winName)
+	}
+}
+
 // TerminalWidth returns the attached client's terminal width in columns.
 // Falls back to 120 if it can't be queried.
 func TerminalWidth() int {
@@ -567,6 +641,7 @@ func CreateDirectoryWindow(targetPath, dirPath, command string, args []string) e
 			SessionName, winName, err)
 		return err
 	}
+	syncHiddenWindowSize(winName)
 
 	aiCmd := command
 	for _, a := range args {
@@ -639,6 +714,7 @@ func CleanupExitedWindow(targetPath string, isCurrentlyDisplayed bool) {
 }
 
 func swapPaneToWorking(winName string) error {
+	syncHiddenWindowSize(winName)
 	return runTmuxCmd("swap-pane",
 		"-s", windowFirstPane(winName),
 		"-t", workingTarget(),
@@ -646,6 +722,7 @@ func swapPaneToWorking(winName string) error {
 }
 
 func swapPaneFromWorking(winName string) error {
+	syncHiddenWindowSize(winName)
 	return runTmuxCmd("swap-pane",
 		"-s", workingTarget(),
 		"-t", windowFirstPane(winName),
@@ -687,6 +764,7 @@ func RunInWorkingPanel(windowName, cmd string) error {
 		_ = runTmuxCmd("set-option", "-t", SessionName, "@asm-utility-open", "0")
 		return err
 	}
+	syncHiddenWindowSize(windowName)
 
 	exitVar := fmt.Sprintf("@%s-exit", windowName)
 	exitSignal := fmt.Sprintf("tmux set -t %s %s $? ; tmux wait-for -S %s", SessionName, exitVar, windowName)
@@ -895,6 +973,7 @@ func CreateTerminalWindow(targetPath, dirPath string) error {
 	if err := setManagedWindowMetadata(winName, targetPath, filepath.Base(dirPath), "term"); err != nil {
 		return err
 	}
+	syncHiddenWindowSize(winName)
 
 	shell := os.Getenv("SHELL")
 	if shell == "" {
