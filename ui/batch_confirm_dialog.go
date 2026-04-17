@@ -140,11 +140,11 @@ func (m BatchConfirmModel) Update(msg tea.Msg) (BatchConfirmModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "left", "h":
+		case "left":
 			if m.cursor > 0 {
 				m.cursor--
 			}
-		case "right", "l":
+		case "right":
 			if m.cursor < 1 {
 				m.cursor++
 			}
@@ -161,7 +161,7 @@ func (m BatchConfirmModel) Update(msg tea.Msg) (BatchConfirmModel, tea.Cmd) {
 			return m, func() tea.Msg {
 				return BatchCancelledMsg{}
 			}
-		case "esc", "q":
+		case "esc", "ctrl+c":
 			m.Hide()
 			return m, func() tea.Msg {
 				return BatchCancelledMsg{}

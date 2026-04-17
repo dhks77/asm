@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nhn/asm/tracker"
 )
 
@@ -216,6 +217,25 @@ func TestHandleBackRepoStoresSelectionPath(t *testing.T) {
 	}
 	if updated.pendingSelectionPath != "/tmp/root/repo" {
 		t.Fatalf("pendingSelectionPath = %q, want %q", updated.pendingSelectionPath, "/tmp/root/repo")
+	}
+}
+
+func TestLauncherPlainRuneFiltersInsteadOfNavigating(t *testing.T) {
+	m := LauncherModel{
+		tab:         launcherTabDirectories,
+		currentPath: "/tmp/root/child",
+		entries: []launcherEntry{
+			{label: "child", path: "/tmp/root/child"},
+		},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	got := updated.(LauncherModel)
+	if got.filter != "h" {
+		t.Fatalf("filter = %q, want %q", got.filter, "h")
+	}
+	if got.currentPath != "/tmp/root/child" {
+		t.Fatalf("currentPath = %q, want %q", got.currentPath, "/tmp/root/child")
 	}
 }
 

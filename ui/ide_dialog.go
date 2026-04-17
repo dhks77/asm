@@ -40,11 +40,11 @@ func (m IDESelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "up", "k":
+		case "up":
 			if m.cursor > 0 {
 				m.cursor--
 			}
-		case "down", "j":
+		case "down":
 			if m.cursor < len(m.ides)-1 {
 				m.cursor++
 			}
@@ -53,7 +53,7 @@ func (m IDESelectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Selected = m.ides[m.cursor]
 			}
 			return m, tea.Quit
-		case "esc", "q", "ctrl+c":
+		case "esc", "ctrl+c":
 			return m, tea.Quit
 		}
 	}

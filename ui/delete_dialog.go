@@ -42,22 +42,19 @@ func (m DeleteModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "left", "h":
+		case "left":
 			if m.cursor > 0 {
 				m.cursor--
 			}
-		case "right", "l":
+		case "right":
 			if m.cursor < 1 {
 				m.cursor++
 			}
 		case "enter":
 			m.Confirmed = m.cursor == 0
 			return m, tea.Quit
-		case "esc", "q", "n", "ctrl+c":
+		case "esc", "ctrl+c":
 			m.Confirmed = false
-			return m, tea.Quit
-		case "y":
-			m.Confirmed = true
 			return m, tea.Quit
 		}
 	}

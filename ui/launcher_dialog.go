@@ -135,21 +135,21 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+tab":
 			m.advanceTab(-1)
 			return m, m.triggerReload()
-		case "up", "k":
+		case "up":
 			if m.cursor > 0 {
 				m.cursor--
 				if m.cursor < m.viewTop {
 					m.viewTop = m.cursor
 				}
 			}
-		case "down", "j":
+		case "down":
 			if m.cursor < len(m.entries)-1 {
 				m.cursor++
 				m.adjustViewTop()
 			}
-		case "left", "h":
+		case "left":
 			return m.handleBack()
-		case "right", "l":
+		case "right":
 			return m.handleForward()
 		case "enter":
 			return m.handleEnter()
@@ -163,7 +163,7 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filter = string(runes[:len(runes)-1])
 			m.cursor = 0
 			return m, m.triggerReload()
-		case "esc", "q", "ctrl+c":
+		case "esc", "ctrl+c":
 			return m, tea.Quit
 		default:
 			switch msg.Type {
