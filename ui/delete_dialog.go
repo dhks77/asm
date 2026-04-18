@@ -13,6 +13,7 @@ type DeleteModel struct {
 	taskName   string
 	dirty      bool
 	isWorktree bool
+	usesTrash  bool
 	cursor     int
 	Confirmed  bool
 	width      int
@@ -25,6 +26,7 @@ func NewDeleteModel(dirName, taskName string, dirty, isWorktree bool) DeleteMode
 		taskName:   taskName,
 		dirty:      dirty,
 		isWorktree: isWorktree,
+		usesTrash:  !isWorktree,
 		cursor:     1, // default to Cancel
 	}
 }
@@ -63,7 +65,11 @@ func (m DeleteModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m DeleteModel) View() string {
-	title := renderDialogTitle("Remove Directory", dangerColor)
+	titleText := "Move Directory to Trash"
+	if m.isWorktree {
+		titleText = "Remove Git Worktree"
+	}
+	title := renderDialogTitle(titleText, dangerColor)
 
 	var info string
 	if m.taskName != "" {
@@ -74,19 +80,33 @@ func (m DeleteModel) View() string {
 	var warning string
 	if m.dirty {
 		warning += "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).Bold(true).
-			Render("⚠ Modified or untracked files exist") + "\n" +
-			lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).
+			Render("⚠ Modified or untracked files exist")
+		if m.usesTrash {
+			warning += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
+				Render("  Uncommitted changes will move to Trash with the directory")
+		} else {
+			warning += "\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).
 				Render("  Uncommitted changes will be lost")
+		}
 	}
 	if m.isWorktree {
 		warning += "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
 			Render("Git worktree will also be removed")
+	} else {
+		warning += "\n\n" + lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
+			Render("You can restore it later from Trash")
 	}
 
-	question := lipgloss.NewStyle().Padding(1, 2).Foreground(dimColor).
-		Render(fmt.Sprintf("Remove directory '%s'?", m.dirName))
+	questionText := fmt.Sprintf("Move directory '%s' to Trash?", m.dirName)
+	if m.isWorktree {
+		questionText = fmt.Sprintf("Remove git worktree '%s'?", m.dirName)
+	}
+	question := lipgloss.NewStyle().Padding(1, 2).Foreground(dimColor).Render(questionText)
 
-	options := []string{"Remove", "Cancel"}
+	options := []string{"Move to Trash", "Cancel"}
+	if m.isWorktree {
+		options = []string{"Remove", "Cancel"}
+	}
 	var buttons []string
 	for i, opt := range options {
 		style := lipgloss.NewStyle().Padding(0, 3)

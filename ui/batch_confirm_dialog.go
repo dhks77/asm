@@ -185,7 +185,7 @@ func (m BatchConfirmModel) View() string {
 	case BatchKillSessions:
 		titleText = fmt.Sprintf("Kill %d session(s)?", len(m.items))
 	case BatchDeleteWorktrees:
-		titleText = fmt.Sprintf("Delete %d worktree(s)?", len(m.items))
+		titleText = fmt.Sprintf("Delete %d target(s)?", len(m.items))
 	}
 
 	title := renderDialogTitle(titleText, dangerColor)
@@ -215,6 +215,11 @@ func (m BatchConfirmModel) View() string {
 		body.WriteString("\n")
 		body.WriteString(lipgloss.NewStyle().Padding(0, 2).Foreground(warnColor).Bold(true).
 			Render(fmt.Sprintf("⚠ %d item(s) have uncommitted changes", m.dirty)))
+	}
+	if m.action == BatchDeleteWorktrees {
+		body.WriteString("\n")
+		body.WriteString(lipgloss.NewStyle().Padding(0, 2).Foreground(dimColor).
+			Render("Plain directories and main repos move to Trash; linked git worktrees are removed via git."))
 	}
 
 	options := []string{"Confirm", "Cancel"}

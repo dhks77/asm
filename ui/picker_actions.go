@@ -2,11 +2,11 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 	asmtmux "github.com/nhn/asm/tmux"
+	"github.com/nhn/asm/trash"
 	"github.com/nhn/asm/worktree"
 )
 
@@ -161,7 +161,7 @@ func removeTargetPath(targetPath string) error {
 			return nil
 		}
 	}
-	return os.RemoveAll(targetPath)
+	return trash.Move(targetPath)
 }
 
 // cleanupSessionState removes per-session bookkeeping for the given target
