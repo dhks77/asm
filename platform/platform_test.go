@@ -26,7 +26,6 @@ func (s stubPlatform) ExecutablePath() (string, error) {
 	return "/tmp/asm", nil
 }
 func (s stubPlatform) UserConfigDir() string         { return "/tmp/home/.asm" }
-func (s stubPlatform) Notify(title, body string)     {}
 func (s stubPlatform) MoveToTrash(path string) error { return nil }
 func (s stubPlatform) OpenURL(url string) error      { return nil }
 func (s stubPlatform) RevealPath(path string) error  { return nil }

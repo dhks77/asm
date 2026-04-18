@@ -3,6 +3,8 @@ package main
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/nhn/asm/config"
 )
 
 func TestParseRequestedSessionID(t *testing.T) {
@@ -32,5 +34,12 @@ func TestResolveContextPathDefaultsToHome(t *testing.T) {
 	}
 	if got != filepath.Clean(home) {
 		t.Fatalf("resolveContextPath() = %q, want %q", got, filepath.Clean(home))
+	}
+}
+
+func TestValidateRuntimeDependenciesAlwaysSucceeds(t *testing.T) {
+	enabled := true
+	if err := validateRuntimeDependencies(&config.Config{DesktopNotifications: &enabled}); err != nil {
+		t.Fatalf("validateRuntimeDependencies() error = %v", err)
 	}
 }

@@ -4,11 +4,7 @@ import "path/filepath"
 
 func newDarwinPlatform() Platform {
 	p := &platformImpl{
-		name: "darwin",
-		notify: func(title, body string) {
-			script := `display notification "` + escapeAppleScript(body) + `" with title "` + escapeAppleScript(title) + `"`
-			runBestEffort(notificationTimeout, "osascript", "-e", script)
-		},
+		name:       "darwin",
 		openURL:    func(url string) error { return startDetached("open", url) },
 		revealPath: func(path string) error { return startDetached("open", path) },
 		builtinIDEs: []IDEEntry{

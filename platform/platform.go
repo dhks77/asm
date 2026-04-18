@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-const notificationTimeout = 5 * time.Second
 const trashFallbackTimeout = 5 * time.Second
 
 // IDEEntry describes one built-in IDE launcher for a platform.
@@ -32,7 +31,6 @@ type Platform interface {
 	TempDir() string
 	ExecutablePath() (string, error)
 	UserConfigDir() string
-	Notify(title, body string)
 	MoveToTrash(path string) error
 	OpenURL(url string) error
 	RevealPath(path string) error
@@ -129,7 +127,6 @@ type platformImpl struct {
 	tempDir        func() string
 	executablePath func() (string, error)
 	userConfigDir  func() string
-	notify         func(title, body string)
 	moveToTrash    func(path string) error
 	openURL        func(url string) error
 	revealPath     func(path string) error
@@ -172,12 +169,6 @@ func (p *platformImpl) UserConfigDir() string {
 		return p.userConfigDir()
 	}
 	return defaultUserConfigDir(p)
-}
-
-func (p *platformImpl) Notify(title, body string) {
-	if p.notify != nil {
-		p.notify(title, body)
-	}
 }
 
 func (p *platformImpl) MoveToTrash(path string) error {
@@ -249,12 +240,6 @@ func appendPathWithName(_ string, command string, args []string, path string) (s
 func startDetached(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	return cmd.Start()
-}
-
-func runBestEffort(timeout time.Duration, name string, args ...string) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	_ = exec.CommandContext(ctx, name, args...).Run()
 }
 
 func moveByRename(path, trashDir string, fallback func(string) error) error {

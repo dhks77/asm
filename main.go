@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nhn/asm/config"
 	"github.com/nhn/asm/ide"
+	"github.com/nhn/asm/notification"
 	"github.com/nhn/asm/platform"
 	"github.com/nhn/asm/plugincfg"
 	"github.com/nhn/asm/provider"
@@ -40,10 +41,19 @@ func main() {
 	launcherMode := flag.Bool("launcher", false, "Run session launcher dialog")
 	batchConfirmMode := flag.Bool("batch-confirm", false, "Run batch confirmation dialog")
 	restoreLast := flag.Bool("restore-last", false, "Restore previously open sessions in picker mode")
+	notifyHelperPayload := flag.String("notify-helper", "", "Internal notification helper payload")
 	flag.Parse()
 
 	initLog()
 	defer closeLog()
+
+	if strings.TrimSpace(*notifyHelperPayload) != "" {
+		if err := notification.RunHelper(*notifyHelperPayload); err != nil {
+			logErr("Error running notification helper: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *listMode {
 		runListSessions()
@@ -72,6 +82,10 @@ func main() {
 	// Now that we have rootPath, load merged config (user + project overlay)
 	if mergedCfg, err := config.LoadMerged(rootPath); err == nil {
 		cfg = mergedCfg
+	}
+	if err := validateRuntimeDependencies(cfg); err != nil {
+		logErr("Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// First-entry auto-seed of project worktree_base_path. Runs before any
@@ -126,6 +140,7 @@ func main() {
 		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, *batchConfirmMode, asmtmux.SessionID, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
 
 	if sessionBoundMode && asmtmux.IsInsideTmux() {
+		asmtmux.EnablePassthrough()
 		asmtmux.InstallRootBindings()
 	}
 
@@ -152,6 +167,10 @@ func main() {
 	} else {
 		runOrchestrator(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg), restoreSelection)
 	}
+}
+
+func validateRuntimeDependencies(cfg *config.Config) error {
+	return nil
 }
 
 func buildRegistry(cfg *config.Config) *provider.Registry {
@@ -449,6 +468,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 		logErr("Error: tmux is required. Install it with: brew install tmux\n")
 		os.Exit(1)
 	}
+	asmtmux.EnablePassthrough()
 
 	if asmtmux.SessionExists() {
 		if asmtmux.IsInsideTmux() {

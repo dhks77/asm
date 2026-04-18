@@ -78,7 +78,11 @@ func (m PickerModel) handleProviderStateUpdated(msg ProviderStateUpdatedMsg) (te
 						displayName = info.Name
 					}
 				}
-				extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, m.workingPath))
+				providerName := m.worktreeProviders[msg.Path]
+				if providerName == "" && m.registry != nil && m.registry.Default() != nil {
+					providerName = m.registry.Default().Name()
+				}
+				extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, providerName, asmtmux.SessionName, m.workingPath))
 			}
 		}
 	}

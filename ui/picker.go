@@ -2266,21 +2266,31 @@ func flashExpireCmd(targetPath string, startedAt time.Time, after time.Duration)
 
 // notifyCompletionCmd sends a desktop notification when an AI session finishes.
 // displayName is the resolved title (task name preferred, falling back to folder).
-func notifyCompletionCmd(targetPath, displayName, currentWorkingPath string) tea.Cmd {
+func notifyCompletionCmd(targetPath, displayName, providerName, sessionName, currentWorkingPath string) tea.Cmd {
 	return func() tea.Msg {
 		isDisplayed := currentWorkingPath == targetPath
 		content, err := asmtmux.CapturePaneHistory(targetPath, isDisplayed, 80)
+		title := "ASM – " + displayName
 		if err != nil {
-			notification.Send("ASM – "+displayName, "done")
+			notification.SendRequest(notification.Request{
+				Title:       title,
+				Body:        "done",
+				Provider:    providerName,
+				SessionName: sessionName,
+			})
 			return nil
 		}
 		snippet := extractLastResponse(content)
-		title := "ASM – " + displayName
+		body := "done"
 		if snippet != "" {
-			notification.Send(title, snippet)
-		} else {
-			notification.Send(title, "done")
+			body = snippet
 		}
+		notification.SendRequest(notification.Request{
+			Title:       title,
+			Body:        body,
+			Provider:    providerName,
+			SessionName: sessionName,
+		})
 		return nil
 	}
 }

@@ -354,6 +354,12 @@ func InstallRootBindings() {
 	).Run()
 }
 
+// EnablePassthrough turns on tmux passthrough so wrapped OSC sequences can
+// reach the outer terminal app (cmux) from inside asm's tmux session.
+func EnablePassthrough() {
+	runTmux("set-option", "-g", "allow-passthrough", "on")
+}
+
 // CreateSession creates a new tmux session and sets up pane-switching key bindings.
 func CreateSession(pickerCmd string) error {
 	// Chain set-option atomically with new-session via ";" so that
