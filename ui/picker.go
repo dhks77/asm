@@ -386,9 +386,9 @@ func (m *PickerModel) syncLayoutCmd(zoomed bool, syncMain bool) tea.Cmd {
 	}
 }
 
-func restoreSnapshotCmd(rootPath string, registry *provider.Registry) tea.Cmd {
+func restoreSnapshotCmd(sessionID string, registry *provider.Registry) tea.Cmd {
 	return func() tea.Msg {
-		snap, err := sessionstate.Load(rootPath)
+		snap, err := sessionstate.Load(sessionID)
 		if err != nil || snap == nil || !snap.HasTargets() {
 			return nil
 		}
@@ -437,7 +437,7 @@ func restoreSnapshotCmd(rootPath string, registry *provider.Registry) tea.Cmd {
 
 func (m *PickerModel) buildSessionSnapshot(activeKinds map[string]asmtmux.SessionKind) sessionstate.Snapshot {
 	snap := sessionstate.Snapshot{
-		RootPath:      m.rootPath,
+		SessionID:     asmtmux.SessionID,
 		FrontPath:     m.workingPath,
 		FrontKind:     "ai",
 		FocusedPane:   "working",
@@ -476,7 +476,7 @@ func (m *PickerModel) buildSessionSnapshot(activeKinds map[string]asmtmux.Sessio
 func (m *PickerModel) persistSessionSnapshotCmd(activeKinds map[string]asmtmux.SessionKind) tea.Cmd {
 	snap := m.buildSessionSnapshot(activeKinds)
 	return func() tea.Msg {
-		_ = sessionstate.Save(m.rootPath, snap)
+		_ = sessionstate.Save(asmtmux.SessionID, snap)
 		return nil
 	}
 }
@@ -602,7 +602,7 @@ func (m PickerModel) Init() tea.Cmd {
 		fetchTerminalLayoutCmd(),
 	}
 	if m.restoreLast {
-		cmds = append(cmds, restoreSnapshotCmd(m.rootPath, m.registry))
+		cmds = append(cmds, restoreSnapshotCmd(asmtmux.SessionID, m.registry))
 	}
 	return tea.Batch(cmds...)
 }
@@ -1087,12 +1087,9 @@ type deleteExitedMsg struct {
 // []string{"--settings"}). resultMsg is invoked with
 // the dialog's exit code once it terminates.
 //
-// The picker's rootPath is injected as `--path <rootPath>` by default —
-// callers MUST NOT pass their own --path. Every dialog subprocess has to
-// LoadMerged against the same rootPath the picker is using, otherwise
-// after an arrow-key navigation the child would read cfg.DefaultPath (or
-// CWD) and happily edit a different repo's project config. Centralising
-// the flag here also means new dialogs can't forget to wire it up.
+// The picker's context path is injected via ASM_CONTEXT_PATH for every dialog
+// subprocess so local/project settings still resolve against the target the
+// dialog was opened for.
 func (m *PickerModel) runDialogInWorkingPanelAtPath(dialogPath, windowName string, args []string, resultMsg func(exitCode int) tea.Msg) tea.Cmd {
 	if asmtmux.HasUtilityWindow() {
 		asmlog.Debugf("picker: dialog request ignored because utility is already open session=%q requested=%q",
@@ -1109,7 +1106,12 @@ func (m *PickerModel) runDialogInWorkingPanelAtPath(dialogPath, windowName strin
 		return nil
 	}
 
-	argv := shelljoin.Join(append(append([]string{"env", "ASM_SESSION_NAME=" + asmtmux.SessionName, exe}, args...), "--path", dialogPath)...)
+	argv := shelljoin.Join(append([]string{
+		"env",
+		"ASM_SESSION_NAME=" + asmtmux.SessionName,
+		"ASM_CONTEXT_PATH=" + dialogPath,
+		exe,
+	}, args...)...)
 	asmlog.Debugf("picker: open-dialog session=%q window=%q dialog_path=%q args=%v", asmtmux.SessionName, windowName, dialogPath, args)
 	if err := asmtmux.RunInWorkingPanel(windowName, argv); err != nil {
 		asmlog.Debugf("picker: open-dialog failed session=%q window=%q err=%v", asmtmux.SessionName, windowName, err)
@@ -1158,10 +1160,7 @@ func (m *PickerModel) openProviderSelect() tea.Cmd {
 }
 
 func (m *PickerModel) openLauncher() tea.Cmd {
-	launcherPath := m.rootPath
-	if wt := m.contextDirectory(); wt != nil {
-		launcherPath = wt.Path
-	}
+	launcherPath := launcherHomePath()
 	asmlog.Debugf("picker: open-launcher session=%q launcher_path=%q", asmtmux.SessionName, launcherPath)
 	return m.runDialogInWorkingPanelAtPath(launcherPath, "asm-launcher", []string{"--launcher"}, func(exitCode int) tea.Msg {
 		asmlog.Debugf("picker: launcher-dialog result session=%q exit_code=%d", asmtmux.SessionName, exitCode)
@@ -1266,7 +1265,7 @@ func (m *PickerModel) openSettings() tea.Cmd {
 }
 
 func (m *PickerModel) openWorktreeDialog(dir *worktree.Worktree) tea.Cmd {
-	// --path is injected by runDialogInWorkingPanel.
+	// ASM_CONTEXT_PATH is injected by runDialogInWorkingPanel.
 	args := []string{"--worktree-create", "--worktree-dir", dir.Path}
 	return m.runDialogInWorkingPanelAtPath(dir.Path, "asm-worktree", args, func(exitCode int) tea.Msg {
 		path := strings.TrimSpace(asmtmux.GetSessionOption("asm-created-worktree-path"))

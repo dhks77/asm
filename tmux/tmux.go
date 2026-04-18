@@ -14,10 +14,11 @@ import (
 	"github.com/nhn/asm/asmlog"
 )
 
-// SessionName is the active tmux session name. Defaults to "asm" but is
-// expected to be reassigned via SetSessionName so multiple asm instances on
-// different root paths can coexist.
-var SessionName = "asm"
+// SessionID is the active logical asm session identifier.
+var SessionID = "default"
+
+// SessionName is the backing tmux session name for the active asm session.
+var SessionName = "asm-default"
 
 const MainWindow = "main"
 
@@ -77,39 +78,56 @@ func windowFirstPane(winName string) string {
 	return fmt.Sprintf("%s:%s.%s", SessionName, winName, pickerPane())
 }
 
-// DeriveSessionName computes the tmux session name for a given rootPath
-// without mutating any global state. Pure and idempotent — callers that
-// need to check "would there be a session for this other path?" use this
-// together with SessionExistsNamed.
-func DeriveSessionName(rootPath string) string {
-	base := filepath.Base(rootPath)
-	sanitized := strings.Map(func(r rune) rune {
+// ValidateSessionID accepts the user-facing session id format.
+func ValidateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("session id cannot be empty")
+	}
+	for i, r := range sessionID {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			return r
+		default:
+			return fmt.Errorf("session id %q contains unsupported character %q", sessionID, string(r))
 		}
-		return '-'
-	}, base)
-	if sanitized == "" {
-		sanitized = "root"
+		if i == 0 && (r == '-' || r == '_') {
+			return fmt.Errorf("session id %q must start with a letter or digit", sessionID)
+		}
 	}
-	h := fnv.New32a()
-	h.Write([]byte(rootPath))
-	return fmt.Sprintf("asm-%s-%06x", sanitized, h.Sum32()&0xffffff)
+	return nil
 }
 
-// SetSessionName derives a per-rootPath tmux session name. Same rootPath
-// always yields the same name (hash-stable), different rootPaths get
-// distinct names. Safe to call repeatedly.
-func SetSessionName(rootPath string) {
-	SessionName = DeriveSessionName(rootPath)
+// DeriveSessionName computes the tmux session name for a given session id.
+func DeriveSessionName(sessionID string) string {
+	return "asm-" + strings.TrimSpace(sessionID)
 }
 
-// HandoffFilePath returns the path used by the picker to leave a "next
-// rootPath" for its orchestrator before killing the tmux session. The
-// picker writes it, the orchestrator reads it right after Attach returns,
-// and on non-empty content re-execs asm with the new --path. Keyed by
-// SessionName so concurrent asm instances don't clobber each other.
+// SessionIDFromName returns the logical asm session id embedded in a tmux
+// session name, or "" when the name is not asm-managed.
+func SessionIDFromName(name string) string {
+	if !strings.HasPrefix(name, "asm-") {
+		return ""
+	}
+	return strings.TrimPrefix(name, "asm-")
+}
+
+// SetSessionID sets the current logical asm session id and derives its tmux
+// session name.
+func SetSessionID(sessionID string) {
+	SessionID = strings.TrimSpace(sessionID)
+	SessionName = DeriveSessionName(SessionID)
+}
+
+// UseSessionName adopts an already-running tmux session name and infers the
+// logical asm session id from it.
+func UseSessionName(name string) {
+	SessionName = strings.TrimSpace(name)
+	if sessionID := SessionIDFromName(SessionName); sessionID != "" {
+		SessionID = sessionID
+	}
+}
+
+// HandoffFilePath returns the per-session scratch path used for orchestrator
+// handoff files.
 func HandoffFilePath() string {
 	return filepath.Join(os.TempDir(), "asm-handoff-"+SessionName+".txt")
 }
@@ -143,14 +161,43 @@ func SessionExists() bool {
 	return SessionExistsNamed(SessionName)
 }
 
-// SessionExistsNamed is the arbitrary-name variant used by navigation
-// preflight: the picker needs to ask "would my target --path already have
-// an asm session running?" without mutating the global SessionName.
+// SessionExistsNamed checks an arbitrary tmux session name without mutating
+// the active asm session globals.
 func SessionExistsNamed(name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
 	defer cancel()
 	err := exec.CommandContext(ctx, "tmux", "has-session", "-t", name).Run()
 	return err == nil
+}
+
+// ListASMSessionIDs returns the logical ids of currently running asm tmux
+// sessions, sorted by tmux's native order.
+func ListASMSessionIDs() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "list-sessions", "-F", "#{session_name}").CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" || strings.Contains(msg, "no server running") || strings.Contains(msg, "failed to connect to server") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parseASMSessionIDs(string(out)), nil
+}
+
+func parseASMSessionIDs(out string) []string {
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if sessionID := SessionIDFromName(name); sessionID != "" {
+			ids = append(ids, sessionID)
+		}
+	}
+	return ids
 }
 
 // TargetID returns a stable short hash for an absolute target path.
@@ -673,7 +720,11 @@ func FocusWorkingPanel() error {
 
 // Attach attaches to the asm tmux session (blocking).
 func Attach() error {
-	cmd := exec.Command("tmux", "attach-session", "-t", SessionName)
+	command := []string{"attach-session", "-t", SessionName}
+	if IsInsideTmux() {
+		command = []string{"switch-client", "-t", SessionName}
+	}
+	cmd := exec.Command("tmux", command...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

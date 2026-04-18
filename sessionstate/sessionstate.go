@@ -2,8 +2,6 @@ package sessionstate
 
 import (
 	"encoding/json"
-	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +18,7 @@ type TargetSnapshot struct {
 }
 
 type Snapshot struct {
-	RootPath      string           `json:"root_path"`
+	SessionID     string           `json:"session_id"`
 	UpdatedAt     time.Time        `json:"updated_at"`
 	FrontPath     string           `json:"front_path,omitempty"`
 	FrontKind     string           `json:"front_kind,omitempty"`
@@ -37,13 +35,20 @@ var snapshotDir = func() string {
 	return filepath.Join(config.UserConfigDir(), "state", "sessions")
 }
 
-func Save(rootPath string, snap Snapshot) error {
+var lastSessionIDPath = func() string {
+	return filepath.Join(config.UserConfigDir(), "state", "last-session-id")
+}
+
+func Save(sessionID string, snap Snapshot) error {
 	if len(snap.Targets) == 0 {
-		return Delete(rootPath)
+		return Delete(sessionID)
 	}
 
-	cleanRoot := filepath.Clean(rootPath)
-	snap.RootPath = cleanRoot
+	cleanSessionID := strings.TrimSpace(sessionID)
+	if cleanSessionID == "" {
+		return os.ErrInvalid
+	}
+	snap.SessionID = cleanSessionID
 	snap.UpdatedAt = time.Now()
 
 	dir := snapshotDir()
@@ -56,7 +61,7 @@ func Save(rootPath string, snap Snapshot) error {
 		return err
 	}
 
-	path := snapshotPath(cleanRoot)
+	path := snapshotPath(cleanSessionID)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
@@ -64,8 +69,13 @@ func Save(rootPath string, snap Snapshot) error {
 	return os.Rename(tmp, path)
 }
 
-func Load(rootPath string) (*Snapshot, error) {
-	data, err := os.ReadFile(snapshotPath(rootPath))
+func Load(sessionID string) (*Snapshot, error) {
+	cleanSessionID := strings.TrimSpace(sessionID)
+	if cleanSessionID == "" {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(snapshotPath(cleanSessionID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -77,7 +87,7 @@ func Load(rootPath string) (*Snapshot, error) {
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return nil, err
 	}
-	if filepath.Clean(snap.RootPath) != filepath.Clean(rootPath) {
+	if snap.SessionID != "" && snap.SessionID != cleanSessionID {
 		return nil, nil
 	}
 	if len(snap.Targets) == 0 {
@@ -86,29 +96,49 @@ func Load(rootPath string) (*Snapshot, error) {
 	return &snap, nil
 }
 
-func Delete(rootPath string) error {
-	err := os.Remove(snapshotPath(rootPath))
+func Delete(sessionID string) error {
+	cleanSessionID := strings.TrimSpace(sessionID)
+	if cleanSessionID == "" {
+		return nil
+	}
+	err := os.Remove(snapshotPath(cleanSessionID))
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
 }
 
-func snapshotPath(rootPath string) string {
-	cleanRoot := filepath.Clean(rootPath)
-	base := filepath.Base(cleanRoot)
-	sanitized := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			return r
-		default:
-			return '-'
-		}
-	}, base)
-	if sanitized == "" {
-		sanitized = "root"
+func SaveLastSessionID(sessionID string) error {
+	cleanSessionID := strings.TrimSpace(sessionID)
+	if cleanSessionID == "" {
+		return os.ErrInvalid
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(cleanRoot))
-	return filepath.Join(snapshotDir(), fmt.Sprintf("%s-%06x.json", sanitized, h.Sum32()&0xffffff))
+	path := lastSessionIDPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(cleanSessionID+"\n"), 0o644)
+}
+
+func LoadLastSessionID() (string, error) {
+	data, err := os.ReadFile(lastSessionIDPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func DeleteLastSessionID() error {
+	err := os.Remove(lastSessionIDPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func snapshotPath(sessionID string) string {
+	return filepath.Join(snapshotDir(), strings.TrimSpace(sessionID)+".json")
 }

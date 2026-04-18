@@ -64,6 +64,16 @@ func TestLauncherTaskResolverResolveRepoTaskNameCachesByPath(t *testing.T) {
 	}
 }
 
+func TestNewLauncherModelStartsAtHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	m := NewLauncherModel("/tmp/ignored", nil, nil)
+	if m.currentPath != filepath.Clean(home) {
+		t.Fatalf("currentPath = %q, want %q", m.currentPath, filepath.Clean(home))
+	}
+}
+
 func TestLoadDirectoryEntriesDefersUncachedRepoTaskLookup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

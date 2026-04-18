@@ -64,19 +64,24 @@ type LauncherModel struct {
 	pendingSelectionPath string
 }
 
-func NewLauncherModel(initialPath string, t tracker.Tracker, taskCache *tracker.TaskCache) LauncherModel {
-	clean := filepath.Clean(initialPath)
-	if clean == "." || clean == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			clean = cwd
-		}
-	}
+func NewLauncherModel(_ string, t tracker.Tracker, taskCache *tracker.TaskCache) LauncherModel {
+	clean := launcherHomePath()
 	return LauncherModel{
 		tab:         launcherTabFavorites,
 		currentPath: clean,
 		tracker:     t,
 		taskCache:   taskCache,
 	}
+}
+
+func launcherHomePath() string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Clean(home)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return filepath.Clean(cwd)
+	}
+	return "."
 }
 
 func (m LauncherModel) Init() tea.Cmd {

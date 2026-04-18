@@ -274,7 +274,11 @@ func (m PickerModel) handleTaskResolved(msg TaskResolvedMsg) (tea.Model, tea.Cmd
 }
 
 func (m PickerModel) handleSettingsExited() (tea.Model, tea.Cmd) {
-	newCfg, err := config.LoadMerged(m.rootPath)
+	settingsPath := m.rootPath
+	if wt := m.contextDirectory(); wt != nil {
+		settingsPath = wt.Path
+	}
+	newCfg, err := config.LoadMerged(settingsPath)
 	if err != nil {
 		return m, nil
 	}

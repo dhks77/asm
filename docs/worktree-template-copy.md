@@ -21,7 +21,7 @@
 ```
 {projectRoot}/.asm/templates/{repo}/...
 ```
-- `{projectRoot}` — `asm` 실행 시 `--path` 로 지정된 루트 (worktree들이 살고 있는 상위 디렉토리)
+- `{projectRoot}` — 현재 dialog context 로 해석된 프로젝트 루트
 - `{repo}` — 새 worktree가 속하는 repo의 식별자. `worktree.RepoName(repoDir)` 결과 사용 (`worktree/branch.go`)
   - origin URL 마지막 세그먼트 > main repo 폴더명 순으로 해석
   - 둘 다 실패 시 복사 스킵 (경고 1회)

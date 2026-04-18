@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,7 +23,9 @@ import (
 )
 
 func main() {
-	pathFlag := flag.String("path", "", "Root directory containing directories")
+	sessionShort := flag.String("s", "", "Resume or create the given session ID")
+	sessionFlag := flag.String("session", "", "Resume or create the given session ID")
+	listMode := flag.Bool("list", false, "List currently running asm sessions")
 	pickerMode := flag.Bool("picker", false, "Run in picker mode (inside tmux picking panel)")
 	settingsMode := flag.Bool("settings", false, "Run plugin settings editor")
 	deleteMode := flag.String("delete", "", "Run delete confirmation (directory name)")
@@ -43,7 +44,12 @@ func main() {
 	initLog()
 	defer closeLog()
 
-	// Load user config first to get DefaultPath
+	if *listMode {
+		runListSessions()
+		return
+	}
+
+	// Load user config first so provider/tracker defaults are available
 	userCfg, err := config.LoadScope(config.ScopeUser, "")
 	if err != nil {
 		logErr("Error loading config: %v\n", err)
@@ -51,26 +57,11 @@ func main() {
 	}
 	cfg := userCfg
 
-	rootPath := *pathFlag
-	if rootPath == "" {
-		rootPath = cfg.DefaultPath
-	}
-	if rootPath == "" {
-		rootPath, err = os.Getwd()
-		if err != nil {
-			logErr("Error getting current directory: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	// Resolve to absolute path
-	rootPath, err = filepath.Abs(rootPath)
+	rootPath, err := resolveContextPath()
 	if err != nil {
-		logErr("Error resolving path: %v\n", err)
+		logErr("Error resolving context path: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Verify path exists
 	info, err := os.Stat(rootPath)
 	if err != nil || !info.IsDir() {
 		logErr("Error: %s is not a valid directory\n", rootPath)
@@ -87,34 +78,51 @@ func main() {
 	// config in its own main()) observe the seeded value.
 	autoSeedWorktreeBasePath(rootPath, cfg)
 
-	// Derive the tmux session name for this process. Top-level asm launches
-	// still hash from --path, but picker/dialog subprocesses running inside an
-	// existing asm tmux session must target that CURRENT session even when they
-	// receive a different --path (launcher/settings local-scope context, etc.).
+	requestedSessionID, err := parseRequestedSessionID(*sessionShort, *sessionFlag)
+	if err != nil {
+		logErr("Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	sessionBoundMode := *pickerMode || *settingsMode || *deleteMode != "" || *worktreeCreate || *providerSelect || *ideSelect || *launcherMode || *batchConfirmMode
-	sessionSource := "derived-from-root"
+	restoreSelection := *restoreLast
+	sessionSource := "generated:fallback"
 	if sessionBoundMode {
 		if inheritedSession := strings.TrimSpace(os.Getenv("ASM_SESSION_NAME")); strings.HasPrefix(inheritedSession, "asm-") {
-			asmtmux.SessionName = inheritedSession
+			asmtmux.UseSessionName(inheritedSession)
 			sessionSource = "env:ASM_SESSION_NAME"
 		} else if asmtmux.IsInsideTmux() {
 			if currentSession, err := asmtmux.CurrentSessionName(); err == nil && strings.HasPrefix(currentSession, "asm-") {
-				asmtmux.SessionName = currentSession
+				asmtmux.UseSessionName(currentSession)
 				sessionSource = "tmux:current-session"
+			} else if requestedSessionID != "" {
+				asmtmux.SetSessionID(requestedSessionID)
+				sessionSource = "flag:session"
 			} else {
-				asmtmux.SetSessionName(rootPath)
-				if err != nil {
-					logDebug("main: failed to resolve current tmux session for session-bound mode root=%q err=%v", rootPath, err)
-				}
+				asmtmux.SetSessionID(generateSessionID())
+				logDebug("main: failed to resolve current tmux session for session-bound mode context=%q err=%v", rootPath, err)
 			}
+		} else if requestedSessionID != "" {
+			asmtmux.SetSessionID(requestedSessionID)
+			sessionSource = "flag:session"
 		} else {
-			asmtmux.SetSessionName(rootPath)
+			asmtmux.SetSessionID(generateSessionID())
 		}
 	} else {
-		asmtmux.SetSessionName(rootPath)
+		selection, err := resolveTopLevelSessionSelection(requestedSessionID)
+		if err != nil {
+			logErr("Error selecting session: %v\n", err)
+			os.Exit(1)
+		}
+		asmtmux.SetSessionID(selection.ID)
+		restoreSelection = selection.RestoreLast
+		sessionSource = selection.Source
+		if err := sessionstate.SaveLastSessionID(selection.ID); err != nil {
+			logDebug("main: failed to persist last session id=%q err=%v", selection.ID, err)
+		}
 	}
-	logDebug("main: root=%q picker=%t settings=%t delete=%q worktree_create=%t provider_select=%t ide_select=%t launcher=%t batch_confirm=%t session=%q source=%s inside_tmux=%t",
-		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, *batchConfirmMode, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
+	logDebug("main: context=%q picker=%t settings=%t delete=%q worktree_create=%t provider_select=%t ide_select=%t launcher=%t batch_confirm=%t session_id=%q session=%q source=%s inside_tmux=%t",
+		rootPath, *pickerMode, *settingsMode, *deleteMode, *worktreeCreate, *providerSelect, *ideSelect, *launcherMode, *batchConfirmMode, asmtmux.SessionID, asmtmux.SessionName, sessionSource, asmtmux.IsInsideTmux())
 
 	if sessionBoundMode && asmtmux.IsInsideTmux() {
 		asmtmux.InstallRootBindings()
@@ -139,9 +147,9 @@ func main() {
 	} else if *settingsMode {
 		runSettings(cfg, rootPath, registry, t)
 	} else if *pickerMode {
-		runPicker(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg), *restoreLast)
+		runPicker(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg), restoreSelection)
 	} else {
-		runOrchestrator(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg))
+		runOrchestrator(cfg, rootPath, registry, t, taskCache, buildIDEs(cfg), restoreSelection)
 	}
 }
 
@@ -291,52 +299,124 @@ func autoSeedWorktreeBasePath(rootPath string, cfg *config.Config) {
 	cfg.WorktreeBasePath = parent
 }
 
-// confirmRestartExistingSession prompts the user before we destroy an
-// existing asm tmux session for this rootPath. Returns true to proceed
-// with kill+restart, false to abort. If stdin isn't a TTY (piped, cron,
-// etc.) we can't prompt, so fall back to the old silent-kill behavior —
-// refusing would break non-interactive launchers.
-func confirmRestartExistingSession(rootPath string) bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
-		return true
-	}
-	fmt.Printf("asm is already running for %s (tmux session: %s).\n", rootPath, asmtmux.SessionName)
-	fmt.Println("Closing it will kill every AI/terminal session inside.")
-	fmt.Print("Close existing session and start fresh? [y/N]: ")
-	var answer string
-	// Fscanln returns an error on empty input / EOF / ^C; treat all of
-	// those as "no" so the safe default (preserve the running session)
-	// wins whenever the user hesitates.
-	_, _ = fmt.Fscanln(os.Stdin, &answer)
-	switch strings.ToLower(strings.TrimSpace(answer)) {
-	case "y", "yes":
-		return true
+type sessionSelection struct {
+	ID          string
+	RestoreLast bool
+	Source      string
+}
+
+func parseRequestedSessionID(shortValue, longValue string) (string, error) {
+	shortValue = strings.TrimSpace(shortValue)
+	longValue = strings.TrimSpace(longValue)
+	switch {
+	case shortValue != "" && longValue != "" && shortValue != longValue:
+		return "", fmt.Errorf("-s and -session specify different session ids")
+	case shortValue != "":
+		if err := asmtmux.ValidateSessionID(shortValue); err != nil {
+			return "", err
+		}
+		return shortValue, nil
+	case longValue != "":
+		if err := asmtmux.ValidateSessionID(longValue); err != nil {
+			return "", err
+		}
+		return longValue, nil
 	default:
-		return false
+		return "", nil
 	}
 }
 
-func confirmRestorePreviousSession(rootPath string, snap *sessionstate.Snapshot) bool {
-	if snap == nil || !snap.HasTargets() {
-		return false
+func resolveContextPath() (string, error) {
+	contextPath := strings.TrimSpace(os.Getenv("ASM_CONTEXT_PATH"))
+	if contextPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		contextPath = home
 	}
+	return filepath.Abs(contextPath)
+}
+
+func runListSessions() {
+	if !asmtmux.IsAvailable() {
+		logErr("Error: tmux is required. Install it with: brew install tmux\n")
+		os.Exit(1)
+	}
+	ids, err := asmtmux.ListASMSessionIDs()
+	if err != nil {
+		logErr("Error listing asm sessions: %v\n", err)
+		os.Exit(1)
+	}
+	if len(ids) == 0 {
+		fmt.Println("No running asm sessions.")
+		return
+	}
+	for _, id := range ids {
+		fmt.Println(id)
+	}
+}
+
+func generateSessionID() string {
+	return time.Now().Format("20060102-150405-000")
+}
+
+func resolveTopLevelSessionSelection(explicitSessionID string) (sessionSelection, error) {
+	if explicitSessionID != "" {
+		snap, err := sessionstate.Load(explicitSessionID)
+		if err != nil {
+			return sessionSelection{}, err
+		}
+		return sessionSelection{
+			ID:          explicitSessionID,
+			RestoreLast: snap != nil && snap.HasTargets(),
+			Source:      "flag:session",
+		}, nil
+	}
+
+	lastSessionID, err := sessionstate.LoadLastSessionID()
+	if err != nil {
+		return sessionSelection{}, err
+	}
+	lastSessionID = strings.TrimSpace(lastSessionID)
+	if lastSessionID != "" && asmtmux.ValidateSessionID(lastSessionID) == nil {
+		snap, err := sessionstate.Load(lastSessionID)
+		if err != nil {
+			return sessionSelection{}, err
+		}
+		running := asmtmux.SessionExistsNamed(asmtmux.DeriveSessionName(lastSessionID))
+		if confirmContinueLastSession(lastSessionID, running, snap) {
+			return sessionSelection{
+				ID:          lastSessionID,
+				RestoreLast: snap != nil && snap.HasTargets(),
+				Source:      "state:last-session",
+			}, nil
+		}
+	}
+
+	return sessionSelection{
+		ID:     generateSessionID(),
+		Source: "generated:new-session",
+	}, nil
+}
+
+func confirmContinueLastSession(sessionID string, running bool, snap *sessionstate.Snapshot) bool {
 	fi, err := os.Stdin.Stat()
 	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
-		return false
+		return true
 	}
-	aiCount, termCount := 0, 0
-	for _, target := range snap.Targets {
-		if target.HasAI {
-			aiCount++
-		}
-		if target.HasTerm {
-			termCount++
-		}
+
+	fmt.Printf("Continue last asm session '%s'?\n", sessionID)
+	if running {
+		fmt.Printf("tmux session '%s' is already running.\n", asmtmux.DeriveSessionName(sessionID))
 	}
-	fmt.Printf("Restore previous asm sessions for %s?\n", rootPath)
-	fmt.Printf("Found %d AI and %d terminal session(s) from the last run.\n", aiCount, termCount)
-	fmt.Print("Restore them now? [Y/n]: ")
+	if snap != nil && snap.HasTargets() {
+		aiCount, termCount := snapshotCounts(snap)
+		fmt.Printf("Found %d AI and %d terminal session(s) from the last run.\n", aiCount, termCount)
+	} else if !running {
+		fmt.Println("No saved targets were found. Continuing will open the same session ID as an empty session.")
+	}
+	fmt.Print("Continue it now? [Y/n]: ")
 	var answer string
 	_, _ = fmt.Fscanln(os.Stdin, &answer)
 	switch strings.ToLower(strings.TrimSpace(answer)) {
@@ -347,46 +427,43 @@ func confirmRestorePreviousSession(rootPath string, snap *sessionstate.Snapshot)
 	}
 }
 
-func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.TaskCache, ides []ide.IDE) {
+func snapshotCounts(snap *sessionstate.Snapshot) (int, int) {
+	aiCount, termCount := 0, 0
+	if snap == nil {
+		return 0, 0
+	}
+	for _, target := range snap.Targets {
+		if target.HasAI {
+			aiCount++
+		}
+		if target.HasTerm {
+			termCount++
+		}
+	}
+	return aiCount, termCount
+}
+
+func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.TaskCache, ides []ide.IDE, restoreLast bool) {
 	if !asmtmux.IsAvailable() {
 		logErr("Error: tmux is required. Install it with: brew install tmux\n")
 		os.Exit(1)
 	}
 
-	// If already inside the asm tmux session, run picker directly
-	if asmtmux.IsInsideTmux() && asmtmux.SessionExists() {
-		runPicker(cfg, rootPath, registry, t, taskCache, ides, false)
-		return
-	}
-
-	// Kill existing session if any — but warn first so a stray invocation
-	// doesn't wipe out AI sessions the user still cares about. The "inside
-	// tmux" branch above already handled the case where this instance IS
-	// that session, so reaching here means the session is attached (or
-	// detached) elsewhere and a silent kill is genuinely destructive.
-	//
-	// ASM_RESTART_CONFIRMED=1 is set by the picker's ←/→ re-exec path to
-	// skip re-asking — the picker already prompted and the user said yes.
-	// Unset after reading so it can't leak into child processes or a
-	// later in-place re-exec.
 	if asmtmux.SessionExists() {
-		if os.Getenv("ASM_RESTART_CONFIRMED") == "1" {
-			os.Unsetenv("ASM_RESTART_CONFIRMED")
-		} else if !confirmRestartExistingSession(rootPath) {
-			fmt.Println("Cancelled.")
-			return
+		if asmtmux.IsInsideTmux() {
+			if currentSession, err := asmtmux.CurrentSessionName(); err == nil && currentSession == asmtmux.SessionName {
+				runPicker(cfg, rootPath, registry, t, taskCache, ides, false)
+				return
+			}
 		}
-		_ = sessionstate.Delete(rootPath)
-		asmtmux.KillSession()
-	}
-
-	restoreLast := false
-	if snap, err := sessionstate.Load(rootPath); err == nil && snap != nil && snap.HasTargets() {
-		if confirmRestorePreviousSession(rootPath, snap) {
-			restoreLast = true
-		} else {
-			_ = sessionstate.Delete(rootPath)
+		if err := asmtmux.Attach(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			logErr("Error attaching to tmux session: %v\n", err)
+			os.Exit(1)
 		}
+		return
 	}
 
 	// Get current executable path for picker command
@@ -397,7 +474,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	}
 
 	// Create tmux session (starts with default shell)
-	pickerArgs := []string{exe, "--picker", "--path", rootPath}
+	pickerArgs := []string{exe, "--picker"}
 	if restoreLast {
 		pickerArgs = append(pickerArgs, "--restore-last")
 	}
@@ -424,35 +501,13 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	// Focus the picking panel
 	asmtmux.FocusPickingPanel()
 
-	// Attach to the session (blocks until session ends)
-	attachErr := asmtmux.Attach()
-
-	// The picker's ←/→ navigate writes a handoff file then kills the tmux
-	// session, which pops Attach. If the handoff is present, re-exec asm
-	// with the new --path so we end up in a fresh tmux session named after
-	// the new root. syscall.Exec replaces the current process image, so
-	// repeated navigations don't accumulate parent asm processes.
-	if data, err := os.ReadFile(asmtmux.HandoffFilePath()); err == nil {
-		os.Remove(asmtmux.HandoffFilePath())
-		next := strings.TrimSpace(string(data))
-		if next != "" {
-			self, err := os.Executable()
-			if err == nil {
-				// Mark the re-exec as user-confirmed so the new process
-				// doesn't re-ask "close existing session?" — the picker
-				// already surfaced that prompt before writing the handoff.
-				// Preserve the original env otherwise so ~/.asm config,
-				// tmux, $SHELL etc. carry through.
-				env := append(os.Environ(), "ASM_RESTART_CONFIRMED=1")
-				_ = syscall.Exec(self, []string{self, "--path", next}, env)
-			}
-		}
-	}
-
-	if attachErr != nil {
-		if exitErr, ok := attachErr.(*exec.ExitError); ok {
+	// Attach or switch to the session.
+	if err := asmtmux.Attach(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
+		logErr("Error attaching to tmux session: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -529,7 +584,7 @@ func runIDESelect(ides []ide.IDE) {
 }
 
 func runLauncher(initialPath string, t tracker.Tracker, taskCache *tracker.TaskCache) {
-	logDebug("launcher: start initial_path=%q session=%q", initialPath, asmtmux.SessionName)
+	logDebug("launcher: start requested_path=%q session=%q", initialPath, asmtmux.SessionName)
 	model := ui.NewLauncherModel(initialPath, t, taskCache)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 

@@ -10,13 +10,13 @@ func TestJoin(t *testing.T) {
 	}{
 		{
 			name: "simple args",
-			args: []string{"asm", "--picker", "--path", "/tmp/repo"},
-			want: "'asm' '--picker' '--path' '/tmp/repo'",
+			args: []string{"asm", "--picker", "--restore-last"},
+			want: "'asm' '--picker' '--restore-last'",
 		},
 		{
-			name: "spaces and quotes",
-			args: []string{"asm", "--path", "/tmp/my repo/it's fine"},
-			want: "'asm' '--path' '/tmp/my repo/it'\"'\"'s fine'",
+			name: "env args with spaces and quotes",
+			args: []string{"env", "ASM_CONTEXT_PATH=/tmp/my repo/it's fine", "asm", "--launcher"},
+			want: "'env' 'ASM_CONTEXT_PATH=/tmp/my repo/it'\"'\"'s fine' 'asm' '--launcher'",
 		},
 		{
 			name: "empty arg",

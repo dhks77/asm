@@ -7,11 +7,16 @@ import (
 
 func TestSaveLoadDeleteSnapshot(t *testing.T) {
 	oldDir := snapshotDir
+	oldLast := lastSessionIDPath
 	tmp := t.TempDir()
 	snapshotDir = func() string { return filepath.Join(tmp, "sessions") }
-	defer func() { snapshotDir = oldDir }()
+	lastSessionIDPath = func() string { return filepath.Join(tmp, "last-session-id") }
+	defer func() {
+		snapshotDir = oldDir
+		lastSessionIDPath = oldLast
+	}()
 
-	root := "/tmp/project-a"
+	sessionID := "project-a"
 	want := Snapshot{
 		FrontPath:     "/tmp/project-a/api",
 		FrontKind:     "ai",
@@ -23,19 +28,19 @@ func TestSaveLoadDeleteSnapshot(t *testing.T) {
 		},
 	}
 
-	if err := Save(root, want); err != nil {
+	if err := Save(sessionID, want); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	got, err := Load(root)
+	got, err := Load(sessionID)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if got == nil {
 		t.Fatal("Load() returned nil snapshot")
 	}
-	if got.RootPath != filepath.Clean(root) {
-		t.Fatalf("RootPath = %q, want %q", got.RootPath, filepath.Clean(root))
+	if got.SessionID != sessionID {
+		t.Fatalf("SessionID = %q, want %q", got.SessionID, sessionID)
 	}
 	if got.FrontPath != want.FrontPath || got.FrontKind != want.FrontKind || got.FocusedPane != want.FocusedPane || got.WorkingZoomed != want.WorkingZoomed {
 		t.Fatalf("loaded snapshot metadata mismatch: got %+v want %+v", *got, want)
@@ -44,10 +49,10 @@ func TestSaveLoadDeleteSnapshot(t *testing.T) {
 		t.Fatalf("len(Targets) = %d, want %d", len(got.Targets), len(want.Targets))
 	}
 
-	if err := Delete(root); err != nil {
+	if err := Delete(sessionID); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	got, err = Load(root)
+	got, err = Load(sessionID)
 	if err != nil {
 		t.Fatalf("Load() after delete error = %v", err)
 	}
@@ -58,22 +63,60 @@ func TestSaveLoadDeleteSnapshot(t *testing.T) {
 
 func TestSaveEmptySnapshotDeletesFile(t *testing.T) {
 	oldDir := snapshotDir
+	oldLast := lastSessionIDPath
 	tmp := t.TempDir()
 	snapshotDir = func() string { return filepath.Join(tmp, "sessions") }
-	defer func() { snapshotDir = oldDir }()
+	lastSessionIDPath = func() string { return filepath.Join(tmp, "last-session-id") }
+	defer func() {
+		snapshotDir = oldDir
+		lastSessionIDPath = oldLast
+	}()
 
-	root := "/tmp/project-b"
-	if err := Save(root, Snapshot{Targets: []TargetSnapshot{{Path: root, HasAI: true}}}); err != nil {
+	sessionID := "project-b"
+	if err := Save(sessionID, Snapshot{Targets: []TargetSnapshot{{Path: "/tmp/project-b", HasAI: true}}}); err != nil {
 		t.Fatalf("initial Save() error = %v", err)
 	}
-	if err := Save(root, Snapshot{}); err != nil {
+	if err := Save(sessionID, Snapshot{}); err != nil {
 		t.Fatalf("Save(empty) error = %v", err)
 	}
-	got, err := Load(root)
+	got, err := Load(sessionID)
 	if err != nil {
 		t.Fatalf("Load() after empty save error = %v", err)
 	}
 	if got != nil {
 		t.Fatalf("Load() after empty save = %+v, want nil", *got)
+	}
+}
+
+func TestSaveLoadDeleteLastSessionID(t *testing.T) {
+	oldDir := snapshotDir
+	oldLast := lastSessionIDPath
+	tmp := t.TempDir()
+	snapshotDir = func() string { return filepath.Join(tmp, "sessions") }
+	lastSessionIDPath = func() string { return filepath.Join(tmp, "last-session-id") }
+	defer func() {
+		snapshotDir = oldDir
+		lastSessionIDPath = oldLast
+	}()
+
+	if err := SaveLastSessionID("alpha-1"); err != nil {
+		t.Fatalf("SaveLastSessionID() error = %v", err)
+	}
+	got, err := LoadLastSessionID()
+	if err != nil {
+		t.Fatalf("LoadLastSessionID() error = %v", err)
+	}
+	if got != "alpha-1" {
+		t.Fatalf("LoadLastSessionID() = %q, want %q", got, "alpha-1")
+	}
+	if err := DeleteLastSessionID(); err != nil {
+		t.Fatalf("DeleteLastSessionID() error = %v", err)
+	}
+	got, err = LoadLastSessionID()
+	if err != nil {
+		t.Fatalf("LoadLastSessionID() after delete error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("LoadLastSessionID() after delete = %q, want empty", got)
 	}
 }
