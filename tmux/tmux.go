@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"hash/fnv"
@@ -982,7 +983,7 @@ func CapturePaneContent(targetPath string, isDisplayed bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	return sanitizeCapturedOutput(out), nil
 }
 
 // CapturePaneHistory captures the last `lines` of scrollback plus the visible
@@ -1002,7 +1003,7 @@ func CapturePaneHistory(targetPath string, isDisplayed bool, lines int) (string,
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	return sanitizeCapturedOutput(out), nil
 }
 
 // GetPaneTitle reads the tmux pane title for an AI pane.
@@ -1020,7 +1021,11 @@ func GetPaneTitle(targetPath string, isDisplayed bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(sanitizeCapturedOutput(out)), nil
+}
+
+func sanitizeCapturedOutput(out []byte) string {
+	return string(bytes.ToValidUTF8(out, []byte{}))
 }
 
 // utilityWindows are non-session windows that should be treated as modal

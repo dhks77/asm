@@ -335,6 +335,46 @@ func TestExtractLastResponseRepairsInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestExtractLastResponseStopsAtPreviousPrompt(t *testing.T) {
+	content := strings.Join([]string{
+		"• Earlier assistant update.",
+		"",
+		"› previous user prompt",
+		"",
+		"• Latest assistant response.",
+		"  Keep only this block in the notification.",
+		"",
+		"› current prompt",
+		"gpt-5.4 xhigh · ~/Documents/project/claude-workspace/asm",
+	}, "\n")
+
+	got := extractLastResponse(content)
+	want := "Latest assistant response. Keep only this block in the notification."
+	if got != want {
+		t.Fatalf("extractLastResponse() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractLastResponseUsesLastAssistantBlockOnly(t *testing.T) {
+	content := strings.Join([]string{
+		"› initial prompt",
+		"",
+		"• Intermediate assistant update.",
+		"",
+		"• Final assistant summary.",
+		"  Only the last assistant block should remain.",
+		"",
+		"› current prompt",
+		"gpt-5.4 xhigh · ~/Documents/project/claude-workspace/asm",
+	}, "\n")
+
+	got := extractLastResponse(content)
+	want := "Final assistant summary. Only the last assistant block should remain."
+	if got != want {
+		t.Fatalf("extractLastResponse() = %q, want %q", got, want)
+	}
+}
+
 func TestHandleProviderStateUpdatedSuppressesInitialBusyToIdle(t *testing.T) {
 	path := "/tmp/repo"
 	m := PickerModel{

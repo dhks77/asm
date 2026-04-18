@@ -69,3 +69,10 @@ func TestWindowNamesArePathBased(t *testing.T) {
 		t.Fatalf("ExitSignalName should differ for different paths: %q", ExitSignalName(pathA))
 	}
 }
+
+func TestSanitizeCapturedOutputDropsInvalidUTF8(t *testing.T) {
+	got := sanitizeCapturedOutput([]byte{'a', 0xff, 'b', 0xfe, 'c'})
+	if got != "abc" {
+		t.Fatalf("sanitizeCapturedOutput() = %q, want %q", got, "abc")
+	}
+}

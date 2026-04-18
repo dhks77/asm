@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -132,27 +133,51 @@ func defaultSpawnHelper(req Request, info terminaldetect.Info) error {
 }
 
 func defaultSendTMUXPassthrough(title, body string) error {
-	title = sanitizeOSCText(title)
-	body = sanitizeOSCText(body)
+	title = sanitizeText(title, 180)
+	body = sanitizeText(body, 180)
 	if title == "" {
 		title = "ASM"
 	}
 	if body == "" {
 		body = "done"
 	}
-	_, err := os.Stdout.WriteString("\x1bPtmux;\x1b\x1b]777;notify;" + title + ";" + body + "\x07\x1b\\")
+	_, err := os.Stdout.WriteString(buildTMUXPassthroughNotification(title, body))
 	return err
+}
+
+func buildTMUXPassthroughNotification(title, body string) string {
+	if containsNonASCII(title) || containsNonASCII(body) {
+		return wrapTMUXPassthrough(buildOSC99Notification(title, body))
+	}
+	return wrapTMUXPassthrough(buildOSC777Notification(title, body))
+}
+
+func buildOSC777Notification(title, body string) string {
+	return "\x1b]777;notify;" + sanitizeOSCText(title) + ";" + sanitizeOSCText(body) + "\x07"
+}
+
+func buildOSC99Notification(title, body string) string {
+	id := "asm." + strconv.FormatInt(time.Now().UnixNano(), 36)
+	titlePayload := base64.StdEncoding.EncodeToString([]byte(sanitizeText(title, 180)))
+	bodyPayload := base64.StdEncoding.EncodeToString([]byte(sanitizeText(body, 180)))
+	return "\x1b]99;i=" + id + ":d=0:e=1;" + titlePayload + "\x1b\\" +
+		"\x1b]99;i=" + id + ":e=1:p=body;" + bodyPayload + "\x1b\\"
+}
+
+func wrapTMUXPassthrough(seq string) string {
+	return "\x1bPtmux;" + strings.ReplaceAll(seq, "\x1b", "\x1b\x1b") + "\x1b\\"
 }
 
 func sanitizeText(s string, maxRunes int) string {
 	s = stripANSIEscapes(s)
+	s = strings.ToValidUTF8(s, "")
 	s = strings.Map(func(r rune) rune {
 		switch {
+		case r == utf8.RuneError:
+			return -1
 		case r == '\n' || r == '\r' || r == '\t':
 			return ' '
 		case unicode.IsControl(r):
-			return -1
-		case !utf8.ValidRune(r):
 			return -1
 		default:
 			return r
@@ -173,6 +198,15 @@ func sanitizeOSCText(s string) string {
 	s = sanitizeText(s, 180)
 	s = strings.NewReplacer(";", ",", "\x07", "", "\x1b", "", "\x9c", "").Replace(s)
 	return s
+}
+
+func containsNonASCII(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			return true
+		}
+	}
+	return false
 }
 
 func stripANSIEscapes(s string) string {

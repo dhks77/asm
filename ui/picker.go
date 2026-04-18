@@ -2303,24 +2303,52 @@ func notifyCompletionCmd(targetPath, displayName, providerName, sessionName, cur
 func extractLastResponse(content string) string {
 	lines := strings.Split(content, "\n")
 
-	// Walk from the bottom up, skipping noise and the user-input box, collecting
-	// meaningful lines from the last AI response.
+	// Walk from the bottom up and capture only the most recent assistant block
+	// rather than every meaningful tail line. This avoids pulling previous
+	// updates from the same pane history into the notification preview.
 	var meaningful []string
+	started := false
+	sawBlockStart := false
 	for i := len(lines) - 1; i >= 0 && len(meaningful) < 8; i-- {
 		raw := strings.TrimSpace(lines[i])
 		if raw == "" {
 			continue
 		}
+		if isPromptLine(raw) {
+			if started {
+				break
+			}
+			continue
+		}
+		if isAssistantBlockStartLine(raw) {
+			if sawBlockStart {
+				break
+			}
+			sawBlockStart = true
+		}
 		if isNoiseeLine(raw) {
+			if started && sawBlockStart {
+				break
+			}
 			continue
 		}
 		stripped := stripBoxBorders(raw)
 		if stripped == "" {
 			continue
 		}
-		if isNoiseeLine(stripped) {
+		if isPromptLine(stripped) {
+			if started {
+				break
+			}
 			continue
 		}
+		if isNoiseeLine(stripped) {
+			if started && sawBlockStart {
+				break
+			}
+			continue
+		}
+		started = true
 		meaningful = append(meaningful, stripped)
 	}
 
@@ -2419,6 +2447,19 @@ func isPromptLine(line string) bool {
 			continue
 		}
 		rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		return rest != ""
+	}
+	return false
+}
+
+func isAssistantBlockStartLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimLeft(trimmed, "│┃| ")
+	for _, prefix := range []string{"•", "●"} {
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
 		return rest != ""
 	}
 	return false
