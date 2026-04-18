@@ -5,8 +5,8 @@ package ide
 
 import (
 	"os/exec"
-	"runtime"
-	"strings"
+
+	"github.com/nhn/asm/platform"
 )
 
 // IDE is a single launcher entry.
@@ -23,37 +23,17 @@ type Override struct {
 	Args    []string
 }
 
-// builtinDefaults is the minimal shipped list. We only ship the two IDEs
-// that cover the common case; everything else is expected to come from
-// config. On macOS we use `open -a "<App>"` so the launchers work
-// without the user having to install each IDE's shell CLI — on
-// Linux/Windows we fall back to the CLI names (idea, code) since
-// there's no equivalent universal launcher.
-var builtinDefaults = defaultBuiltins()
-
-func defaultBuiltins() []IDE {
-	if runtime.GOOS == "darwin" {
-		return []IDE{
-			{Name: "intellij", Command: "open", Args: []string{"-a", "IntelliJ IDEA"}},
-			{Name: "vscode", Command: "open", Args: []string{"-a", "Visual Studio Code"}},
-		}
-	}
-	return []IDE{
-		{Name: "intellij", Command: "idea"},
-		{Name: "vscode", Command: "code"},
-	}
-}
-
 // Builtins returns the list of IDE launchers with optional per-name
 // config overrides applied. Overrides may also introduce entries whose
 // name doesn't match any built-in — that's how a user registers a
 // custom launcher (e.g. `open -a "Some Editor"`).
 func Builtins(overrides map[string]Override) []IDE {
-	result := make([]IDE, 0, len(builtinDefaults)+len(overrides))
-	seen := make(map[string]bool, len(builtinDefaults))
+	defaults := platform.Current().BuiltinIDEs()
+	result := make([]IDE, 0, len(defaults)+len(overrides))
+	seen := make(map[string]bool, len(defaults))
 
-	for _, d := range builtinDefaults {
-		entry := d
+	for _, d := range defaults {
+		entry := IDE{Name: d.Name, Command: d.Command, Args: append([]string(nil), d.Args...)}
 		if o, ok := overrides[d.Name]; ok {
 			if o.Command != "" {
 				entry.Command = o.Command
@@ -106,30 +86,5 @@ func (i IDE) Open(path string) error {
 }
 
 func (i IDE) launchCommand(path string) (string, []string) {
-	// On macOS, `open -a "IntelliJ IDEA" <path>` can simply refocus an
-	// existing window without actually opening the new project path. For
-	// IntelliJ, force a fresh app launch and pass the target as argv via
-	// `--args`, which reliably hands the path to the app.
-	if runtime.GOOS == "darwin" && i.Name == "intellij" && i.Command == "open" {
-		if appName, ok := openAppName(i.Args); ok {
-			return "open", []string{"-n", "-a", appName, "--args", path}
-		}
-	}
-
-	args := append([]string(nil), i.Args...)
-	args = append(args, path)
-	return i.Command, args
-}
-
-func openAppName(args []string) (string, bool) {
-	for idx := 0; idx+1 < len(args); idx++ {
-		if args[idx] == "-a" {
-			name := strings.TrimSpace(args[idx+1])
-			if name != "" {
-				return name, true
-			}
-			return "", false
-		}
-	}
-	return "", false
+	return platform.Current().PrepareIDEOpen(i.Name, i.Command, i.Args, path)
 }

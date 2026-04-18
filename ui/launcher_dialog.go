@@ -10,6 +10,7 @@ import (
 	"github.com/nhn/asm/asmlog"
 	"github.com/nhn/asm/config"
 	asmfavorites "github.com/nhn/asm/favorites"
+	"github.com/nhn/asm/platform"
 	"github.com/nhn/asm/recent"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/tracker"
@@ -75,10 +76,10 @@ func NewLauncherModel(_ string, t tracker.Tracker, taskCache *tracker.TaskCache)
 }
 
 func launcherHomePath() string {
-	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+	if home, err := platform.Current().HomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		return filepath.Clean(home)
 	}
-	if cwd, err := os.Getwd(); err == nil {
+	if cwd, err := platform.Current().WorkingDir(); err == nil {
 		return filepath.Clean(cwd)
 	}
 	return "."

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/nhn/asm/platform"
 )
 
 // ClaudeProvider implements the Provider interface for Claude Code.
@@ -22,9 +24,9 @@ func NewClaudeProvider(command string, args []string) *ClaudeProvider {
 }
 
 func (p *ClaudeProvider) Name() string        { return "claude" }
-func (p *ClaudeProvider) DisplayName() string  { return "Claude" }
-func (p *ClaudeProvider) Command() string      { return p.command }
-func (p *ClaudeProvider) Args() []string       { return p.args }
+func (p *ClaudeProvider) DisplayName() string { return "Claude" }
+func (p *ClaudeProvider) Command() string     { return p.command }
+func (p *ClaudeProvider) Args() []string      { return p.args }
 
 // ResumeArgs returns ["--continue"] only when a prior conversation exists
 // for cwd. Claude Code's --continue exits with an error when there is no
@@ -43,7 +45,7 @@ func (p *ClaudeProvider) ResumeArgs(cwd string) []string {
 // ~/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/<session-id>.jsonl
 // (one file per session). An empty/missing directory = no resumable history.
 func hasClaudeSession(cwd string) bool {
-	home, err := os.UserHomeDir()
+	home, err := platform.Current().HomeDir()
 	if err != nil {
 		return false
 	}

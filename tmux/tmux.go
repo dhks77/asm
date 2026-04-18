@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nhn/asm/asmlog"
+	"github.com/nhn/asm/platform"
 )
 
 // SessionID is the active logical asm session identifier.
@@ -129,7 +130,7 @@ func UseSessionName(name string) {
 // HandoffFilePath returns the per-session scratch path used for orchestrator
 // handoff files.
 func HandoffFilePath() string {
-	return filepath.Join(os.TempDir(), "asm-handoff-"+SessionName+".txt")
+	return filepath.Join(platform.Current().TempDir(), "asm-handoff-"+SessionName+".txt")
 }
 
 func IsAvailable() bool {

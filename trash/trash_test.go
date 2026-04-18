@@ -3,14 +3,15 @@ package trash
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/nhn/asm/platform"
 )
 
 func TestMoveMovesDirectoryIntoTrash(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("windows uses native recycle bin integration")
+	if platform.Current().Name() != "darwin" {
+		t.Skip("trash integration is only supported on darwin")
 	}
 
 	home := t.TempDir()
@@ -46,8 +47,8 @@ func TestMoveMovesDirectoryIntoTrash(t *testing.T) {
 }
 
 func TestMoveAddsUniqueSuffixWhenTrashAlreadyContainsName(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("windows uses native recycle bin integration")
+	if platform.Current().Name() != "darwin" {
+		t.Skip("trash integration is only supported on darwin")
 	}
 
 	home := t.TempDir()
@@ -86,10 +87,7 @@ func TestMoveAddsUniqueSuffixWhenTrashAlreadyContainsName(t *testing.T) {
 }
 
 func expectedTrashDir(home string) string {
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, ".Trash")
-	}
-	return filepath.Join(home, ".local", "share", "Trash", "files")
+	return filepath.Join(home, ".Trash")
 }
 
 func contains(items []string, want string) bool {

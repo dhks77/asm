@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/nhn/asm/config"
 	"github.com/nhn/asm/ide"
+	"github.com/nhn/asm/platform"
 	"github.com/nhn/asm/plugincfg"
 	"github.com/nhn/asm/provider"
 	"github.com/nhn/asm/sessionstate"
@@ -329,7 +330,7 @@ func parseRequestedSessionID(shortValue, longValue string) (string, error) {
 func resolveContextPath() (string, error) {
 	contextPath := strings.TrimSpace(os.Getenv("ASM_CONTEXT_PATH"))
 	if contextPath == "" {
-		home, err := os.UserHomeDir()
+		home, err := platform.Current().HomeDir()
 		if err != nil {
 			return "", err
 		}
@@ -467,7 +468,7 @@ func runOrchestrator(cfg *config.Config, rootPath string, registry *provider.Reg
 	}
 
 	// Get current executable path for picker command
-	exe, err := os.Executable()
+	exe, err := platform.Current().ExecutablePath()
 	if err != nil {
 		logErr("Error finding executable: %v\n", err)
 		os.Exit(1)

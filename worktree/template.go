@@ -5,10 +5,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+
+	"github.com/nhn/asm/platform"
 )
 
 // ConflictPolicy controls how ApplyTemplate handles files that already exist
@@ -179,16 +179,7 @@ func OpenTemplatesDir(projectRoot string) (string, error) {
 	for _, repo := range DiscoverRepoNames(projectRoot) {
 		_ = os.MkdirAll(filepath.Join(dir, repo), 0o755)
 	}
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", dir)
-	case "windows":
-		cmd = exec.Command("explorer", dir)
-	default: // linux and the rest
-		cmd = exec.Command("xdg-open", dir)
-	}
-	_ = cmd.Start() // best-effort; errors surface via the user not seeing a window
+	_ = platform.Current().RevealPath(dir) // best-effort; errors surface via the user not seeing a window
 	return dir, nil
 }
 

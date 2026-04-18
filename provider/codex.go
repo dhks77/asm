@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nhn/asm/platform"
 )
 
 // CodexProvider implements the Provider interface for OpenAI Codex CLI.
@@ -49,7 +51,7 @@ type codexSessionMeta struct {
 var errCodexSessionFound = errors.New("codex session found")
 
 func hasCodexSession(cwd string) bool {
-	home, err := os.UserHomeDir()
+	home, err := platform.Current().HomeDir()
 	if err != nil {
 		return false
 	}

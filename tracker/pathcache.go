@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/nhn/asm/platform"
 )
 
 // Both cache indexes are capped independently to prevent unbounded growth.
@@ -346,11 +348,7 @@ func cacheFilePath(rootPath string) string {
 	}
 	sum := sha1.Sum([]byte(abs))
 	name := "tasks-" + hex.EncodeToString(sum[:]) + ".json"
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.TempDir()
-	}
-	return filepath.Join(home, ".asm", "cache", name)
+	return filepath.Join(platform.Current().UserConfigDir(), "cache", name)
 }
 
 // legacyBranchCachePath matches the pre-unification branch-cache filename so
@@ -362,9 +360,5 @@ func legacyBranchCachePath(rootPath string) string {
 	}
 	sum := sha1.Sum([]byte(abs))
 	name := "branches-" + hex.EncodeToString(sum[:]) + ".json"
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = os.TempDir()
-	}
-	return filepath.Join(home, ".asm", "cache", name)
+	return filepath.Join(platform.Current().UserConfigDir(), "cache", name)
 }

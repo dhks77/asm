@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/nhn/asm/platform"
 )
 
 // Scope represents the configuration scope.
@@ -66,21 +67,13 @@ type Config struct {
 	RepoColors map[string]string `toml:"repo_colors"`
 }
 
-func homeDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return os.TempDir()
-	}
-	return home
-}
-
 func DefaultConfig() *Config {
 	return &Config{}
 }
 
 // UserConfigDir returns the user-level config directory.
 func UserConfigDir() string {
-	return filepath.Join(homeDir(), ".asm")
+	return platform.Current().UserConfigDir()
 }
 
 // UserConfigPath returns the user-level config path.
@@ -299,7 +292,7 @@ func (c *Config) GetWorktreeBasePath(repoName string) string {
 		p = DefaultWorktreeBasePath
 	}
 	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
+		if home, err := platform.Current().HomeDir(); err == nil {
 			if p == "~" {
 				p = home
 			} else {

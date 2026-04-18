@@ -2,8 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"github.com/nhn/asm/config"
 	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/notification"
+	"github.com/nhn/asm/platform"
 	"github.com/nhn/asm/provider"
 	"github.com/nhn/asm/recent"
 	"github.com/nhn/asm/sessionstate"
@@ -984,7 +983,7 @@ func (m PickerModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		wt := m.contextDirectory()
 		if wt != nil {
 			if info, ok := m.taskInfos[wt.Path]; ok && info.URL != "" {
-				exec.Command("open", info.URL).Start()
+				_ = platform.Current().OpenURL(info.URL)
 			}
 		}
 		return m, nil
@@ -1100,7 +1099,7 @@ func (m *PickerModel) runDialogInWorkingPanelAtPath(dialogPath, windowName strin
 
 	m.swapOutWorkingPanel()
 
-	exe, err := os.Executable()
+	exe, err := platform.Current().ExecutablePath()
 	if err != nil {
 		asmlog.Debugf("picker: dialog executable lookup failed window=%q err=%v", windowName, err)
 		return nil
