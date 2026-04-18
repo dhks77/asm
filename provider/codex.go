@@ -109,41 +109,123 @@ func (p *CodexProvider) DetectState(title, content string) State {
 		return StateUnknown
 	}
 
-	lines := strings.Split(content, "\n")
+	bottom := codexBottomLines(content, 12)
+	if len(bottom) == 0 {
+		return StateUnknown
+	}
 
+	if state, ok := detectCodexBusyDetail(bottom); ok {
+		return state
+	}
+
+	for i := 0; i < min(4, len(bottom)); i++ {
+		if isCodexPromptLine(bottom[i]) {
+			return StateIdle
+		}
+	}
+
+	for i := 0; i < min(4, len(bottom)); i++ {
+		if !isCodexChromeLine(bottom[i]) {
+			return StateResponding
+		}
+	}
+
+	return StateBusy
+}
+
+func codexBottomLines(content string, limit int) []string {
+	lines := strings.Split(content, "\n")
 	var bottom []string
-	for i := len(lines) - 1; i >= 0 && len(bottom) < 10; i-- {
+	for i := len(lines) - 1; i >= 0 && len(bottom) < limit; i-- {
 		trimmed := strings.TrimSpace(lines[i])
 		if trimmed != "" {
 			bottom = append(bottom, trimmed)
 		}
 	}
+	return bottom
+}
 
-	if len(bottom) == 0 {
-		return StateUnknown
+func isCodexPromptLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, prefix := range []string{"❯", ">", "›"} {
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		rest = strings.Trim(rest, "▌█▋▍▎▏_")
+		if strings.HasPrefix(strings.ToLower(rest), "working ") {
+			return false
+		}
+		return true
 	}
+	return false
+}
 
-	// Check for idle prompt pattern (e.g., "> " at the end)
-	last := bottom[0]
-	if strings.HasSuffix(last, "> ") || last == ">" {
-		return StateIdle
-	}
-
-	// Check for spinner characters (busy indicator)
-	spinnerChars := "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-	for _, r := range last {
-		if strings.ContainsRune(spinnerChars, r) {
-			return StateBusy
+func detectCodexBusyDetail(bottom []string) (State, bool) {
+	for i := 0; i < min(6, len(bottom)); i++ {
+		line := bottom[i]
+		lower := strings.ToLower(line)
+		if containsCodexSpinner(line) ||
+			strings.Contains(lower, "thinking") ||
+			strings.Contains(lower, "analyz") ||
+			strings.Contains(lower, "planning") ||
+			strings.Contains(lower, "reasoning") {
+			return StateThinking, true
+		}
+		if strings.Contains(lower, "background command") ||
+			strings.Contains(lower, "exec_command") ||
+			strings.Contains(lower, "apply_patch") ||
+			strings.Contains(lower, "write_stdin") ||
+			strings.Contains(lower, "spawn_agent") ||
+			strings.Contains(lower, "wait_agent") ||
+			strings.Contains(lower, "task-notification") ||
+			strings.Contains(lower, "running ") ||
+			strings.Contains(lower, "completed (exit code") {
+			return StateToolUse, true
 		}
 	}
-
-	// Check for thinking indicator
-	for i := 0; i < min(5, len(bottom)); i++ {
+	for i := 0; i < min(6, len(bottom)); i++ {
 		lower := strings.ToLower(bottom[i])
-		if strings.Contains(lower, "thinking") {
-			return StateThinking
+		if strings.Contains(lower, "working (") ||
+			strings.Contains(lower, "esc to interrupt") {
+			return StateBusy, true
 		}
 	}
+	return StateUnknown, false
+}
 
-	return StateUnknown
+func isCodexChromeLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.Contains(lower, "esc to interrupt") ||
+		strings.Contains(lower, "for shortcuts") ||
+		strings.Contains(lower, "accept edits") ||
+		strings.Contains(lower, "plan mode") ||
+		strings.Contains(line, "· ~/") ||
+		strings.Contains(line, "· /") {
+		return true
+	}
+	if isCodexPromptLine(trimmed) {
+		return true
+	}
+	for _, r := range trimmed {
+		if strings.ContainsRune("─━—-=~╌┄╭╮╰╯│┃|┌┐└┘├┤┬┴┼ ", r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func containsCodexSpinner(line string) bool {
+	const spinnerChars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+	for _, r := range line {
+		if strings.ContainsRune(spinnerChars, r) {
+			return true
+		}
+	}
+	return false
 }

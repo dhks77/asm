@@ -65,24 +65,31 @@ func (m PickerModel) handleProviderStateUpdated(msg ProviderStateUpdatedMsg) (te
 		prevState := m.prevProviderStates[msg.Path]
 		m.providerStates[msg.Path] = msg.State
 		m.prevProviderStates[msg.Path] = msg.State
+		notifyReady := m.providerNotifyReady[msg.Path]
+
+		if msg.State == provider.StateIdle && !notifyReady {
+			m.providerNotifyReady[msg.Path] = true
+		}
 
 		if prevState.IsBusy() && msg.State == provider.StateIdle {
-			now := time.Now()
-			m.flashItems[msg.Path] = now
-			extraCmds = append(extraCmds, flashExpireCmd(msg.Path, now, 3*time.Second))
-			if m.cfg.IsDesktopNotificationsEnabled() {
-				displayName := filepath.Base(msg.Path)
-				if wt := m.worktreeByPath(msg.Path); wt != nil {
-					displayName = wt.Name
-					if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
-						displayName = info.Name
+			if notifyReady {
+				now := time.Now()
+				m.flashItems[msg.Path] = now
+				extraCmds = append(extraCmds, flashExpireCmd(msg.Path, now, 3*time.Second))
+				if m.cfg.IsDesktopNotificationsEnabled() {
+					displayName := filepath.Base(msg.Path)
+					if wt := m.worktreeByPath(msg.Path); wt != nil {
+						displayName = wt.Name
+						if info, ok := m.taskInfos[wt.Path]; ok && info.Name != "" {
+							displayName = info.Name
+						}
 					}
+					providerName := m.worktreeProviders[msg.Path]
+					if providerName == "" && m.registry != nil && m.registry.Default() != nil {
+						providerName = m.registry.Default().Name()
+					}
+					extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, providerName, asmtmux.SessionName, m.workingPath))
 				}
-				providerName := m.worktreeProviders[msg.Path]
-				if providerName == "" && m.registry != nil && m.registry.Default() != nil {
-					providerName = m.registry.Default().Name()
-				}
-				extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, providerName, asmtmux.SessionName, m.workingPath))
 			}
 		}
 	}

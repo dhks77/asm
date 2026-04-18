@@ -8,6 +8,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/nhn/asm/config"
+	"github.com/nhn/asm/provider"
 	asmtmux "github.com/nhn/asm/tmux"
 	"github.com/nhn/asm/tracker"
 	"github.com/nhn/asm/worktree"
@@ -305,5 +307,83 @@ func TestHandleBranchResolvedReusesCachedBranchInfoOnPathSwitch(t *testing.T) {
 	}
 	if entry.Info.Name != "New Task" {
 		t.Fatalf("path cache task name = %q, want %q", entry.Info.Name, "New Task")
+	}
+}
+
+func TestExtractLastResponseSkipsPromptAndFooter(t *testing.T) {
+	content := strings.Join([]string{
+		"안녕하세요.",
+		"무엇을 볼까요?",
+		"› Explain this codebase",
+		"gpt-5.4 xhigh · ~/Documents/project/claude-workspace/asm",
+	}, "\n")
+
+	got := extractLastResponse(content)
+	want := "안녕하세요. 무엇을 볼까요?"
+	if got != want {
+		t.Fatalf("extractLastResponse() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractLastResponseRepairsInvalidUTF8(t *testing.T) {
+	content := "정상 줄\n" + string([]byte{'h', 'i', 0xff}) + "\n"
+
+	got := extractLastResponse(content)
+	want := "정상 줄 hi"
+	if got != want {
+		t.Fatalf("extractLastResponse() = %q, want %q", got, want)
+	}
+}
+
+func TestHandleProviderStateUpdatedSuppressesInitialBusyToIdle(t *testing.T) {
+	path := "/tmp/repo"
+	m := PickerModel{
+		cfg:                 &config.Config{},
+		directories:         []worktree.Worktree{{Name: "repo", Path: path}},
+		taskInfos:           map[string]tracker.TaskInfo{},
+		providerStates:      map[string]provider.State{},
+		prevProviderStates:  map[string]provider.State{path: provider.StateBusy},
+		providerNotifyReady: map[string]bool{},
+		worktreeProviders:   map[string]string{path: "codex"},
+		flashItems:          map[string]time.Time{},
+		selectedItems:       map[string]bool{},
+	}
+
+	model, cmd := m.handleProviderStateUpdated(ProviderStateUpdatedMsg{Path: path, State: provider.StateIdle})
+	got := model.(PickerModel)
+
+	if !got.providerNotifyReady[path] {
+		t.Fatalf("providerNotifyReady[%q] = false, want true", path)
+	}
+	if _, ok := got.flashItems[path]; ok {
+		t.Fatalf("initial startup idle should not flash completion")
+	}
+	if cmd != nil {
+		t.Fatalf("initial startup idle should not schedule completion commands")
+	}
+}
+
+func TestHandleProviderStateUpdatedNotifiesAfterSessionIsReady(t *testing.T) {
+	path := "/tmp/repo"
+	m := PickerModel{
+		cfg:                 &config.Config{},
+		directories:         []worktree.Worktree{{Name: "repo", Path: path}},
+		taskInfos:           map[string]tracker.TaskInfo{},
+		providerStates:      map[string]provider.State{},
+		prevProviderStates:  map[string]provider.State{path: provider.StateBusy},
+		providerNotifyReady: map[string]bool{path: true},
+		worktreeProviders:   map[string]string{path: "codex"},
+		flashItems:          map[string]time.Time{},
+		selectedItems:       map[string]bool{},
+	}
+
+	model, cmd := m.handleProviderStateUpdated(ProviderStateUpdatedMsg{Path: path, State: provider.StateIdle})
+	got := model.(PickerModel)
+
+	if _, ok := got.flashItems[path]; !ok {
+		t.Fatalf("ready session should flash completion")
+	}
+	if cmd == nil {
+		t.Fatalf("ready session should schedule completion commands")
 	}
 }

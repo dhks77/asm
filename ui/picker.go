@@ -125,21 +125,22 @@ type queuedTaskResolve struct {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type PickerModel struct {
-	cfg                *config.Config
-	rootPath           string
-	directories        []worktree.Worktree
-	branches           map[string]string // worktree path -> branch name (one-shot)
-	taskInfos          map[string]tracker.TaskInfo
-	repoRoots          map[string]string // target path -> group root
-	repoLabels         map[string]string // target path -> display label
-	repoColors         map[string]string // project root -> configured terminal color value
-	providerStates     map[string]provider.State
-	prevProviderStates map[string]provider.State
-	worktreeProviders  map[string]string // worktree name -> provider name
-	registry           *provider.Registry
-	sessionStartTimes  map[string]time.Time
-	terminalStartTimes map[string]time.Time
-	flashItems         map[string]time.Time
+	cfg                 *config.Config
+	rootPath            string
+	directories         []worktree.Worktree
+	branches            map[string]string // worktree path -> branch name (one-shot)
+	taskInfos           map[string]tracker.TaskInfo
+	repoRoots           map[string]string // target path -> group root
+	repoLabels          map[string]string // target path -> display label
+	repoColors          map[string]string // project root -> configured terminal color value
+	providerStates      map[string]provider.State
+	prevProviderStates  map[string]provider.State
+	providerNotifyReady map[string]bool
+	worktreeProviders   map[string]string // worktree name -> provider name
+	registry            *provider.Registry
+	sessionStartTimes   map[string]time.Time
+	terminalStartTimes  map[string]time.Time
+	flashItems          map[string]time.Time
 	// providerStatePending counts outstanding DetectState calls from the
 	// current cycle. The next detect-state tick is only scheduled once
 	// this reaches zero, so slow providers/tmux never cause fan-out.
@@ -221,6 +222,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		repoColors:           make(map[string]string),
 		providerStates:       make(map[string]provider.State),
 		prevProviderStates:   make(map[string]provider.State),
+		providerNotifyReady:  make(map[string]bool),
 		worktreeProviders:    make(map[string]string),
 		registry:             registry,
 		sessionStartTimes:    make(map[string]time.Time),
@@ -2305,7 +2307,14 @@ func extractLastResponse(content string) string {
 	// meaningful lines from the last AI response.
 	var meaningful []string
 	for i := len(lines) - 1; i >= 0 && len(meaningful) < 8; i-- {
-		stripped := stripBoxBorders(lines[i])
+		raw := strings.TrimSpace(lines[i])
+		if raw == "" {
+			continue
+		}
+		if isNoiseeLine(raw) {
+			continue
+		}
+		stripped := stripBoxBorders(raw)
 		if stripped == "" {
 			continue
 		}
@@ -2328,6 +2337,7 @@ func extractLastResponse(content string) string {
 
 	text := strings.Join(result, " ")
 	text = strings.Join(strings.Fields(text), " ") // collapse whitespace
+	text = strings.ToValidUTF8(text, "")
 
 	runes := []rune(text)
 	if len(runes) > 140 {
@@ -2375,6 +2385,9 @@ func isNoiseeLine(line string) bool {
 	if len([]rune(trimmed)) <= 2 {
 		return true
 	}
+	if isPromptLine(trimmed) || isModelFooterLine(trimmed) {
+		return true
+	}
 	lower := strings.ToLower(trimmed)
 	// Claude CLI footer / status banners
 	if strings.Contains(trimmed, "⏵") ||
@@ -2398,6 +2411,21 @@ func isNoiseeLine(line string) bool {
 		}
 	}
 	return true
+}
+
+func isPromptLine(line string) bool {
+	for _, prefix := range []string{"›", "❯", ">"} {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		return rest != ""
+	}
+	return false
+}
+
+func isModelFooterLine(line string) bool {
+	return strings.Contains(line, "· ~/") || strings.Contains(line, "· /")
 }
 
 // providerStateDelay is the fixed gap between a detect-state cycle finishing

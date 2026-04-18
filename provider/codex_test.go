@@ -49,6 +49,60 @@ func TestCodexProviderResumeArgs(t *testing.T) {
 	}
 }
 
+func TestCodexDetectStateIdlePrompt(t *testing.T) {
+	p := NewCodexProvider("", nil)
+	content := "Done.\n› Find and fix a bug in @filename\n  gpt-5.4 xhigh · ~/Documents/project/asm\n"
+
+	if got := p.DetectState("", content); got != StateIdle {
+		t.Fatalf("DetectState() = %v, want %v", got, StateIdle)
+	}
+}
+
+func TestCodexDetectStateThinking(t *testing.T) {
+	p := NewCodexProvider("", nil)
+	content := "Reviewing files\nThinking through the change\nEsc to interrupt\n"
+
+	if got := p.DetectState("", content); got != StateThinking {
+		t.Fatalf("DetectState() = %v, want %v", got, StateThinking)
+	}
+}
+
+func TestCodexDetectStateBusyWhileWorkingPromptVisible(t *testing.T) {
+	p := NewCodexProvider("", nil)
+	content := "• Working (20s • esc to interrupt)\n› Find and fix a bug in @filename\n  gpt-5.4 xhigh · ~/Documents/project/asm\n"
+
+	if got := p.DetectState("", content); got != StateBusy {
+		t.Fatalf("DetectState() = %v, want %v", got, StateBusy)
+	}
+}
+
+func TestCodexDetectStateToolUse(t *testing.T) {
+	p := NewCodexProvider("", nil)
+	content := "Background command \"go test ./...\" completed (exit code 0)\nEsc to interrupt\n"
+
+	if got := p.DetectState("", content); got != StateToolUse {
+		t.Fatalf("DetectState() = %v, want %v", got, StateToolUse)
+	}
+}
+
+func TestCodexDetectStateResponding(t *testing.T) {
+	p := NewCodexProvider("", nil)
+	content := "I found the issue in the state detector.\nI'll patch it now.\nAccept edits\n"
+
+	if got := p.DetectState("", content); got != StateResponding {
+		t.Fatalf("DetectState() = %v, want %v", got, StateResponding)
+	}
+}
+
+func TestCodexDetectStateFallsBackToBusy(t *testing.T) {
+	p := NewCodexProvider("", nil)
+	content := "for shortcuts\nplan mode\n"
+
+	if got := p.DetectState("", content); got != StateBusy {
+		t.Fatalf("DetectState() = %v, want %v", got, StateBusy)
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

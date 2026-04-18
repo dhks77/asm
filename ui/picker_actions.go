@@ -171,6 +171,7 @@ func removeTargetPath(targetPath string) error {
 func (m *PickerModel) cleanupSessionState(path string) {
 	delete(m.providerStates, path)
 	delete(m.prevProviderStates, path)
+	delete(m.providerNotifyReady, path)
 	delete(m.worktreeProviders, path)
 	delete(m.sessionStartTimes, path)
 	delete(m.flashItems, path)
