@@ -172,6 +172,81 @@ func TestWorktreeDialogNewBranchViewsShowWorktreeTitle(t *testing.T) {
 	}
 }
 
+func TestWorktreeDialogEnterNewBranchModePrefersCurrentBranch(t *testing.T) {
+	m := WorktreeDialogModel{
+		branches: []worktree.Branch{
+			{Name: "main", IsLocal: true},
+			{Name: "feature/current", IsLocal: true},
+			{Name: "origin/release/next"},
+		},
+		currentBranch: "feature/current",
+		taskInfos:     make(map[string]tracker.TaskInfo),
+		maxVisible:    10,
+	}
+
+	m.enterNewBranchMode()
+
+	if m.mode != wtModeSelectBase {
+		t.Fatalf("mode = %v, want %v", m.mode, wtModeSelectBase)
+	}
+	if len(m.filtered) != 3 {
+		t.Fatalf("filtered len = %d, want 3", len(m.filtered))
+	}
+	if got := m.filtered[m.cursor].Name; got != "feature/current" {
+		t.Fatalf("selected base = %q, want %q", got, "feature/current")
+	}
+}
+
+func TestPreferredBaseBranchFallsBackToMainWhenCurrentDetached(t *testing.T) {
+	branches := []worktree.Branch{
+		{Name: "origin/main"},
+		{Name: "release/next", IsLocal: true},
+	}
+
+	if got := preferredBaseBranch("HEAD", branches); got != "origin/main" {
+		t.Fatalf("preferredBaseBranch(HEAD) = %q, want %q", got, "origin/main")
+	}
+}
+
+func TestWorktreeDialogResolvedTaskReappliesFilter(t *testing.T) {
+	m := WorktreeDialogModel{
+		visible:     true,
+		mode:        wtModeSelectBranch,
+		repoDir:     "/tmp/repo",
+		loadVersion: 3,
+		branches: []worktree.Branch{
+			{Name: "main", IsLocal: true},
+			{Name: "feature/123", IsLocal: true},
+		},
+		taskInfos:  make(map[string]tracker.TaskInfo),
+		filter:     "billing",
+		maxVisible: 10,
+	}
+	m.applyFilter()
+	if len(m.filtered) != 0 {
+		t.Fatalf("initial filtered len = %d, want 0", len(m.filtered))
+	}
+
+	m.taskFetch = newAsyncStringQueue(worktreeBranchTaskKey)
+	m.taskFetch.Enqueue("feature/123")
+	m.taskFetch.StartAvailable(nil)
+	m.taskResults = newAsyncResultBuffer[wtTaskResult]()
+	m.taskResults.Push(wtTaskResult{
+		Version: 3,
+		RepoDir: "/tmp/repo",
+		Branch:  "feature/123",
+		Info:    tracker.TaskInfo{Name: "Billing fix"},
+	})
+	got, _ := m.Update(wtTaskPollMsg{version: 3})
+
+	if len(got.filtered) != 1 {
+		t.Fatalf("filtered len after resolve = %d, want 1", len(got.filtered))
+	}
+	if got.filtered[0].Name != "feature/123" {
+		t.Fatalf("filtered[0] = %q, want %q", got.filtered[0].Name, "feature/123")
+	}
+}
+
 func containsAll(s string, parts ...string) bool {
 	for _, part := range parts {
 		if !strings.Contains(s, part) {

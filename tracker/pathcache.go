@@ -34,6 +34,7 @@ type TaskCache struct {
 	legacyBranchPath string
 	ttl              time.Duration
 	mu               sync.RWMutex
+	saveMu           sync.Mutex
 	pathEntries      map[string]PathEntry
 	branchEntries    map[string]BranchEntry
 }
@@ -340,11 +341,25 @@ func (c *TaskCache) save() {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
 		return
 	}
-	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	tmpFile, err := os.CreateTemp(filepath.Dir(c.path), filepath.Base(c.path)+".*.tmp")
+	if err != nil {
 		return
 	}
-	_ = os.Rename(tmp, c.path)
+	tmp := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if err := os.Rename(tmp, c.path); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // cacheFilePath returns ~/.asm/cache/tasks-<sha1(rootPath+scopeKey)>.json.

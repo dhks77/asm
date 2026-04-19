@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -60,8 +61,10 @@ type LauncherModel struct {
 	trackerService       *tracker.Service
 	taskCache            *tracker.TaskCache
 	loadVersion          int
-	taskFetchQueue       []string
-	taskFetchPending     bool
+	taskFetch            asyncStringQueue
+	taskResults          *asyncResultBuffer[launcherTaskResult]
+	taskPollScheduled    bool
+	entryIndex           map[string]int
 	pendingSelectionPath string
 }
 
@@ -77,6 +80,8 @@ func NewLauncherModel(_ string, t tracker.Tracker, taskCache *tracker.TaskCache)
 		tracker:        t,
 		trackerService: trackerService,
 		taskCache:      taskCache,
+		taskFetch:      newAsyncStringQueue(launcherTaskFetchKey),
+		taskResults:    newAsyncResultBuffer[launcherTaskResult](),
 	}
 }
 
@@ -90,11 +95,21 @@ func launcherHomePath() string {
 	return "."
 }
 
+func launcherTaskFetchKey(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
 func (m LauncherModel) Init() tea.Cmd {
 	return m.reload(m.loadVersion)
 }
 
 func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.taskResults == nil {
+		m.taskResults = newAsyncResultBuffer[launcherTaskResult]()
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -108,33 +123,42 @@ func (m LauncherModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.entries = nil
+			m.entryIndex = nil
 			m.cursor = 0
 			m.viewTop = 0
-			m.taskFetchQueue = nil
-			m.taskFetchPending = false
+			m.taskFetch.Clear()
+			m.taskResults.Clear()
+			m.taskPollScheduled = false
 			return m, nil
 		}
 		m.err = ""
 		m.entries = msg.entries
+		m.entryIndex = buildLauncherEntryIndex(m.entries)
 		if m.cursor >= len(m.entries) {
 			m.cursor = max(0, len(m.entries)-1)
 		}
 		m.applyPendingSelection()
 		m.clampViewTop()
-		m.taskFetchQueue = dedupeLauncherPaths(msg.pendingPaths)
-		m.taskFetchPending = false
+		m.taskFetch.Reset(msg.pendingPaths)
+		m.taskResults.Clear()
+		m.taskPollScheduled = false
 		return m, m.startNextTaskFetch()
 
-	case launcherTaskResolvedMsg:
+	case launcherTaskPollMsg:
 		if msg.version != m.loadVersion {
 			return m, nil
 		}
-		m.taskFetchPending = false
-		for i := range m.entries {
-			if filepath.Clean(m.entries[i].path) != msg.path {
+		m.taskPollScheduled = false
+		for _, result := range m.taskResults.Drain() {
+			if result.version != m.loadVersion {
 				continue
 			}
-			m.entries[i].taskName = msg.taskName
+			if !m.taskFetch.Finish(result.path) {
+				continue
+			}
+			if idx, ok := m.entryIndex[result.path]; ok && idx >= 0 && idx < len(m.entries) {
+				m.entries[idx].taskName = result.taskName
+			}
 		}
 		return m, m.startNextTaskFetch()
 
@@ -263,11 +287,13 @@ type launcherEntriesLoadedMsg struct {
 	err          error
 }
 
-type launcherTaskResolvedMsg struct {
+type launcherTaskResult struct {
 	version  int
 	path     string
 	taskName string
 }
+
+type launcherTaskPollMsg struct{ version int }
 
 func (m *LauncherModel) advanceTab(delta int) {
 	m.tab = launcherTab((int(m.tab) + delta + len(launcherTabs)) % len(launcherTabs))
@@ -487,8 +513,11 @@ func (m *LauncherModel) beginReload(path string) tea.Cmd {
 		m.pendingSelectionPath = filepath.Clean(path)
 	}
 	m.loadVersion++
-	m.taskFetchQueue = nil
-	m.taskFetchPending = false
+	m.taskFetch.Clear()
+	if m.taskResults != nil {
+		m.taskResults.Clear()
+	}
+	m.taskPollScheduled = false
 	return m.reload(m.loadVersion)
 }
 
@@ -762,23 +791,6 @@ func loadFavoriteEntries(filter string, activeTargets launcherActiveTargets, res
 	return rows, pendingPaths, nil
 }
 
-func dedupeLauncherPaths(paths []string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool, len(paths))
-	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		clean := filepath.Clean(path)
-		if clean == "" || seen[clean] {
-			continue
-		}
-		seen[clean] = true
-		out = append(out, clean)
-	}
-	return out
-}
-
 func newLauncherActiveTargets(activeKinds map[string]asmtmux.SessionKind) launcherActiveTargets {
 	active := launcherActiveTargets{
 		paths:     activeKinds,
@@ -988,28 +1000,52 @@ func matchesLauncherFilter(filter string, parts ...string) bool {
 	return strings.Contains(strings.ToLower(strings.Join(joined, " ")), filter)
 }
 
-func (m LauncherModel) startNextTaskFetch() tea.Cmd {
-	if m.taskFetchPending || len(m.taskFetchQueue) == 0 {
-		return nil
+func (m *LauncherModel) startNextTaskFetch() tea.Cmd {
+	paths := m.taskFetch.StartAvailable(nil)
+	for _, path := range paths {
+		m.fetchTaskName(m.loadVersion, path)
 	}
-	path := m.taskFetchQueue[0]
-	m.taskFetchQueue = m.taskFetchQueue[1:]
-	m.taskFetchPending = true
-	return m.fetchTaskName(m.loadVersion, path)
+	return m.ensureTaskPoll(m.loadVersion)
 }
 
-func (m LauncherModel) fetchTaskName(version int, path string) tea.Cmd {
+func (m LauncherModel) fetchTaskName(version int, path string) {
 	t := m.tracker
 	taskCache := m.taskCache
 	service := m.trackerService
-	return func() tea.Msg {
+	results := m.taskResults
+	go func() {
 		resolver := newLauncherTaskResolver(t, taskCache, service)
-		return launcherTaskResolvedMsg{
+		results.Push(launcherTaskResult{
 			version:  version,
 			path:     filepath.Clean(path),
 			taskName: resolver.taskName(path),
-		}
+		})
+	}()
+}
+
+func (m *LauncherModel) ensureTaskPoll(version int) tea.Cmd {
+	if m.taskPollScheduled {
+		return nil
 	}
+	if !m.taskFetch.Active() && (m.taskResults == nil || !m.taskResults.HasPending()) {
+		return nil
+	}
+	m.taskPollScheduled = true
+	return launcherTaskPollCmd(version)
+}
+
+func launcherTaskPollCmd(version int) tea.Cmd {
+	return tea.Tick(trackerResultFlushDelay, func(time.Time) tea.Msg {
+		return launcherTaskPollMsg{version: version}
+	})
+}
+
+func buildLauncherEntryIndex(entries []launcherEntry) map[string]int {
+	index := make(map[string]int, len(entries))
+	for i := range entries {
+		index[filepath.Clean(entries[i].path)] = i
+	}
+	return index
 }
 
 func (m *LauncherModel) applyPendingSelection() {

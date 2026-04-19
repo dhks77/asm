@@ -27,10 +27,12 @@ const (
 // Messages
 
 type BranchesLoadedMsg struct {
-	Branches []worktree.Branch
-	RepoDir  string
-	RepoName string
-	Err      error
+	Version       int
+	Branches      []worktree.Branch
+	RepoDir       string
+	RepoName      string
+	CurrentBranch string
+	Err           error
 	// CachedTasks are task infos already present in the persistent cache,
 	// keyed by branch name. Seeded in one message to avoid the N-way
 	// per-branch render wave.
@@ -50,21 +52,27 @@ type WorktreeErrorMsg struct {
 	Err string
 }
 
-type wtTaskResolvedMsg struct {
+type wtTaskResult struct {
+	Version int
 	RepoDir string
 	Branch  string
 	Info    tracker.TaskInfo
 }
 
+type wtTaskPollMsg struct{ version int }
+
 type wtTaskRetryTickMsg struct {
+	version   int
 	remaining int
 }
 
 type wtBranchesRefreshedMsg struct {
-	RepoDir      string
-	Branches     []worktree.Branch
-	CachedTasks  map[string]tracker.TaskInfo
-	RefreshError error
+	Version       int
+	RepoDir       string
+	Branches      []worktree.Branch
+	CurrentBranch string
+	CachedTasks   map[string]tracker.TaskInfo
+	RefreshError  error
 }
 
 type worktreeRepoChoice struct {
@@ -87,18 +95,23 @@ type WorktreeDialogModel struct {
 	newBranchName string
 	baseBranch    string
 
-	rootPath       string
-	dirPath        string
-	repoDir        string
-	repoName       string
-	repoChoices    []worktreeRepoChoice
-	repoIndex      int
-	tracker        tracker.Tracker
-	trackerService *tracker.Service
-	taskInfos      map[string]tracker.TaskInfo // branch name -> task info
-	width          int
-	height         int
-	err            string
+	rootPath          string
+	dirPath           string
+	repoDir           string
+	repoName          string
+	currentBranch     string
+	repoChoices       []worktreeRepoChoice
+	repoIndex         int
+	tracker           tracker.Tracker
+	trackerService    *tracker.Service
+	taskInfos         map[string]tracker.TaskInfo // branch name -> task info
+	taskFetch         asyncStringQueue
+	taskResults       *asyncResultBuffer[wtTaskResult]
+	taskPollScheduled bool
+	loadVersion       int
+	width             int
+	height            int
+	err               string
 }
 
 func NewWorktreeDialogModel(t tracker.Tracker) WorktreeDialogModel {
@@ -111,6 +124,8 @@ func NewWorktreeDialogModel(t tracker.Tracker) WorktreeDialogModel {
 		tracker:        t,
 		trackerService: trackerService,
 		taskInfos:      make(map[string]tracker.TaskInfo),
+		taskFetch:      newAsyncStringQueue(worktreeBranchTaskKey),
+		taskResults:    newAsyncResultBuffer[wtTaskResult](),
 	}
 }
 
@@ -127,16 +142,29 @@ func (m *WorktreeDialogModel) Show(rootPath, dirPath string) tea.Cmd {
 	m.repoChoices = worktreeRepoChoices(dirPath)
 	m.repoIndex = currentRepoIndex(m.repoChoices, dirPath)
 	m.err = ""
+	m.currentBranch = ""
 	m.branches = nil
 	m.filtered = nil
+	m.taskInfos = make(map[string]tracker.TaskInfo)
+	m.taskFetch.Clear()
+	if m.taskResults != nil {
+		m.taskResults.Clear()
+	}
+	m.taskPollScheduled = false
+	m.loadVersion++
 
-	return m.loadBranches(dirPath)
+	return m.loadBranches(m.loadVersion, dirPath)
 }
 
 func (m *WorktreeDialogModel) Hide() {
 	m.visible = false
 	m.branches = nil
 	m.filtered = nil
+	m.taskFetch.Clear()
+	if m.taskResults != nil {
+		m.taskResults.Clear()
+	}
+	m.taskPollScheduled = false
 }
 
 func (m *WorktreeDialogModel) SetSize(w, h int) {
@@ -199,6 +227,127 @@ func (m *WorktreeDialogModel) applyFilter() {
 		m.cursor = len(m.filtered) - 1
 	}
 	m.adjustScrollOffset()
+}
+
+func worktreeBranchTaskKey(branch string) string {
+	return strings.TrimPrefix(strings.TrimSpace(branch), "origin/")
+}
+
+func preferredBaseBranch(currentBranch string, branches []worktree.Branch) string {
+	currentBranch = strings.TrimSpace(currentBranch)
+	if currentBranch == "HEAD" {
+		currentBranch = ""
+	}
+	for _, name := range []string{currentBranch, "main", "master", "develop", "trunk"} {
+		if name == "" {
+			continue
+		}
+		for _, b := range branches {
+			if b.Name == name || b.Name == "origin/"+name {
+				return b.Name
+			}
+		}
+	}
+	for _, b := range branches {
+		if b.IsLocal {
+			return b.Name
+		}
+	}
+	if len(branches) == 0 {
+		return ""
+	}
+	return branches[0].Name
+}
+
+func (m WorktreeDialogModel) hasAsyncTracker() bool {
+	return m.tracker != nil || m.trackerService != nil
+}
+
+func (m WorktreeDialogModel) hasResolvedTaskInfo(branch string) bool {
+	key := worktreeBranchTaskKey(branch)
+	if key == "" {
+		return true
+	}
+	for name, info := range m.taskInfos {
+		if info.Name == "" {
+			continue
+		}
+		if worktreeBranchTaskKey(name) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *WorktreeDialogModel) queueMissingTaskFetches(branches []worktree.Branch) {
+	if !m.hasAsyncTracker() {
+		return
+	}
+	for _, b := range branches {
+		if m.hasResolvedTaskInfo(b.Name) {
+			continue
+		}
+		m.taskFetch.Enqueue(b.Name)
+	}
+}
+
+func (m *WorktreeDialogModel) startNextTaskFetch() tea.Cmd {
+	if !m.hasAsyncTracker() {
+		return nil
+	}
+	branches := m.taskFetch.StartAvailable(m.hasResolvedTaskInfo)
+	for _, branch := range branches {
+		m.fetchTaskName(m.loadVersion, m.repoDir, branch)
+	}
+	return m.ensureTaskPoll(m.loadVersion)
+}
+
+func (m *WorktreeDialogModel) storeTaskInfo(branch string, info tracker.TaskInfo) bool {
+	if info.Name == "" {
+		return false
+	}
+	key := worktreeBranchTaskKey(branch)
+	if key == "" {
+		return false
+	}
+	changed := false
+	for _, b := range m.branches {
+		if worktreeBranchTaskKey(b.Name) != key {
+			continue
+		}
+		if current, ok := m.taskInfos[b.Name]; ok && current == info {
+			continue
+		}
+		m.taskInfos[b.Name] = info
+		changed = true
+	}
+	if current, ok := m.taskInfos[branch]; !ok || current != info {
+		m.taskInfos[branch] = info
+		changed = true
+	}
+	return changed
+}
+
+func (m *WorktreeDialogModel) selectPreferredBaseBranch() {
+	preferred := preferredBaseBranch(m.currentBranch, m.filtered)
+	if preferred == "" {
+		return
+	}
+	for i, b := range m.filtered {
+		if b.Name != preferred {
+			continue
+		}
+		m.cursor = i
+		m.adjustScrollOffset()
+		return
+	}
+}
+
+func (m WorktreeDialogModel) createBaseBranch() string {
+	if base := strings.TrimSpace(m.baseBranch); base != "" {
+		return base
+	}
+	return preferredBaseBranch(m.currentBranch, m.branches)
 }
 
 func worktreeRepoChoices(currentPath string) []worktreeRepoChoice {
@@ -267,18 +416,19 @@ func currentRepoIndex(choices []worktreeRepoChoice, currentPath string) int {
 	return 0
 }
 
-func (m *WorktreeDialogModel) loadBranches(dirPath string) tea.Cmd {
+func (m *WorktreeDialogModel) loadBranches(version int, dirPath string) tea.Cmd {
 	t := m.tracker
 	service := m.trackerService
 	return func() tea.Msg {
 		branches, err := worktree.ListBranches(dirPath)
 		if err != nil {
-			return BranchesLoadedMsg{Err: err}
+			return BranchesLoadedMsg{Version: version, RepoDir: dirPath, Err: err}
 		}
 		repoName := worktree.RepoName(dirPath)
 		if repoName == "" {
 			_, repoName = config.ProjectIdentity(dirPath)
 		}
+		currentBranch := worktree.CurrentBranch(dirPath)
 		var cached map[string]tracker.TaskInfo
 		if service != nil {
 			cached = make(map[string]tracker.TaskInfo, len(branches))
@@ -296,23 +446,26 @@ func (m *WorktreeDialogModel) loadBranches(dirPath string) tea.Cmd {
 			}
 		}
 		return BranchesLoadedMsg{
-			Branches:    branches,
-			RepoDir:     dirPath,
-			RepoName:    repoName,
-			CachedTasks: cached,
+			Version:       version,
+			Branches:      branches,
+			RepoDir:       dirPath,
+			RepoName:      repoName,
+			CurrentBranch: currentBranch,
+			CachedTasks:   cached,
 		}
 	}
 }
 
-func (m WorktreeDialogModel) refreshBranches(dirPath string) tea.Cmd {
+func (m WorktreeDialogModel) refreshBranches(version int, dirPath string) tea.Cmd {
 	service := m.trackerService
 	t := m.tracker
 	return func() tea.Msg {
 		refreshErr := worktree.FetchAllRemotes(dirPath)
 		branches, err := worktree.ListBranches(dirPath)
 		if err != nil {
-			return wtBranchesRefreshedMsg{RepoDir: dirPath, RefreshError: err}
+			return wtBranchesRefreshedMsg{Version: version, RepoDir: dirPath, RefreshError: err}
 		}
+		currentBranch := worktree.CurrentBranch(dirPath)
 		var cached map[string]tracker.TaskInfo
 		if service != nil {
 			cached = make(map[string]tracker.TaskInfo, len(branches))
@@ -330,10 +483,12 @@ func (m WorktreeDialogModel) refreshBranches(dirPath string) tea.Cmd {
 			}
 		}
 		return wtBranchesRefreshedMsg{
-			RepoDir:      dirPath,
-			Branches:     branches,
-			CachedTasks:  cached,
-			RefreshError: refreshErr,
+			Version:       version,
+			RepoDir:       dirPath,
+			Branches:      branches,
+			CurrentBranch: currentBranch,
+			CachedTasks:   cached,
+			RefreshError:  refreshErr,
 		}
 	}
 }
@@ -354,11 +509,18 @@ func (m *WorktreeDialogModel) switchRepo(delta int) tea.Cmd {
 	m.dirPath = choice.Path
 	m.repoDir = choice.Path
 	m.repoName = choice.Name
+	m.currentBranch = ""
 	m.err = ""
 	m.branches = nil
 	m.filtered = nil
 	m.taskInfos = make(map[string]tracker.TaskInfo)
-	return m.loadBranches(choice.Path)
+	m.taskFetch.Clear()
+	if m.taskResults != nil {
+		m.taskResults.Clear()
+	}
+	m.taskPollScheduled = false
+	m.loadVersion++
+	return m.loadBranches(m.loadVersion, choice.Path)
 }
 
 func (m *WorktreeDialogModel) enterExistingBranchMode() {
@@ -379,15 +541,22 @@ func (m *WorktreeDialogModel) enterNewBranchMode() {
 	m.newBranchName = ""
 	m.baseBranch = ""
 	m.applyFilter()
+	m.selectPreferredBaseBranch()
 }
 
 func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) {
 	if !m.visible {
 		return m, nil
 	}
+	if m.taskResults == nil {
+		m.taskResults = newAsyncResultBuffer[wtTaskResult]()
+	}
 
 	switch msg := msg.(type) {
 	case BranchesLoadedMsg:
+		if msg.Version != m.loadVersion {
+			return m, nil
+		}
 		if m.dirPath != "" && msg.RepoDir != "" && filepath.Clean(msg.RepoDir) != filepath.Clean(m.dirPath) {
 			return m, nil
 		}
@@ -398,28 +567,31 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 		m.branches = msg.Branches
 		m.repoDir = msg.RepoDir
 		m.repoName = msg.RepoName
+		m.currentBranch = msg.CurrentBranch
 		// Seed cached task infos before applyFilter so search-by-task works
 		// immediately and the first render is fully populated.
 		for name, info := range msg.CachedTasks {
 			m.taskInfos[name] = info
 		}
 		m.applyFilter()
-		if m.tracker != nil || m.trackerService != nil {
-			var cmds []tea.Cmd
-			for _, b := range m.branches {
-				// Skip fetches for branches already resolved from cache.
-				if _, ok := m.taskInfos[b.Name]; ok {
-					continue
-				}
-				cmds = append(cmds, m.fetchTaskName(m.repoDir, b.Name))
-			}
-			cmds = append(cmds, m.refreshBranches(m.repoDir))
-			cmds = append(cmds, wtTaskRetryTickCmd(5))
-			return m, tea.Batch(cmds...)
+		if m.mode == wtModeSelectBase && m.baseBranch == "" {
+			m.selectPreferredBaseBranch()
 		}
-		return m, m.refreshBranches(m.repoDir)
+		var cmds []tea.Cmd
+		if m.hasAsyncTracker() {
+			m.queueMissingTaskFetches(m.branches)
+			if cmd := m.startNextTaskFetch(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			cmds = append(cmds, wtTaskRetryTickCmd(m.loadVersion, 5))
+		}
+		cmds = append(cmds, m.refreshBranches(m.loadVersion, m.repoDir))
+		return m, tea.Batch(cmds...)
 
 	case wtBranchesRefreshedMsg:
+		if msg.Version != m.loadVersion {
+			return m, nil
+		}
 		if m.repoDir != "" && msg.RepoDir != "" && filepath.Clean(msg.RepoDir) != filepath.Clean(m.repoDir) {
 			return m, nil
 		}
@@ -427,55 +599,64 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 			return m, nil
 		}
 		m.branches = msg.Branches
+		m.currentBranch = msg.CurrentBranch
 		for name, info := range msg.CachedTasks {
 			if _, ok := m.taskInfos[name]; !ok {
 				m.taskInfos[name] = info
 			}
 		}
 		m.applyFilter()
-		return m, nil
+		if m.mode == wtModeSelectBase && m.baseBranch == "" {
+			m.selectPreferredBaseBranch()
+		}
+		m.queueMissingTaskFetches(m.branches)
+		return m, m.startNextTaskFetch()
 
-	case wtTaskResolvedMsg:
-		if m.repoDir != "" && msg.RepoDir != "" && filepath.Clean(msg.RepoDir) != filepath.Clean(m.repoDir) {
+	case wtTaskPollMsg:
+		if msg.version != m.loadVersion {
 			return m, nil
 		}
-		if msg.Info.Name != "" {
-			m.taskInfos[msg.Branch] = msg.Info
-			// Propagate to branches sharing the same base name (e.g., origin/feature/X → feature/X)
-			for _, b := range m.branches {
-				if _, ok := m.taskInfos[b.Name]; ok {
-					continue
-				}
-				if strings.HasSuffix(msg.Branch, b.Name) || strings.HasSuffix(b.Name, msg.Branch) {
-					m.taskInfos[b.Name] = msg.Info
-				}
+		m.taskPollScheduled = false
+		changed := false
+		for _, result := range m.taskResults.Drain() {
+			if result.Version != m.loadVersion {
+				continue
 			}
-		}
-		return m, nil
-
-	case wtTaskRetryTickMsg:
-		if m.tracker == nil || msg.remaining <= 0 {
-			return m, nil
+			if m.repoDir != "" && result.RepoDir != "" && filepath.Clean(result.RepoDir) != filepath.Clean(m.repoDir) {
+				continue
+			}
+			if !m.taskFetch.Finish(result.Branch) {
+				continue
+			}
+			if m.storeTaskInfo(result.Branch, result.Info) {
+				changed = true
+			}
 		}
 		var cmds []tea.Cmd
-		for _, b := range m.branches {
-			if _, ok := m.taskInfos[b.Name]; !ok {
-				// Check if another branch with overlapping name already resolved
-				base := strings.TrimPrefix(b.Name, "origin/")
-				if base != b.Name {
-					if info, ok := m.taskInfos[base]; ok {
-						m.taskInfos[b.Name] = info
-						continue
-					}
-				}
-				cmds = append(cmds, m.fetchTaskName(m.repoDir, b.Name))
-			}
+		if cmd := m.startNextTaskFetch(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-		if len(cmds) > 0 {
-			cmds = append(cmds, wtTaskRetryTickCmd(msg.remaining-1))
-			return m, tea.Batch(cmds...)
+		if changed {
+			m.applyFilter()
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
+
+	case wtTaskRetryTickMsg:
+		if msg.version != m.loadVersion || !m.hasAsyncTracker() || msg.remaining <= 0 {
+			return m, nil
+		}
+		m.queueMissingTaskFetches(m.branches)
+		var cmds []tea.Cmd
+		if cmd := m.startNextTaskFetch(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if msg.remaining > 1 && m.taskFetch.Active() {
+			cmds = append(cmds, wtTaskRetryTickCmd(m.loadVersion, msg.remaining-1))
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
 
 	case tea.KeyMsg:
 		if m.mode == wtModeNewBranch {
@@ -638,7 +819,11 @@ func (m WorktreeDialogModel) handleNewBranchKey(msg tea.KeyMsg) (WorktreeDialogM
 		repoDir := m.repoDir
 		rootPath := m.rootPath
 		repoName := m.repoName
-		baseBranch := m.baseBranch
+		baseBranch := m.createBaseBranch()
+		if baseBranch == "" {
+			m.err = "no base branch available"
+			return m, nil
+		}
 		m.Hide()
 		return m, createWorktreeNewBranchCmd(repoDir, rootPath, repoName, name, baseBranch)
 
@@ -662,25 +847,45 @@ func (m WorktreeDialogModel) handleNewBranchKey(msg tea.KeyMsg) (WorktreeDialogM
 	return m, nil
 }
 
-func wtTaskRetryTickCmd(remaining int) tea.Cmd {
+func wtTaskRetryTickCmd(version, remaining int) tea.Cmd {
 	return tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-		return wtTaskRetryTickMsg{remaining: remaining}
+		return wtTaskRetryTickMsg{version: version, remaining: remaining}
 	})
 }
 
-func (m WorktreeDialogModel) fetchTaskName(repoDir, branch string) tea.Cmd {
+func (m WorktreeDialogModel) fetchTaskName(version int, repoDir, branch string) {
 	t := m.tracker
 	service := m.trackerService
-	return func() tea.Msg {
+	results := m.taskResults
+	go func() {
 		if service != nil {
-			return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch, Info: service.Resolve(repoDir, branch)}
+			results.Push(wtTaskResult{Version: version, RepoDir: repoDir, Branch: branch, Info: service.Resolve(repoDir, branch)})
+			return
 		}
 		if t == nil {
-			return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch}
+			results.Push(wtTaskResult{Version: version, RepoDir: repoDir, Branch: branch})
+			return
 		}
 		info := t.Resolve(branch)
-		return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch, Info: info}
+		results.Push(wtTaskResult{Version: version, RepoDir: repoDir, Branch: branch, Info: info})
+	}()
+}
+
+func (m *WorktreeDialogModel) ensureTaskPoll(version int) tea.Cmd {
+	if m.taskPollScheduled {
+		return nil
 	}
+	if !m.taskFetch.Active() && (m.taskResults == nil || !m.taskResults.HasPending()) {
+		return nil
+	}
+	m.taskPollScheduled = true
+	return wtTaskPollCmd(version)
+}
+
+func wtTaskPollCmd(version int) tea.Cmd {
+	return tea.Tick(trackerResultFlushDelay, func(time.Time) tea.Msg {
+		return wtTaskPollMsg{version: version}
+	})
 }
 
 func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea.Cmd {
@@ -705,6 +910,9 @@ func createWorktreeFromBranchCmd(repoDir, rootPath, repoName, branch string) tea
 
 func createWorktreeNewBranchCmd(repoDir, rootPath, repoName, newBranch, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
+		if strings.TrimSpace(baseBranch) == "" {
+			return WorktreeErrorMsg{Err: "base branch is required"}
+		}
 		folderName := worktree.BranchToFolderName(newBranch)
 		targetPath, err := prepareWorktreeTarget(rootPath, repoName, folderName)
 		if err != nil {

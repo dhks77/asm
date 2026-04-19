@@ -228,6 +228,10 @@ func CreateWorktreeFromBranch(repoDir, targetPath, branch string) error {
 // enough, but belt-and-suspenders catches cases where show-ref behaves
 // unexpectedly (packed-refs quirks, worktree-specific ref namespaces, etc.).
 func CreateWorktreeNewBranch(repoDir, targetPath, newBranch, baseBranch string) error {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		return fmt.Errorf("base branch is required")
+	}
 	if BranchExists(repoDir, newBranch) {
 		_, err := runGit(repoDir, "worktree", "add", targetPath, newBranch)
 		return err

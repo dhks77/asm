@@ -245,6 +245,9 @@ func (m PickerModel) handleDirectoriesScanned(msg DirectoriesScannedMsg) (tea.Mo
 
 func (m PickerModel) handleBranchResolved(msg BranchResolvedMsg) (tea.Model, tea.Cmd) {
 	m.branchFetchPending = false
+	if m.worktreeByPath(msg.Path) == nil {
+		return m, m.startNextMetadataFetches()
+	}
 	m.branchVerified[msg.Path] = true
 	if msg.Branch == "" {
 		delete(m.branches, msg.Path)
@@ -278,8 +281,32 @@ func (m PickerModel) handleBranchResolved(msg BranchResolvedMsg) (tea.Model, tea
 	return m, m.startNextMetadataFetches()
 }
 
-func (m PickerModel) handleTaskResolved(msg TaskResolvedMsg) (tea.Model, tea.Cmd) {
-	m.taskFetchPending = false
+func (m PickerModel) handleTaskPoll() (tea.Model, tea.Cmd) {
+	m.taskPollScheduled = false
+	for _, result := range m.taskResults.Drain() {
+		if !m.taskFetch.Finish(queuedTaskResolve{Path: result.Path, Branch: result.Branch}) {
+			continue
+		}
+		m.applyTaskResolved(result)
+	}
+	var cmds []tea.Cmd
+	if cmd := m.startNextMetadataFetches(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m *PickerModel) applyTaskResolved(msg TaskResolvedMsg) {
+	if m.worktreeByPath(msg.Path) == nil {
+		return
+	}
+	if currentBranch, ok := m.branches[msg.Path]; ok {
+		if msg.Branch != "" && currentBranch != msg.Branch {
+			return
+		}
+	} else if m.branchVerified[msg.Path] {
+		return
+	}
 	if msg.Info.Name != "" {
 		m.taskInfos[msg.Path] = msg.Info
 		if msg.Branch != "" {
@@ -291,7 +318,6 @@ func (m PickerModel) handleTaskResolved(msg TaskResolvedMsg) (tea.Model, tea.Cmd
 			}
 		}
 	}
-	return m, m.startNextMetadataFetches()
 }
 
 func (m PickerModel) handleSettingsExited() (tea.Model, tea.Cmd) {
@@ -318,6 +344,10 @@ func (m PickerModel) handleSettingsExited() (tea.Model, tea.Cmd) {
 	m.taskInfos = make(map[string]tracker.TaskInfo)
 	m.cachedBranches = make(map[string]string)
 	m.branchVerified = make(map[string]bool)
+	if m.taskResults != nil {
+		m.taskResults.Clear()
+	}
+	m.taskPollScheduled = false
 	m.pickerWidthDirty = true
 	return m, m.refreshLayoutAndDirectoriesCmd()
 }

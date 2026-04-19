@@ -54,6 +54,8 @@ type TaskResolvedMsg struct {
 	Info   tracker.TaskInfo
 }
 
+type pickerTaskPollMsg struct{}
+
 type providerStateTickMsg time.Time
 
 type ProviderStateUpdatedMsg struct {
@@ -120,6 +122,13 @@ type restoreSnapshotDoneMsg struct {
 type queuedTaskResolve struct {
 	Path   string
 	Branch string
+}
+
+func taskResolveQueueKey(req queuedTaskResolve) string {
+	if req.Path == "" || req.Branch == "" {
+		return ""
+	}
+	return taskResolveKey(req.Path, req.Branch)
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -194,9 +203,9 @@ type PickerModel struct {
 	branchFetchQueue   []string
 	queuedBranches     map[string]bool
 	branchFetchPending bool
-	taskFetchQueue     []queuedTaskResolve
-	queuedTasks        map[string]bool
-	taskFetchPending   bool
+	taskFetch          asyncQueue[queuedTaskResolve]
+	taskResults        *asyncResultBuffer[TaskResolvedMsg]
+	taskPollScheduled  bool
 	focused            bool
 	width              int
 	height             int
@@ -246,7 +255,8 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		cachedBranches:       make(map[string]string),
 		branchVerified:       make(map[string]bool),
 		queuedBranches:       make(map[string]bool),
-		queuedTasks:          make(map[string]bool),
+		taskFetch:            newAsyncQueue[queuedTaskResolve](trackerFetchConcurrency, taskResolveQueueKey),
+		taskResults:          newAsyncResultBuffer[TaskResolvedMsg](),
 		ides:                 ides,
 		focused:              true,
 		restoreLast:          restoreLast,
@@ -278,12 +288,7 @@ func (m *PickerModel) enqueueTaskFetch(path, branch string) {
 	if path == "" || branch == "" || (m.tracker == nil && m.trackerService == nil) {
 		return
 	}
-	key := taskResolveKey(path, branch)
-	if m.queuedTasks[key] {
-		return
-	}
-	m.taskFetchQueue = append(m.taskFetchQueue, queuedTaskResolve{Path: path, Branch: branch})
-	m.queuedTasks[key] = true
+	m.taskFetch.Enqueue(queuedTaskResolve{Path: path, Branch: branch})
 }
 
 func (m *PickerModel) pruneMetadataQueues(validPaths map[string]bool) {
@@ -317,15 +322,9 @@ func (m *PickerModel) pruneMetadataQueues(validPaths map[string]bool) {
 	}
 	m.branchFetchQueue = filteredBranches
 
-	filteredTasks := m.taskFetchQueue[:0]
-	for _, req := range m.taskFetchQueue {
-		if validPaths[req.Path] {
-			filteredTasks = append(filteredTasks, req)
-		} else {
-			delete(m.queuedTasks, taskResolveKey(req.Path, req.Branch))
-		}
-	}
-	m.taskFetchQueue = filteredTasks
+	m.taskFetch.PruneQueued(func(req queuedTaskResolve) bool {
+		return validPaths[req.Path]
+	})
 }
 
 func (m *PickerModel) startNextBranchFetch() tea.Cmd {
@@ -340,14 +339,11 @@ func (m *PickerModel) startNextBranchFetch() tea.Cmd {
 }
 
 func (m *PickerModel) startNextTaskFetch() tea.Cmd {
-	if m.taskFetchPending || len(m.taskFetchQueue) == 0 {
-		return nil
+	reqs := m.taskFetch.StartAvailable(nil)
+	for _, req := range reqs {
+		m.fetchTaskName(req.Path, req.Branch)
 	}
-	req := m.taskFetchQueue[0]
-	m.taskFetchQueue = m.taskFetchQueue[1:]
-	delete(m.queuedTasks, taskResolveKey(req.Path, req.Branch))
-	m.taskFetchPending = true
-	return m.fetchTaskName(req.Path, req.Branch)
+	return m.ensureTaskPoll()
 }
 
 func (m *PickerModel) startNextMetadataFetches() tea.Cmd {
@@ -628,6 +624,9 @@ func (m PickerModel) Init() tea.Cmd {
 }
 
 func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.taskResults == nil {
+		m.taskResults = newAsyncResultBuffer[TaskResolvedMsg]()
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -840,8 +839,8 @@ func (m PickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BranchResolvedMsg:
 		return m.handleBranchResolved(msg)
 
-	case TaskResolvedMsg:
-		return m.handleTaskResolved(msg)
+	case pickerTaskPollMsg:
+		return m.handleTaskPoll()
 
 	case settingsExitedMsg:
 		return m.handleSettingsExited()
@@ -2297,19 +2296,39 @@ func (m PickerModel) fetchBranch(path string) tea.Cmd {
 	}
 }
 
-func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
+func (m PickerModel) fetchTaskName(path string, branch string) {
 	service := m.trackerService
 	t := m.tracker
-	return func() tea.Msg {
+	results := m.taskResults
+	go func() {
 		if service != nil {
-			return TaskResolvedMsg{Path: path, Branch: branch, Info: service.Resolve(path, branch)}
+			results.Push(TaskResolvedMsg{Path: path, Branch: branch, Info: service.Resolve(path, branch)})
+			return
 		}
 		if t == nil {
-			return TaskResolvedMsg{Path: path, Branch: branch}
+			results.Push(TaskResolvedMsg{Path: path, Branch: branch})
+			return
 		}
 		info := t.Resolve(branch)
-		return TaskResolvedMsg{Path: path, Branch: branch, Info: info}
+		results.Push(TaskResolvedMsg{Path: path, Branch: branch, Info: info})
+	}()
+}
+
+func (m *PickerModel) ensureTaskPoll() tea.Cmd {
+	if m.taskPollScheduled {
+		return nil
 	}
+	if !m.taskFetch.Active() && (m.taskResults == nil || !m.taskResults.HasPending()) {
+		return nil
+	}
+	m.taskPollScheduled = true
+	return pickerTaskPollCmd()
+}
+
+func pickerTaskPollCmd() tea.Cmd {
+	return tea.Tick(trackerResultFlushDelay, func(time.Time) tea.Msg {
+		return pickerTaskPollMsg{}
+	})
 }
 
 func flashExpireCmd(targetPath string, startedAt time.Time, after time.Duration) tea.Cmd {

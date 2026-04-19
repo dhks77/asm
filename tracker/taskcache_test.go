@@ -1,6 +1,9 @@
 package tracker
 
 import (
+	"encoding/json"
+	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -64,5 +67,35 @@ func TestCachedTrackerUsesSharedTaskCache(t *testing.T) {
 	}
 	if inner.resolveCount != 1 {
 		t.Fatalf("inner resolve count = %d, want %d", inner.resolveCount, 1)
+	}
+}
+
+func TestTaskCacheConcurrentSaveKeepsReadableSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cache := NewTaskCache("/tmp/root", time.Hour)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			cache.Set("/tmp/repo", "feature/123", TaskInfo{Name: "Task"})
+			cache.StoreBranch("feature/"+time.Unix(int64(i), 0).UTC().Format("150405"), TaskInfo{Name: "Task"})
+		}(i)
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(cache.path)
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	var snapshot taskCacheSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatalf("cache snapshot is not valid json: %v", err)
+	}
+	if len(snapshot.Paths) == 0 {
+		t.Fatal("expected path entries in snapshot")
 	}
 }

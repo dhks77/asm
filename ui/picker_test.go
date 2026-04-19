@@ -141,7 +141,7 @@ func TestPickerSeedsCachedBranchAndQueuesMetadataSequentially(t *testing.T) {
 		cachedBranches: map[string]string{},
 		branchVerified: map[string]bool{},
 		queuedBranches: map[string]bool{},
-		queuedTasks:    map[string]bool{},
+		taskFetch:      newAsyncQueue[queuedTaskResolve](trackerFetchConcurrency, taskResolveQueueKey),
 		selectedItems:  map[string]bool{},
 	}
 
@@ -167,7 +167,7 @@ func TestPickerSeedsCachedBranchAndQueuesMetadataSequentially(t *testing.T) {
 	if !got.branchFetchPending {
 		t.Fatalf("expected first branch fetch to start immediately")
 	}
-	if got.taskFetchPending {
+	if got.taskFetch.Active() {
 		t.Fatalf("task fetch should not start before branch verification")
 	}
 	if len(got.branchFetchQueue) != 1 || got.branchFetchQueue[0] != "/tmp/b" {
@@ -274,11 +274,12 @@ func TestHandleBranchResolvedReusesCachedBranchInfoOnPathSwitch(t *testing.T) {
 	m := PickerModel{
 		tracker:        fakePickerTracker{},
 		taskCache:      cache,
+		directories:    []worktree.Worktree{{Name: "repo", Path: "/tmp/repo"}},
 		branches:       map[string]string{},
 		taskInfos:      map[string]tracker.TaskInfo{"/tmp/repo": {Name: "Old Task"}},
 		cachedBranches: map[string]string{"/tmp/repo": "feature/old"},
 		branchVerified: map[string]bool{},
-		queuedTasks:    map[string]bool{},
+		taskFetch:      newAsyncQueue[queuedTaskResolve](trackerFetchConcurrency, taskResolveQueueKey),
 		selectedItems:  map[string]bool{},
 	}
 
@@ -294,8 +295,8 @@ func TestHandleBranchResolvedReusesCachedBranchInfoOnPathSwitch(t *testing.T) {
 	if got.cachedBranches["/tmp/repo"] != "feature/new" {
 		t.Fatalf("cachedBranches = %q, want %q", got.cachedBranches["/tmp/repo"], "feature/new")
 	}
-	if len(got.taskFetchQueue) != 0 {
-		t.Fatalf("expected no queued task fetch, got %#v", got.taskFetchQueue)
+	if got.taskFetch.Active() {
+		t.Fatalf("expected no queued task fetch")
 	}
 
 	entry, ok := cache.GetEntry("/tmp/repo")
@@ -307,6 +308,36 @@ func TestHandleBranchResolvedReusesCachedBranchInfoOnPathSwitch(t *testing.T) {
 	}
 	if entry.Info.Name != "New Task" {
 		t.Fatalf("path cache task name = %q, want %q", entry.Info.Name, "New Task")
+	}
+}
+
+func TestPickerIgnoresStaleTaskResolvedForOldBranch(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{{Name: "repo", Path: "/tmp/repo"}},
+		branches: map[string]string{
+			"/tmp/repo": "feature/new",
+		},
+		taskInfos: map[string]tracker.TaskInfo{
+			"/tmp/repo": {Name: "New Task"},
+		},
+		branchVerified: map[string]bool{"/tmp/repo": true},
+		taskFetch:      newAsyncQueue[queuedTaskResolve](trackerFetchConcurrency, taskResolveQueueKey),
+		taskResults:    newAsyncResultBuffer[TaskResolvedMsg](),
+		selectedItems:  map[string]bool{},
+	}
+	m.taskFetch.Enqueue(queuedTaskResolve{Path: "/tmp/repo", Branch: "feature/old"})
+	m.taskFetch.StartAvailable(nil)
+	m.taskResults.Push(TaskResolvedMsg{
+		Path:   "/tmp/repo",
+		Branch: "feature/old",
+		Info:   tracker.TaskInfo{Name: "Old Task"},
+	})
+
+	model, _ := m.handleTaskPoll()
+	got := model.(PickerModel)
+
+	if got.taskInfos["/tmp/repo"].Name != "New Task" {
+		t.Fatalf("taskInfos reused stale name = %q, want %q", got.taskInfos["/tmp/repo"].Name, "New Task")
 	}
 }
 
