@@ -6,19 +6,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
 // PluginInfo is the JSON response from `<plugin> info`.
 type PluginInfo struct {
-	Name          string   `json:"name"`
-	DisplayName   string   `json:"display_name"`
-	Command       string   `json:"command"`
-	Args          []string `json:"args"`
+	Name        string   `json:"name"`
+	DisplayName string   `json:"display_name"`
+	Command     string   `json:"command"`
+	Args        []string `json:"args"`
 	// ResumeArgs is prepended to Args when asm wants to resume a prior
 	// session. Plugins that can't resume omit this field (stays nil).
-	ResumeArgs   []string `json:"resume_args,omitempty"`
-	NeedsContent bool     `json:"needs_content"`
+	ResumeArgs           []string `json:"resume_args,omitempty"`
+	NeedsContent         bool     `json:"needs_content"`
+	CMUXNotificationHook string   `json:"cmux_notification_hook,omitempty"`
 }
 
 type detectStateRequest struct {
@@ -66,17 +68,29 @@ func LoadPlugin(path string) (*PluginProvider, error) {
 }
 
 func (p *PluginProvider) Name() string        { return p.info.Name }
-func (p *PluginProvider) DisplayName() string  { return p.info.DisplayName }
-func (p *PluginProvider) Command() string      { return p.info.Command }
-func (p *PluginProvider) Args() []string       { return p.info.Args }
+func (p *PluginProvider) DisplayName() string { return p.info.DisplayName }
+func (p *PluginProvider) Command() string     { return p.info.Command }
+func (p *PluginProvider) Args() []string      { return p.info.Args }
+
 // ResumeArgs returns the plugin's declared resume args regardless of cwd —
 // plugins can't gate on per-cwd session existence (the protocol is static
 // JSON). Plugin authors that can't tolerate a "resume with no history" call
 // should leave resume_args unset.
-func (p *PluginProvider) ResumeArgs(cwd string) []string { return p.info.ResumeArgs }
-func (p *PluginProvider) PluginPath() string   { return p.path }
+func (p *PluginProvider) ResumeArgs(cwd string) []string {
+	if args, ok := p.dynamicResumeArgs(cwd); ok {
+		return args
+	}
+	return p.info.ResumeArgs
+}
+func (p *PluginProvider) PluginPath() string { return p.path }
 func (p *PluginProvider) NeedsContent(title string) bool {
+	if needsContent, ok := p.dynamicNeedsContent(title); ok {
+		return needsContent
+	}
 	return p.info.NeedsContent
+}
+func (p *PluginProvider) CMUXNotificationHook() string {
+	return strings.TrimSpace(p.info.CMUXNotificationHook)
 }
 
 // DetectState calls `<plugin> detect-state` with title+content via stdin.
@@ -116,4 +130,32 @@ func parseStateName(s string) State {
 	default:
 		return StateUnknown
 	}
+}
+
+func (p *PluginProvider) dynamicResumeArgs(cwd string) ([]string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, p.path, "resume-args", cwd).Output()
+	if err != nil {
+		return nil, false
+	}
+	var args []string
+	if err := json.Unmarshal(out, &args); err != nil {
+		return nil, false
+	}
+	return args, true
+}
+
+func (p *PluginProvider) dynamicNeedsContent(title string) (bool, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, p.path, "needs-content", title).Output()
+	if err != nil {
+		return false, false
+	}
+	var value bool
+	if err := json.Unmarshal(out, &value); err != nil {
+		return false, false
+	}
+	return value, true
 }

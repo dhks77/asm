@@ -145,8 +145,8 @@ func main() {
 	}
 
 	registry := buildRegistry(cfg)
-	taskCache := tracker.NewTaskCache(rootPath, 7*24*time.Hour)
-	t := buildTracker(cfg, rootPath, taskCache)
+	var taskCache *tracker.TaskCache
+	var t tracker.Tracker
 
 	if *deleteMode != "" {
 		runDelete(*deleteMode, *deleteTaskName, *deleteDirty, *deleteWorktree)
@@ -182,7 +182,9 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 		overrides[name] = provider.BuiltinOverride{Command: pc.Command, Args: pc.Args}
 	}
 	for _, p := range provider.Builtins(overrides) {
-		reg.Register(p)
+		if err := reg.Register(p); err != nil {
+			logErr("Warning: failed to register built-in provider %q: %v\n", p.Name(), err)
+		}
 	}
 
 	// Load plugins from ~/.asm/plugins/
@@ -198,7 +200,9 @@ func buildRegistry(cfg *config.Config) *provider.Registry {
 				logErr("Warning: failed to load plugin %q: %v\n", entry.Name(), err)
 				continue
 			}
-			reg.Register(p)
+			if err := reg.Register(p); err != nil {
+				logErr("Warning: failed to register provider plugin %q: %v\n", entry.Name(), err)
+			}
 		}
 	}
 
@@ -649,8 +653,8 @@ func runBatchConfirm() {
 }
 
 func runSettings(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker) {
-	plugins := collectConfigurablePlugins(registry, t)
-	trackerNames := append(tracker.BuiltinNames(), tracker.ListNames(config.TrackerDir())...)
+	plugins := collectConfigurablePlugins(rootPath, registry)
+	trackerNames := tracker.DefaultService().Names()
 	ideNames := ide.Names(buildIDEs(cfg))
 	model := ui.NewSettingsModel(cfg, rootPath, registry.Names(), trackerNames, ideNames, plugins)
 	p := tea.NewProgram(model, tea.WithAltScreen())
@@ -661,43 +665,31 @@ func runSettings(cfg *config.Config, rootPath string, registry *provider.Registr
 	}
 }
 
-func collectConfigurablePlugins(registry *provider.Registry, t tracker.Tracker) []plugincfg.Entry {
+func collectConfigurablePlugins(rootPath string, registry *provider.Registry) []plugincfg.Entry {
 	var entries []plugincfg.Entry
 
-	// AI provider plugins
+	// AI provider entries
 	for _, name := range registry.Names() {
 		p := registry.Get(name)
-		if pp, ok := p.(*provider.PluginProvider); ok {
-			entries = append(entries, plugincfg.Entry{
-				Name:     pp.DisplayName(),
-				Category: "provider",
-				Path:     pp.PluginPath(),
-			})
+		if p == nil {
+			continue
+		}
+		entry := plugincfg.Entry{
+			Name:     p.DisplayName(),
+			Category: "provider",
+		}
+		if pp, ok := p.(provider.PluginBacked); ok {
+			entry.Path = pp.PluginPath()
+			entries = append(entries, entry)
+			continue
+		}
+		if source, ok := p.(plugincfg.Configurable); ok {
+			entry.Source = source
+			entries = append(entries, entry)
 		}
 	}
 
-	// Tracker (built-in or plugin)
-	if t != nil {
-		inner := t
-		if ct, ok := t.(*tracker.CachedTracker); ok {
-			inner = ct.Inner()
-		}
-		switch tr := inner.(type) {
-		case *tracker.PluginTracker:
-			entries = append(entries, plugincfg.Entry{
-				Name:     tr.Name(),
-				Category: "tracker",
-				Path:     tr.PluginPath(),
-			})
-		case plugincfg.Configurable:
-			entries = append(entries, plugincfg.Entry{
-				Name:     inner.(tracker.Tracker).Name(),
-				Category: "tracker",
-				Source:   tr,
-			})
-		}
-	}
-
+	entries = append(entries, tracker.DefaultService().Entries(rootPath)...)
 	return entries
 }
 

@@ -3,15 +3,13 @@ package tracker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"time"
 )
-
-type pluginInfo struct {
-	Name string `json:"name"`
-}
 
 type resolveResponse struct {
 	Name string `json:"name"`
@@ -30,6 +28,16 @@ type PluginTracker struct {
 
 // LoadTracker loads a tracker plugin from the given executable path.
 func LoadTracker(path string) (*PluginTracker, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%s is a directory", path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return nil, fmt.Errorf("%s is not executable", path)
+	}
 	name := filepath.Base(path)
 	return &PluginTracker{path: path, name: name}, nil
 }
@@ -58,6 +66,20 @@ func (t *PluginTracker) Resolve(branch string) TaskInfo {
 	return TaskInfo{}
 }
 
+func (t *PluginTracker) ConfigValues() (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, t.path, "config-get").Output()
+	if err != nil {
+		return nil, err
+	}
+	var values map[string]string
+	if err := json.Unmarshal(out, &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
 // ListNames returns the names of all tracker plugins in the directory.
 func ListNames(dir string) []string {
 	entries, err := os.ReadDir(dir)
@@ -66,16 +88,12 @@ func ListNames(dir string) []string {
 	}
 	var names []string
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if !trackerCandidate(entry) {
 			continue
 		}
-		name := entry.Name()
-		// Skip config files (e.g., dooray.conf)
-		if filepath.Ext(name) != "" {
-			continue
-		}
-		names = append(names, name)
+		names = append(names, entry.Name())
 	}
+	sort.Strings(names)
 	return names
 }
 
@@ -83,22 +101,23 @@ func ListNames(dir string) []string {
 // If preferred is non-empty, loads that specific tracker. Otherwise loads the first one found.
 // Returns nil if no trackers are found.
 func LoadFromDir(dir string, preferred string) Tracker {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-
 	// Try preferred tracker first
 	if preferred != "" {
 		pluginPath := filepath.Join(dir, preferred)
 		if t, err := LoadTracker(pluginPath); err == nil {
 			return t
 		}
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
 	}
 
 	// Fall back to first available
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != "" {
+		if !trackerCandidate(entry) {
 			continue
 		}
 		pluginPath := filepath.Join(dir, entry.Name())
@@ -109,4 +128,18 @@ func LoadFromDir(dir string, preferred string) Tracker {
 		return t
 	}
 	return nil
+}
+
+func trackerCandidate(entry os.DirEntry) bool {
+	if entry.IsDir() {
+		return false
+	}
+	if len(entry.Name()) == 0 || entry.Name()[0] == '.' {
+		return false
+	}
+	info, err := entry.Info()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return info.Mode()&0o111 != 0
 }

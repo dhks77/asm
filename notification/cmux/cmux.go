@@ -24,7 +24,7 @@ var (
 )
 
 // Send delivers a native cmux notification using workspace/surface metadata.
-func Send(title, body, provider string, info terminaldetect.Info) error {
+func Send(title, body, hook string, info terminaldetect.Info) error {
 	if info.CMUX == nil {
 		return fmt.Errorf("cmux metadata not available")
 	}
@@ -40,8 +40,8 @@ func Send(title, body, provider string, info terminaldetect.Info) error {
 	env := buildEnv(info)
 
 	var firstErr error
-	if isClaudeProvider(provider) {
-		if err := sendClaudeHook(cliPath, env, meta, title, body); err == nil {
+	if hook = strings.TrimSpace(hook); hook != "" {
+		if err := sendHook(cliPath, env, meta, hook, title, body); err == nil {
 			return nil
 		} else {
 			firstErr = err
@@ -57,7 +57,7 @@ func Send(title, body, provider string, info terminaldetect.Info) error {
 	return nil
 }
 
-func sendClaudeHook(cliPath string, env []string, meta terminaldetect.CMUXMetadata, title, body string) error {
+func sendHook(cliPath string, env []string, meta terminaldetect.CMUXMetadata, hook, title, body string) error {
 	payload, err := json.Marshal(struct {
 		Message string `json:"message"`
 	}{
@@ -68,7 +68,7 @@ func sendClaudeHook(cliPath string, env []string, meta terminaldetect.CMUXMetada
 	}
 
 	args := []string{
-		"claude-hook",
+		hook,
 		"notification",
 		"--workspace", meta.WorkspaceID,
 	}
@@ -159,10 +159,6 @@ func envValue(env []string, key string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func isClaudeProvider(provider string) bool {
-	return strings.EqualFold(strings.TrimSpace(provider), "claude")
 }
 
 func notificationMessage(title, body string) string {

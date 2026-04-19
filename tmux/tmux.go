@@ -14,6 +14,7 @@ import (
 
 	"github.com/nhn/asm/asmlog"
 	"github.com/nhn/asm/platform"
+	"github.com/nhn/asm/shelljoin"
 )
 
 // SessionID is the active logical asm session identifier.
@@ -764,10 +765,7 @@ func CreateDirectoryWindow(targetPath, dirPath, command string, args []string) e
 	}
 	syncHiddenWindowSize(winName)
 
-	aiCmd := command
-	for _, a := range args {
-		aiCmd += " " + a
-	}
+	aiCmd := shelljoin.Join(append([]string{command}, args...)...)
 
 	// After AI exits: signal via wait-for (instant event detection)
 	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(targetPath))
@@ -956,9 +954,14 @@ const tmuxCallTimeout = 3 * time.Second
 // runTmuxCmd runs a tmux command and wraps the error with stderr output
 // so callers get actionable messages instead of bare "exit status 1".
 func runTmuxCmd(args ...string) error {
-	cmd := exec.Command("tmux", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxCallTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tmux", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("tmux %s timed out after %s", strings.Join(args, " "), tmuxCallTimeout)
+		}
 		msg := strings.TrimSpace(string(out))
 		asmlog.Debugf("tmux: command failed session=%q args=%v err=%v output=%q", SessionName, args, err, msg)
 		if msg != "" {
@@ -1106,7 +1109,7 @@ func CreateTerminalWindow(targetPath, dirPath string) error {
 	}
 
 	exitSignal := fmt.Sprintf("tmux wait-for -S %s", TermExitSignalName(targetPath))
-	fullCmd := shell + " ; " + exitSignal
+	fullCmd := shelljoin.Join(shell) + " ; " + exitSignal
 
 	return runTmuxCmd("send-keys",
 		"-t", fmt.Sprintf("%s:%s", SessionName, winName),

@@ -1,5 +1,7 @@
 package provider
 
+import "fmt"
+
 // Registry manages registered AI providers.
 type Registry struct {
 	providers   map[string]Provider
@@ -15,12 +17,14 @@ func NewRegistry() *Registry {
 }
 
 // Register adds a provider to the registry.
-func (r *Registry) Register(p Provider) {
+func (r *Registry) Register(p Provider) error {
 	name := p.Name()
-	if _, exists := r.providers[name]; !exists {
-		r.order = append(r.order, name)
+	if _, exists := r.providers[name]; exists {
+		return fmt.Errorf("provider %q already registered", name)
 	}
+	r.order = append(r.order, name)
 	r.providers[name] = p
+	return nil
 }
 
 // SetDefault sets the default provider by name.

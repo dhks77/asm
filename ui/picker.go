@@ -179,6 +179,7 @@ type PickerModel struct {
 	workingPath          string // target path shown in working panel (AI session)
 	termPath             string // target path shown in working panel (terminal)
 	tracker              tracker.Tracker
+	trackerService       *tracker.Service
 	taskCache            *tracker.TaskCache
 	ides                 []ide.IDE
 	// cachedBranches tracks the branch each seeded taskInfo was observed
@@ -212,6 +213,10 @@ type PickerModel struct {
 }
 
 func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Registry, t tracker.Tracker, taskCache *tracker.TaskCache, ides []ide.IDE, restoreLast bool) PickerModel {
+	var trackerService *tracker.Service
+	if t == nil && taskCache == nil {
+		trackerService = tracker.DefaultService()
+	}
 	return PickerModel{
 		cfg:                  cfg,
 		rootPath:             rootPath,
@@ -236,6 +241,7 @@ func NewPickerModel(cfg *config.Config, rootPath string, registry *provider.Regi
 		clientFocused:        true,
 		selectedItems:        make(map[string]bool),
 		tracker:              t,
+		trackerService:       trackerService,
 		taskCache:            taskCache,
 		cachedBranches:       make(map[string]string),
 		branchVerified:       make(map[string]bool),
@@ -269,7 +275,7 @@ func (m *PickerModel) enqueueBranchFetch(path string) {
 }
 
 func (m *PickerModel) enqueueTaskFetch(path, branch string) {
-	if path == "" || branch == "" || m.tracker == nil {
+	if path == "" || branch == "" || (m.tracker == nil && m.trackerService == nil) {
 		return
 	}
 	key := taskResolveKey(path, branch)
@@ -406,18 +412,19 @@ func restoreSnapshotCmd(sessionID string, registry *provider.Registry) tea.Cmd {
 			if target.HasAI {
 				p := registry.Get(target.Provider)
 				if p == nil {
-					p = registry.Default()
-				}
-				args := p.Args()
-				if extra := p.ResumeArgs(target.Path); len(extra) > 0 {
-					args = append(append([]string(nil), extra...), args...)
-				}
-				if err := asmtmux.CreateDirectoryWindow(target.Path, target.Path, p.Command(), args); err != nil {
-					msg.Errors = append(msg.Errors, fmt.Sprintf("%s (AI): %v", filepath.Base(target.Path), err))
+					msg.Errors = append(msg.Errors, fmt.Sprintf("%s (AI): provider %q is no longer available", filepath.Base(target.Path), target.Provider))
 				} else {
-					_ = asmtmux.SetWindowOption(target.Path, "asm-provider", p.Name())
-					restored.HasAI = true
-					restored.Provider = p.Name()
+					args := p.Args()
+					if extra := p.ResumeArgs(target.Path); len(extra) > 0 {
+						args = append(append([]string(nil), extra...), args...)
+					}
+					if err := asmtmux.CreateDirectoryWindow(target.Path, target.Path, p.Command(), args); err != nil {
+						msg.Errors = append(msg.Errors, fmt.Sprintf("%s (AI): %v", filepath.Base(target.Path), err))
+					} else {
+						_ = asmtmux.SetWindowOption(target.Path, "asm-provider", p.Name())
+						restored.HasAI = true
+						restored.Provider = p.Name()
+					}
 				}
 			}
 			if target.HasTerm {
@@ -490,7 +497,10 @@ func (m *PickerModel) swapAIToWorkingPanel(targetPath string) bool {
 	if !asmtmux.WindowExists(asmtmux.WindowName(targetPath)) {
 		return false
 	}
-	asmtmux.SwapToWorkingPanel(targetPath)
+	if err := asmtmux.SwapToWorkingPanel(targetPath); err != nil {
+		m.err = fmt.Sprintf("Failed to show session: %v", err)
+		return false
+	}
 	m.workingPath = targetPath
 	m.termPath = ""
 	m.stabilizeCursor(targetPath)
@@ -501,7 +511,10 @@ func (m *PickerModel) swapTermToWorkingPanel(targetPath string) bool {
 	if !asmtmux.WindowExists(asmtmux.TerminalWindowName(targetPath)) {
 		return false
 	}
-	asmtmux.SwapTermToWorkingPanel(targetPath)
+	if err := asmtmux.SwapTermToWorkingPanel(targetPath); err != nil {
+		m.err = fmt.Sprintf("Failed to show terminal: %v", err)
+		return false
+	}
 	m.termPath = targetPath
 	m.workingPath = ""
 	m.stabilizeCursor(targetPath)
@@ -512,7 +525,10 @@ func (m *PickerModel) swapCurrentAIOut() bool {
 	if m.workingPath == "" {
 		return false
 	}
-	asmtmux.SwapBackFromWorkingPanel(m.workingPath)
+	if err := asmtmux.SwapBackFromWorkingPanel(m.workingPath); err != nil {
+		m.err = fmt.Sprintf("Failed to hide session: %v", err)
+		return false
+	}
 	m.workingPath = ""
 	return true
 }
@@ -521,7 +537,10 @@ func (m *PickerModel) swapCurrentTermOut() bool {
 	if m.termPath == "" {
 		return false
 	}
-	asmtmux.SwapTermBackFromWorkingPanel(m.termPath)
+	if err := asmtmux.SwapTermBackFromWorkingPanel(m.termPath); err != nil {
+		m.err = fmt.Sprintf("Failed to hide terminal: %v", err)
+		return false
+	}
 	m.termPath = ""
 	return true
 }
@@ -1099,11 +1118,18 @@ func (m *PickerModel) runDialogInWorkingPanelAtPath(dialogPath, windowName strin
 		return nil
 	}
 
+	prevWorkingPath := m.workingPath
+	prevTermPath := m.termPath
 	m.swapOutWorkingPanel()
 
 	exe, err := platform.Current().ExecutablePath()
 	if err != nil {
 		asmlog.Debugf("picker: dialog executable lookup failed window=%q err=%v", windowName, err)
+		if prevWorkingPath != "" {
+			m.swapAIToWorkingPanel(prevWorkingPath)
+		} else if prevTermPath != "" {
+			m.swapTermToWorkingPanel(prevTermPath)
+		}
 		return nil
 	}
 
@@ -1117,6 +1143,11 @@ func (m *PickerModel) runDialogInWorkingPanelAtPath(dialogPath, windowName strin
 	if err := asmtmux.RunInWorkingPanel(windowName, argv); err != nil {
 		asmlog.Debugf("picker: open-dialog failed session=%q window=%q err=%v", asmtmux.SessionName, windowName, err)
 		m.err = fmt.Sprintf("Failed to open %s: %v", windowName, err)
+		if prevWorkingPath != "" {
+			m.swapAIToWorkingPanel(prevWorkingPath)
+		} else if prevTermPath != "" {
+			m.swapTermToWorkingPanel(prevTermPath)
+		}
 		return nil
 	}
 	asmtmux.FocusWorkingPanel()
@@ -1307,7 +1338,10 @@ func (m *PickerModel) openDelete(wt *worktree.Worktree) tea.Cmd {
 func (m *PickerModel) showTerminalInWorkingPanel(targetPath, path string) tea.Cmd {
 	var cmd tea.Cmd
 	if !asmtmux.WindowExists(asmtmux.TerminalWindowName(targetPath)) {
-		asmtmux.CreateTerminalWindow(targetPath, path)
+		if err := asmtmux.CreateTerminalWindow(targetPath, path); err != nil {
+			m.err = fmt.Sprintf("Failed to open terminal: %v", err)
+			return nil
+		}
 		m.terminalStartTimes[targetPath] = time.Now()
 		cmd = waitForTermExitCmd(targetPath)
 	}
@@ -2200,6 +2234,7 @@ func (m PickerModel) renderErrorOverlay(view string) string {
 
 func (m PickerModel) scanDirectories() tea.Cmd {
 	cache := m.taskCache
+	service := m.trackerService
 	return func() tea.Msg {
 		activeKinds := asmtmux.ListActiveSessions()
 		var paths []string
@@ -2224,7 +2259,17 @@ func (m PickerModel) scanDirectories() tea.Cmd {
 		}
 		var tasks map[string]tracker.TaskInfo
 		var branches map[string]string
-		if cache != nil {
+		switch {
+		case service != nil:
+			tasks = make(map[string]tracker.TaskInfo, len(wts))
+			branches = make(map[string]string, len(wts))
+			for _, wt := range wts {
+				if e, ok := service.GetEntry(wt.Path); ok {
+					tasks[wt.Path] = e.Info
+					branches[wt.Path] = e.Branch
+				}
+			}
+		case cache != nil:
 			tasks = make(map[string]tracker.TaskInfo, len(wts))
 			branches = make(map[string]string, len(wts))
 			for _, wt := range wts {
@@ -2253,8 +2298,15 @@ func (m PickerModel) fetchBranch(path string) tea.Cmd {
 }
 
 func (m PickerModel) fetchTaskName(path string, branch string) tea.Cmd {
+	service := m.trackerService
 	t := m.tracker
 	return func() tea.Msg {
+		if service != nil {
+			return TaskResolvedMsg{Path: path, Branch: branch, Info: service.Resolve(path, branch)}
+		}
+		if t == nil {
+			return TaskResolvedMsg{Path: path, Branch: branch}
+		}
 		info := t.Resolve(branch)
 		return TaskResolvedMsg{Path: path, Branch: branch, Info: info}
 	}
@@ -2268,7 +2320,7 @@ func flashExpireCmd(targetPath string, startedAt time.Time, after time.Duration)
 
 // notifyCompletionCmd sends a desktop notification when an AI session finishes.
 // displayName is the resolved title (task name preferred, falling back to folder).
-func notifyCompletionCmd(targetPath, displayName, providerName, sessionName, currentWorkingPath string) tea.Cmd {
+func notifyCompletionCmd(targetPath, displayName, providerName, cmuxHook, sessionName, currentWorkingPath string) tea.Cmd {
 	return func() tea.Msg {
 		isDisplayed := currentWorkingPath == targetPath
 		content, err := asmtmux.CapturePaneHistory(targetPath, isDisplayed, 80)
@@ -2278,6 +2330,7 @@ func notifyCompletionCmd(targetPath, displayName, providerName, sessionName, cur
 				Title:       title,
 				Body:        "done",
 				Provider:    providerName,
+				CMUXHook:    cmuxHook,
 				SessionName: sessionName,
 			})
 			return nil
@@ -2291,10 +2344,25 @@ func notifyCompletionCmd(targetPath, displayName, providerName, sessionName, cur
 			Title:       title,
 			Body:        body,
 			Provider:    providerName,
+			CMUXHook:    cmuxHook,
 			SessionName: sessionName,
 		})
 		return nil
 	}
+}
+
+func (m *PickerModel) notificationHookForProvider(name string) string {
+	if m.registry == nil {
+		return ""
+	}
+	p := m.registry.Get(name)
+	if p == nil {
+		return ""
+	}
+	if hookProvider, ok := p.(provider.CMUXHookProvider); ok {
+		return hookProvider.CMUXNotificationHook()
+	}
+	return ""
 }
 
 // extractLastResponse extracts a short snippet of the last meaningful AI

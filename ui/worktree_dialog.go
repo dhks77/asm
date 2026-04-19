@@ -60,6 +60,13 @@ type wtTaskRetryTickMsg struct {
 	remaining int
 }
 
+type wtBranchesRefreshedMsg struct {
+	RepoDir      string
+	Branches     []worktree.Branch
+	CachedTasks  map[string]tracker.TaskInfo
+	RefreshError error
+}
+
 type worktreeRepoChoice struct {
 	Path string
 	Root string
@@ -80,24 +87,30 @@ type WorktreeDialogModel struct {
 	newBranchName string
 	baseBranch    string
 
-	rootPath    string
-	dirPath     string
-	repoDir     string
-	repoName    string
-	repoChoices []worktreeRepoChoice
-	repoIndex   int
-	tracker     tracker.Tracker
-	taskInfos   map[string]tracker.TaskInfo // branch name -> task info
-	width       int
-	height      int
-	err         string
+	rootPath       string
+	dirPath        string
+	repoDir        string
+	repoName       string
+	repoChoices    []worktreeRepoChoice
+	repoIndex      int
+	tracker        tracker.Tracker
+	trackerService *tracker.Service
+	taskInfos      map[string]tracker.TaskInfo // branch name -> task info
+	width          int
+	height         int
+	err            string
 }
 
 func NewWorktreeDialogModel(t tracker.Tracker) WorktreeDialogModel {
+	var trackerService *tracker.Service
+	if t == nil {
+		trackerService = tracker.DefaultService()
+	}
 	return WorktreeDialogModel{
-		maxVisible: 10,
-		tracker:    t,
-		taskInfos:  make(map[string]tracker.TaskInfo),
+		maxVisible:     10,
+		tracker:        t,
+		trackerService: trackerService,
+		taskInfos:      make(map[string]tracker.TaskInfo),
 	}
 }
 
@@ -256,12 +269,8 @@ func currentRepoIndex(choices []worktreeRepoChoice, currentPath string) int {
 
 func (m *WorktreeDialogModel) loadBranches(dirPath string) tea.Cmd {
 	t := m.tracker
+	service := m.trackerService
 	return func() tea.Msg {
-		// Refresh remotes before listing so newly-pushed branches appear
-		// without the user having to fetch in a shell first. Best-effort:
-		// offline / auth failure / slow remote shouldn't block opening
-		// the dialog — we fall through to the cached branch list.
-		_ = worktree.FetchAllRemotes(dirPath)
 		branches, err := worktree.ListBranches(dirPath)
 		if err != nil {
 			return BranchesLoadedMsg{Err: err}
@@ -271,7 +280,14 @@ func (m *WorktreeDialogModel) loadBranches(dirPath string) tea.Cmd {
 			_, repoName = config.ProjectIdentity(dirPath)
 		}
 		var cached map[string]tracker.TaskInfo
-		if peeker, ok := t.(tracker.Peeker); ok {
+		if service != nil {
+			cached = make(map[string]tracker.TaskInfo, len(branches))
+			for _, b := range branches {
+				if info, ok := service.Peek(dirPath, b.Name); ok {
+					cached[b.Name] = info
+				}
+			}
+		} else if peeker, ok := t.(tracker.Peeker); ok {
 			cached = make(map[string]tracker.TaskInfo, len(branches))
 			for _, b := range branches {
 				if info, ok := peeker.Peek(b.Name); ok {
@@ -284,6 +300,40 @@ func (m *WorktreeDialogModel) loadBranches(dirPath string) tea.Cmd {
 			RepoDir:     dirPath,
 			RepoName:    repoName,
 			CachedTasks: cached,
+		}
+	}
+}
+
+func (m WorktreeDialogModel) refreshBranches(dirPath string) tea.Cmd {
+	service := m.trackerService
+	t := m.tracker
+	return func() tea.Msg {
+		refreshErr := worktree.FetchAllRemotes(dirPath)
+		branches, err := worktree.ListBranches(dirPath)
+		if err != nil {
+			return wtBranchesRefreshedMsg{RepoDir: dirPath, RefreshError: err}
+		}
+		var cached map[string]tracker.TaskInfo
+		if service != nil {
+			cached = make(map[string]tracker.TaskInfo, len(branches))
+			for _, b := range branches {
+				if info, ok := service.Peek(dirPath, b.Name); ok {
+					cached[b.Name] = info
+				}
+			}
+		} else if peeker, ok := t.(tracker.Peeker); ok {
+			cached = make(map[string]tracker.TaskInfo, len(branches))
+			for _, b := range branches {
+				if info, ok := peeker.Peek(b.Name); ok {
+					cached[b.Name] = info
+				}
+			}
+		}
+		return wtBranchesRefreshedMsg{
+			RepoDir:      dirPath,
+			Branches:     branches,
+			CachedTasks:  cached,
+			RefreshError: refreshErr,
 		}
 	}
 }
@@ -354,7 +404,7 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 			m.taskInfos[name] = info
 		}
 		m.applyFilter()
-		if m.tracker != nil {
+		if m.tracker != nil || m.trackerService != nil {
 			var cmds []tea.Cmd
 			for _, b := range m.branches {
 				// Skip fetches for branches already resolved from cache.
@@ -363,9 +413,26 @@ func (m WorktreeDialogModel) Update(msg tea.Msg) (WorktreeDialogModel, tea.Cmd) 
 				}
 				cmds = append(cmds, m.fetchTaskName(m.repoDir, b.Name))
 			}
+			cmds = append(cmds, m.refreshBranches(m.repoDir))
 			cmds = append(cmds, wtTaskRetryTickCmd(5))
 			return m, tea.Batch(cmds...)
 		}
+		return m, m.refreshBranches(m.repoDir)
+
+	case wtBranchesRefreshedMsg:
+		if m.repoDir != "" && msg.RepoDir != "" && filepath.Clean(msg.RepoDir) != filepath.Clean(m.repoDir) {
+			return m, nil
+		}
+		if len(msg.Branches) == 0 {
+			return m, nil
+		}
+		m.branches = msg.Branches
+		for name, info := range msg.CachedTasks {
+			if _, ok := m.taskInfos[name]; !ok {
+				m.taskInfos[name] = info
+			}
+		}
+		m.applyFilter()
 		return m, nil
 
 	case wtTaskResolvedMsg:
@@ -603,7 +670,14 @@ func wtTaskRetryTickCmd(remaining int) tea.Cmd {
 
 func (m WorktreeDialogModel) fetchTaskName(repoDir, branch string) tea.Cmd {
 	t := m.tracker
+	service := m.trackerService
 	return func() tea.Msg {
+		if service != nil {
+			return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch, Info: service.Resolve(repoDir, branch)}
+		}
+		if t == nil {
+			return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch}
+		}
 		info := t.Resolve(branch)
 		return wtTaskResolvedMsg{RepoDir: repoDir, Branch: branch, Info: info}
 	}

@@ -23,7 +23,6 @@ const (
 	launcherTabFavorites launcherTab = iota
 	launcherTabDirectories
 	launcherTabRecent
-	launcherTabRepos
 )
 
 var launcherTabs = []string{"Favorites", "Directories", "Recent"}
@@ -58,6 +57,7 @@ type LauncherModel struct {
 	height               int
 	err                  string
 	tracker              tracker.Tracker
+	trackerService       *tracker.Service
 	taskCache            *tracker.TaskCache
 	loadVersion          int
 	taskFetchQueue       []string
@@ -67,11 +67,16 @@ type LauncherModel struct {
 
 func NewLauncherModel(_ string, t tracker.Tracker, taskCache *tracker.TaskCache) LauncherModel {
 	clean := launcherHomePath()
+	var trackerService *tracker.Service
+	if t == nil && taskCache == nil {
+		trackerService = tracker.DefaultService()
+	}
 	return LauncherModel{
-		tab:         launcherTabFavorites,
-		currentPath: clean,
-		tracker:     t,
-		taskCache:   taskCache,
+		tab:            launcherTabFavorites,
+		currentPath:    clean,
+		tracker:        t,
+		trackerService: trackerService,
+		taskCache:      taskCache,
 	}
 }
 
@@ -390,13 +395,6 @@ func (m LauncherModel) handleEnter() (LauncherModel, tea.Cmd) {
 		asmlog.Debugf("launcher: drilling into favorite repo session=%q repo_path=%q", asmtmux.SessionName, m.repoPath)
 		return m, m.triggerReload()
 	}
-	if m.tab == launcherTabRepos && entry.kind == "repo" {
-		m.repoPath = entry.path
-		m.cursor = 0
-		m.filter = ""
-		asmlog.Debugf("launcher: drilling into repo session=%q repo_path=%q", asmtmux.SessionName, m.repoPath)
-		return m, m.triggerReload()
-	}
 	m.SelectedPath = entry.path
 	asmlog.Debugf("launcher: selected path=%q session=%q", m.SelectedPath, asmtmux.SessionName)
 	return m, tea.Quit
@@ -471,14 +469,6 @@ func (m LauncherModel) favoriteToggleTarget() (asmfavorites.Kind, string, bool) 
 		default:
 			return "", "", false
 		}
-	case launcherTabRepos:
-		if m.repoPath != "" {
-			return asmfavorites.KindRepo, m.repoPath, true
-		}
-		if entry == nil || entry.kind != "repo" {
-			return "", "", false
-		}
-		return asmfavorites.KindRepo, entry.path, true
 	}
 	return "", "", false
 }
@@ -517,7 +507,7 @@ func (m LauncherModel) reload(version int) tea.Cmd {
 			return launcherEntriesLoadedMsg{version: version, err: err}
 		}
 		favoriteSet := launcherFavoriteSet(favoriteEntries)
-		resolver := newLauncherTaskResolver(t, taskCache)
+		resolver := newLauncherTaskResolver(t, taskCache, m.trackerService)
 		switch tab {
 		case launcherTabFavorites:
 			if repoPath != "" {
@@ -533,7 +523,7 @@ func (m LauncherModel) reload(version int) tea.Cmd {
 		case launcherTabRecent:
 			entries, pendingPaths, err := loadRecentEntries(filter, activeTargets, favoriteSet, resolver)
 			return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
-		case launcherTabDirectories, launcherTabRepos:
+		case launcherTabDirectories:
 			if repoPath != "" {
 				entries, pendingPaths, err := loadRepoWorktreeEntries(repoPath, filter, activeTargets, favoriteSet, resolver)
 				return launcherEntriesLoadedMsg{version: version, entries: entries, pendingPaths: pendingPaths, err: err}
@@ -840,14 +830,20 @@ func launcherFavoriteKindForPath(path string) asmfavorites.Kind {
 
 type launcherTaskResolver struct {
 	tracker   tracker.Tracker
+	service   *tracker.Service
 	taskCache *tracker.TaskCache
 	peeker    tracker.Peeker
 	taskNames map[string]string
 }
 
-func newLauncherTaskResolver(t tracker.Tracker, taskCache *tracker.TaskCache) *launcherTaskResolver {
+func newLauncherTaskResolver(t tracker.Tracker, taskCache *tracker.TaskCache, services ...*tracker.Service) *launcherTaskResolver {
+	var service *tracker.Service
+	if len(services) > 0 {
+		service = services[0]
+	}
 	r := &launcherTaskResolver{
 		tracker:   t,
+		service:   service,
 		taskCache: taskCache,
 		taskNames: make(map[string]string),
 	}
@@ -861,6 +857,12 @@ func (r *launcherTaskResolver) cachedTaskName(path string) (string, bool) {
 	clean := filepath.Clean(path)
 	if name, ok := r.taskNames[clean]; ok {
 		return name, false
+	}
+	if r.service != nil {
+		if entry, ok := r.service.GetEntry(clean); ok {
+			r.taskNames[clean] = entry.Info.Name
+			return entry.Info.Name, false
+		}
 	}
 	if r.taskCache != nil {
 		if entry, ok := r.taskCache.GetEntry(clean); ok {
@@ -936,6 +938,15 @@ func (r *launcherTaskResolver) resolveRepoTaskName(path, branch string) string {
 	if branch == "" {
 		return ""
 	}
+	if r.service != nil {
+		if info, ok := r.service.Peek(path, branch); ok {
+			r.persistTaskName(path, branch, info)
+			return info.Name
+		}
+		info := r.service.Resolve(path, branch)
+		r.persistTaskName(path, branch, info)
+		return info.Name
+	}
 	if r.peeker != nil {
 		if info, ok := r.peeker.Peek(branch); ok {
 			r.persistTaskName(path, branch, info)
@@ -951,10 +962,16 @@ func (r *launcherTaskResolver) resolveRepoTaskName(path, branch string) string {
 }
 
 func (r *launcherTaskResolver) persistTaskName(path, branch string, info tracker.TaskInfo) {
-	if r.taskCache == nil || info.Name == "" {
+	if info.Name == "" {
 		return
 	}
-	r.taskCache.Set(path, branch, info)
+	if r.service != nil {
+		r.service.Set(path, branch, info)
+		return
+	}
+	if r.taskCache != nil {
+		r.taskCache.Set(path, branch, info)
+	}
 }
 
 func matchesLauncherFilter(filter string, parts ...string) bool {
@@ -984,8 +1001,9 @@ func (m LauncherModel) startNextTaskFetch() tea.Cmd {
 func (m LauncherModel) fetchTaskName(version int, path string) tea.Cmd {
 	t := m.tracker
 	taskCache := m.taskCache
+	service := m.trackerService
 	return func() tea.Msg {
-		resolver := newLauncherTaskResolver(t, taskCache)
+		resolver := newLauncherTaskResolver(t, taskCache, service)
 		return launcherTaskResolvedMsg{
 			version:  version,
 			path:     filepath.Clean(path),

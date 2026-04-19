@@ -139,3 +139,26 @@ func TestSettingsLocalViewHidesThemeField(t *testing.T) {
 		t.Fatalf("expected local settings view to hide Theme field:\n%s", m.View())
 	}
 }
+
+func TestSettingsTrackerNoneSavesEmptyDefaultTracker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	m := NewSettingsModel(nil, "", []string{"claude"}, []string{"dooray"}, nil, nil)
+	m.scopeIdx = 0
+	m.loadGeneralFromScope()
+	m.rebuildItems()
+	m.selectedTracker = 0
+
+	if cmd := m.save(); cmd != nil {
+		_ = cmd()
+	}
+
+	userCfg, err := config.LoadScope(config.ScopeUser, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userCfg.DefaultTracker != "" {
+		t.Fatalf("user default_tracker = %q, want empty", userCfg.DefaultTracker)
+	}
+}

@@ -27,6 +27,9 @@ func (p *ClaudeProvider) Name() string        { return "claude" }
 func (p *ClaudeProvider) DisplayName() string { return "Claude" }
 func (p *ClaudeProvider) Command() string     { return p.command }
 func (p *ClaudeProvider) Args() []string      { return p.args }
+func (p *ClaudeProvider) CMUXNotificationHook() string {
+	return "claude-hook"
+}
 
 // ResumeArgs returns ["--continue"] only when a prior conversation exists
 // for cwd. Claude Code's --continue exits with an error when there is no

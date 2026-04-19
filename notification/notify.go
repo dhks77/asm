@@ -23,6 +23,7 @@ type Request struct {
 	Title       string
 	Body        string
 	Provider    string
+	CMUXHook    string
 	SessionName string
 }
 
@@ -55,6 +56,7 @@ func SendRequest(req Request) {
 	req.Title = sanitizeText(req.Title, 96)
 	req.Body = sanitizeText(req.Body, 180)
 	req.Provider = strings.TrimSpace(req.Provider)
+	req.CMUXHook = strings.TrimSpace(req.CMUXHook)
 	req.SessionName = strings.TrimSpace(req.SessionName)
 	if req.Title == "" && req.Body == "" {
 		return
@@ -120,7 +122,7 @@ func RunHelper(encoded string) error {
 
 func deliver(req Request, info terminaldetect.Info) {
 	if info.Kind == terminaldetect.KindCMUX {
-		if err := sendCMUXNotification(req.Title, req.Body, req.Provider, info); err == nil {
+		if err := sendCMUXNotification(req.Title, req.Body, req.CMUXHook, info); err == nil {
 			return
 		} else {
 			asmlog.Debugf("notification: cmux send failed session=%q err=%v", req.SessionName, err)

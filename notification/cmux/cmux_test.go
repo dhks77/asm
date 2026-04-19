@@ -82,7 +82,7 @@ func TestBuildEnvUsesMinimalBaseEnv(t *testing.T) {
 	}
 }
 
-func TestSendUsesClaudeHookForClaudeProvider(t *testing.T) {
+func TestSendUsesConfiguredHook(t *testing.T) {
 	prevStat := statPath
 	prevRun := runCommand
 	defer func() {
@@ -104,7 +104,7 @@ func TestSendUsesClaudeHookForClaudeProvider(t *testing.T) {
 		return nil
 	}
 
-	err := Send("ASM - task", "done", "claude", terminaldetect.Info{
+	err := Send("ASM - task", "done", "claude-hook", terminaldetect.Info{
 		Kind: terminaldetect.KindCMUX,
 		CMUX: &terminaldetect.CMUXMetadata{
 			WorkspaceID:    "workspace:1",
@@ -130,7 +130,7 @@ func TestSendUsesClaudeHookForClaudeProvider(t *testing.T) {
 	}
 }
 
-func TestSendFallsBackToGenericNotifyWhenClaudeHookFails(t *testing.T) {
+func TestSendFallsBackToGenericNotifyWhenHookFails(t *testing.T) {
 	prevStat := statPath
 	prevRun := runCommand
 	defer func() {
@@ -149,7 +149,7 @@ func TestSendFallsBackToGenericNotifyWhenClaudeHookFails(t *testing.T) {
 		return nil
 	}
 
-	err := Send("ASM - task", "done", "claude", terminaldetect.Info{
+	err := Send("ASM - task", "done", "claude-hook", terminaldetect.Info{
 		Kind: terminaldetect.KindCMUX,
 		CMUX: &terminaldetect.CMUXMetadata{
 			WorkspaceID:    "workspace:1",

@@ -34,24 +34,26 @@ type Entry struct {
 }
 
 // GetFields returns the field definitions for the entry.
-func (e Entry) GetFields() []Field {
+func (e Entry) GetFields() ([]Field, error) {
 	if e.Source != nil {
-		return e.Source.ConfigFields()
+		return e.Source.ConfigFields(), nil
 	}
-	fields, _ := getPluginFields(e.Path)
-	return fields
+	return getPluginFields(e.Path)
 }
 
 // GetValues returns the current values for the entry.
-func (e Entry) GetValues() map[string]string {
+func (e Entry) GetValues() (map[string]string, error) {
 	if e.Source != nil {
-		return e.Source.ConfigGet()
+		return e.Source.ConfigGet(), nil
 	}
-	values, _ := getPluginValues(e.Path)
+	values, err := getPluginValues(e.Path)
+	if err != nil {
+		return nil, err
+	}
 	if values == nil {
 		values = make(map[string]string)
 	}
-	return values
+	return values, nil
 }
 
 // SetValues saves the values for the entry.

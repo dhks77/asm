@@ -46,10 +46,10 @@ func TestSendRequestUsesCMUXWhenDetected(t *testing.T) {
 			CMUX: &terminaldetect.CMUXMetadata{WorkspaceID: "workspace:1"},
 		}, nil
 	}
-	sendCMUXNotification = func(title, body, provider string, info terminaldetect.Info) error {
+	sendCMUXNotification = func(title, body, hook string, info terminaldetect.Info) error {
 		cmuxCalls++
-		if provider != "claude" {
-			t.Fatalf("provider = %q, want %q", provider, "claude")
+		if hook != "claude-hook" {
+			t.Fatalf("hook = %q, want %q", hook, "claude-hook")
 		}
 		return nil
 	}
@@ -58,7 +58,7 @@ func TestSendRequestUsesCMUXWhenDetected(t *testing.T) {
 		return nil
 	}
 
-	SendRequest(Request{Title: "ASM", Body: "done", Provider: "claude", SessionName: "asm-default"})
+	SendRequest(Request{Title: "ASM", Body: "done", Provider: "claude", CMUXHook: "claude-hook", SessionName: "asm-default"})
 
 	if cmuxCalls != 1 {
 		t.Fatalf("cmux calls = %d, want 1", cmuxCalls)
@@ -101,7 +101,7 @@ func TestSendRequestFallsBackToOSWhenCMUXFails(t *testing.T) {
 			CMUX: &terminaldetect.CMUXMetadata{WorkspaceID: "workspace:1"},
 		}, nil
 	}
-	sendCMUXNotification = func(title, body, provider string, info terminaldetect.Info) error {
+	sendCMUXNotification = func(title, body, hook string, info terminaldetect.Info) error {
 		cmuxCalls++
 		return errors.New("broken pipe")
 	}
@@ -159,7 +159,7 @@ func TestSendRequestUsesHelperForCMUXInsideTmux(t *testing.T) {
 		spawnCalls++
 		return nil
 	}
-	sendCMUXNotification = func(title, body, provider string, info terminaldetect.Info) error {
+	sendCMUXNotification = func(title, body, hook string, info terminaldetect.Info) error {
 		t.Fatal("cmux backend should not be called directly when helper spawn succeeds")
 		return nil
 	}
@@ -223,7 +223,7 @@ func TestSendRequestUsesTMUXPassthroughForCMUXInsideTmux(t *testing.T) {
 		t.Fatal("helper spawn should not be called when passthrough succeeds")
 		return nil
 	}
-	sendCMUXNotification = func(title, body, provider string, info terminaldetect.Info) error {
+	sendCMUXNotification = func(title, body, hook string, info terminaldetect.Info) error {
 		t.Fatal("cmux backend should not be called when passthrough succeeds")
 		return nil
 	}
@@ -288,7 +288,7 @@ func TestSendRequestUsesTMUXPassthroughForNonASCIIInsideTmux(t *testing.T) {
 		spawnCalls++
 		return nil
 	}
-	sendCMUXNotification = func(title, body, provider string, info terminaldetect.Info) error {
+	sendCMUXNotification = func(title, body, hook string, info terminaldetect.Info) error {
 		t.Fatal("cmux backend should not be called when passthrough succeeds")
 		return nil
 	}
@@ -387,10 +387,10 @@ func TestRunHelperDeliversResolvedPayload(t *testing.T) {
 	}()
 
 	cmuxCalls := 0
-	sendCMUXNotification = func(title, body, provider string, info terminaldetect.Info) error {
+	sendCMUXNotification = func(title, body, hook string, info terminaldetect.Info) error {
 		cmuxCalls++
-		if title != "ASM" || body != "done" || provider != "claude" {
-			t.Fatalf("payload = (%q, %q, %q), want (%q, %q, %q)", title, body, provider, "ASM", "done", "claude")
+		if title != "ASM" || body != "done" || hook != "claude-hook" {
+			t.Fatalf("payload = (%q, %q, %q), want (%q, %q, %q)", title, body, hook, "ASM", "done", "claude-hook")
 		}
 		return nil
 	}
@@ -400,7 +400,7 @@ func TestRunHelperDeliversResolvedPayload(t *testing.T) {
 	}
 
 	raw, err := json.Marshal(helperPayload{
-		Request: Request{Title: "ASM", Body: "done", Provider: "claude", SessionName: "asm-dcm"},
+		Request: Request{Title: "ASM", Body: "done", Provider: "claude", CMUXHook: "claude-hook", SessionName: "asm-dcm"},
 		Info: terminaldetect.Info{
 			Kind: terminaldetect.KindCMUX,
 			CMUX: &terminaldetect.CMUXMetadata{WorkspaceID: "workspace:1"},

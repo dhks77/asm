@@ -10,6 +10,7 @@ import (
 	"github.com/nhn/asm/ide"
 	"github.com/nhn/asm/provider"
 	asmtmux "github.com/nhn/asm/tmux"
+	"github.com/nhn/asm/tracker"
 )
 
 func (m PickerModel) handleProviderStateTick() (tea.Model, tea.Cmd) {
@@ -88,7 +89,7 @@ func (m PickerModel) handleProviderStateUpdated(msg ProviderStateUpdatedMsg) (te
 					if providerName == "" && m.registry != nil && m.registry.Default() != nil {
 						providerName = m.registry.Default().Name()
 					}
-					extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, providerName, asmtmux.SessionName, m.workingPath))
+					extraCmds = append(extraCmds, notifyCompletionCmd(msg.Path, displayName, providerName, m.notificationHookForProvider(providerName), asmtmux.SessionName, m.workingPath))
 				}
 			}
 		}
@@ -250,11 +251,18 @@ func (m PickerModel) handleBranchResolved(msg BranchResolvedMsg) (tea.Model, tea
 		return m, m.startNextMetadataFetches()
 	}
 	m.branches[msg.Path] = msg.Branch
-	if m.tracker != nil {
+	if m.tracker != nil || m.trackerService != nil {
 		if seeded, ok := m.cachedBranches[msg.Path]; ok && seeded != msg.Branch {
 			delete(m.taskInfos, msg.Path)
 			delete(m.cachedBranches, msg.Path)
-			if m.taskCache != nil {
+			if m.trackerService != nil {
+				m.trackerService.Delete(msg.Path)
+				if info, ok := m.trackerService.Peek(msg.Path, msg.Branch); ok {
+					m.taskInfos[msg.Path] = info
+					m.cachedBranches[msg.Path] = msg.Branch
+					m.trackerService.Set(msg.Path, msg.Branch, info)
+				}
+			} else if m.taskCache != nil {
 				m.taskCache.Delete(msg.Path)
 				if info, ok := m.taskCache.Peek(msg.Branch); ok {
 					m.taskInfos[msg.Path] = info
@@ -276,7 +284,9 @@ func (m PickerModel) handleTaskResolved(msg TaskResolvedMsg) (tea.Model, tea.Cmd
 		m.taskInfos[msg.Path] = msg.Info
 		if msg.Branch != "" {
 			m.cachedBranches[msg.Path] = msg.Branch
-			if m.taskCache != nil {
+			if m.trackerService != nil {
+				m.trackerService.Set(msg.Path, msg.Branch, msg.Info)
+			} else if m.taskCache != nil {
 				m.taskCache.Set(msg.Path, msg.Branch, msg.Info)
 			}
 		}
@@ -305,6 +315,9 @@ func (m PickerModel) handleSettingsExited() (tea.Model, tea.Cmd) {
 		overrides[name] = ide.Override{Command: c.Command, Args: c.Args}
 	}
 	m.ides = ide.Builtins(overrides)
+	m.taskInfos = make(map[string]tracker.TaskInfo)
+	m.cachedBranches = make(map[string]string)
+	m.branchVerified = make(map[string]bool)
 	m.pickerWidthDirty = true
 	return m, m.refreshLayoutAndDirectoriesCmd()
 }

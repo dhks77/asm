@@ -15,17 +15,20 @@ import (
 )
 
 type SettingsSavedMsg struct{}
+type SettingsSaveFailedMsg struct{ Err string }
 
 type pluginFieldsLoadedMsg struct {
 	index  int
 	fields []plugincfg.Field
 	values map[string]string
+	err    error
 }
 
 type settingsEntry struct {
-	entry  plugincfg.Entry
-	fields []plugincfg.Field
-	values map[string]string // current UI values (user + scope changes)
+	entry   plugincfg.Entry
+	fields  []plugincfg.Field
+	values  map[string]string // current UI values (user + scope changes)
+	loadErr error
 }
 
 type textEditTarget struct {
@@ -81,6 +84,7 @@ const (
 // ideNoneLabel is the sentinel shown at index 0 of the Default IDE
 // select, meaning "don't pick a default — always show the selector".
 const ideNoneLabel = "(none)"
+const trackerNoneLabel = "(none)"
 
 type SettingsModel struct {
 	userCfg    *config.Config // user-level raw config
@@ -133,6 +137,7 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 	// Prepend "(none)" so the user can explicitly choose "no default" and
 	// always see the IDE selector.
 	displayIDEs := append([]string{ideNoneLabel}, ideNames...)
+	displayTrackers := append([]string{trackerNoneLabel}, trackerNames...)
 
 	m := SettingsModel{
 		userCfg:       userCfg,
@@ -141,7 +146,7 @@ func NewSettingsModel(_ *config.Config, rootPath string, providerNames []string,
 		entries:       entries,
 		ideEntries:    loadIDEEntries(userCfg),
 		providerNames: providerNames,
-		trackerNames:  trackerNames,
+		trackerNames:  displayTrackers,
 		ideNames:      displayIDEs,
 		projectOverrides: map[string]bool{
 			fieldProvider:         projectCfg.DefaultProvider != "",
@@ -187,10 +192,12 @@ func (m *SettingsModel) loadGeneralFromScope() {
 		trackerName = m.userCfg.DefaultTracker
 	}
 	m.selectedTracker = 0
-	for i, n := range m.trackerNames {
-		if n == trackerName {
-			m.selectedTracker = i
-			break
+	if trackerName != "" {
+		for i, n := range m.trackerNames {
+			if n == trackerName {
+				m.selectedTracker = i
+				break
+			}
 		}
 	}
 
@@ -255,7 +262,7 @@ func (m *SettingsModel) persistGeneralToScope() {
 		} else {
 			cfg.DefaultProvider = ""
 		}
-		if m.projectOverrides[fieldTracker] && len(m.trackerNames) > 0 {
+		if m.projectOverrides[fieldTracker] && m.selectedTracker > 0 && len(m.trackerNames) > 0 {
 			cfg.DefaultTracker = m.trackerNames[m.selectedTracker]
 		} else {
 			cfg.DefaultTracker = ""
@@ -288,8 +295,10 @@ func (m *SettingsModel) persistGeneralToScope() {
 		if len(m.providerNames) > 0 {
 			cfg.DefaultProvider = m.providerNames[m.selectedProvider]
 		}
-		if len(m.trackerNames) > 0 {
+		if m.selectedTracker > 0 && len(m.trackerNames) > 0 {
 			cfg.DefaultTracker = m.trackerNames[m.selectedTracker]
+		} else {
+			cfg.DefaultTracker = ""
 		}
 		if m.selectedIDE > 0 {
 			cfg.DefaultIDE = m.ideNames[m.selectedIDE]
@@ -395,7 +404,10 @@ func (m *SettingsModel) generalInheritedValue(fieldIdx int) string {
 	case generalFieldProvider:
 		return m.userCfg.DefaultProvider
 	case generalFieldTracker:
-		return m.userCfg.DefaultTracker
+		if m.userCfg.DefaultTracker != "" {
+			return m.userCfg.DefaultTracker
+		}
+		return trackerNoneLabel
 	case generalFieldPickerWidth:
 		return fmt.Sprintf("%d%%", m.userCfg.GetPickerWidth())
 	case generalFieldIDE:
@@ -587,14 +599,20 @@ func (m SettingsModel) Init() tea.Cmd {
 		// For built-in configurables, load values from current scope config
 		if entry.Source != nil {
 			values := m.builtinValuesFromCfg(entry)
-			fields := entry.GetFields()
+			fields, err := entry.GetFields()
 			cmds = append(cmds, func() tea.Msg {
-				return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values}
+				return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values, err: err}
 			})
 		} else {
 			cmds = append(cmds, func() tea.Msg {
-				fields := entry.GetFields()
-				values := entry.GetValues()
+				fields, fieldsErr := entry.GetFields()
+				values, valuesErr := entry.GetValues()
+				if fieldsErr != nil {
+					return pluginFieldsLoadedMsg{index: idx, err: fieldsErr}
+				}
+				if valuesErr != nil {
+					return pluginFieldsLoadedMsg{index: idx, fields: fields, err: valuesErr}
+				}
 				return pluginFieldsLoadedMsg{index: idx, fields: fields, values: values}
 			})
 		}
@@ -613,12 +631,17 @@ func (m SettingsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.index < len(m.entries) {
 			m.entries[msg.index].fields = msg.fields
 			m.entries[msg.index].values = msg.values
+			m.entries[msg.index].loadErr = msg.err
 			m.rebuildItems()
 		}
 		return m, nil
 
 	case SettingsSavedMsg:
 		return m, tea.Quit
+
+	case SettingsSaveFailedMsg:
+		m.err = msg.Err
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -905,13 +928,19 @@ func (m SettingsModel) save() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		config.SaveScope(&userCfg, config.ScopeUser, rootPath)
+		if err := config.SaveScope(&userCfg, config.ScopeUser, rootPath); err != nil {
+			return SettingsSaveFailedMsg{Err: fmt.Sprintf("save global settings failed: %v", err)}
+		}
 		if rootPath != "" {
-			config.SaveScope(&projectCfg, config.ScopeProject, rootPath)
+			if err := config.SaveScope(&projectCfg, config.ScopeProject, rootPath); err != nil {
+				return SettingsSaveFailedMsg{Err: fmt.Sprintf("save local settings failed: %v", err)}
+			}
 		}
 		// Plugin configs are always user-scoped (plugin manages its own storage)
 		for _, item := range pluginItems {
-			item.entry.SetValues(item.values)
+			if err := item.entry.SetValues(item.values); err != nil {
+				return SettingsSaveFailedMsg{Err: fmt.Sprintf("save %s settings failed: %v", item.entry.Name, err)}
+			}
 		}
 		return SettingsSavedMsg{}
 	}
@@ -988,7 +1017,7 @@ func (m SettingsModel) View() string {
 	// Plugin/built-in sections
 	if !isLocal {
 		for _, e := range m.entries {
-			if len(e.fields) == 0 {
+			if len(e.fields) == 0 && e.loadErr == nil {
 				continue
 			}
 
@@ -997,6 +1026,11 @@ func (m SettingsModel) View() string {
 				lipgloss.NewStyle().Foreground(whiteColor).Bold(true).Render(e.entry.Name) + " " + category,
 			)
 			sections = append(sections, header)
+			if e.loadErr != nil {
+				sections = append(sections, lipgloss.NewStyle().Padding(0, 2).Foreground(dangerColor).Render("Failed to load settings: "+e.loadErr.Error()))
+				sections = append(sections, "")
+				continue
+			}
 
 			labelWidth := 0
 			for _, f := range e.fields {

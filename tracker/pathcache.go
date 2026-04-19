@@ -65,8 +65,15 @@ type legacyBranchEntry struct {
 // for the given rootPath. Legacy path/branch cache files are read on first
 // load so older cached data keeps working after the unified-cache migration.
 func NewTaskCache(rootPath string, ttl time.Duration) *TaskCache {
+	return NewScopedTaskCache(rootPath, "", ttl)
+}
+
+// NewScopedTaskCache returns a cache partitioned by both rootPath and scopeKey.
+// scopeKey is used when the same project can resolve tasks through different
+// trackers or tracker configurations.
+func NewScopedTaskCache(rootPath, scopeKey string, ttl time.Duration) *TaskCache {
 	c := &TaskCache{
-		path:             cacheFilePath(rootPath),
+		path:             cacheFilePath(rootPath, scopeKey),
 		legacyBranchPath: legacyBranchCachePath(rootPath),
 		ttl:              ttl,
 		pathEntries:      make(map[string]PathEntry),
@@ -340,13 +347,13 @@ func (c *TaskCache) save() {
 	_ = os.Rename(tmp, c.path)
 }
 
-// cacheFilePath returns ~/.asm/cache/tasks-<sha1(rootPath)>.json.
-func cacheFilePath(rootPath string) string {
+// cacheFilePath returns ~/.asm/cache/tasks-<sha1(rootPath+scopeKey)>.json.
+func cacheFilePath(rootPath, scopeKey string) string {
 	abs := rootPath
 	if a, err := filepath.Abs(rootPath); err == nil {
 		abs = a
 	}
-	sum := sha1.Sum([]byte(abs))
+	sum := sha1.Sum([]byte(abs + "\x00" + scopeKey))
 	name := "tasks-" + hex.EncodeToString(sum[:]) + ".json"
 	return filepath.Join(platform.Current().UserConfigDir(), "cache", name)
 }
