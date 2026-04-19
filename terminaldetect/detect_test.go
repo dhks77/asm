@@ -39,13 +39,13 @@ func TestDetectCMUXUsesMostRecentClient(t *testing.T) {
 	}
 }
 
-func TestDetectITermFromEnvironment(t *testing.T) {
+func TestDetectUsesBundleIDAsDirectApp(t *testing.T) {
 	d := detector{
 		listClients: func(sessionName string) ([]client, error) {
 			return []client{{PID: 321, Activity: 1}}, nil
 		},
 		inspectCommand: func(pid int) (string, error) {
-			return "tmux attach TERM_PROGRAM=iTerm.app ITERM_SESSION_ID=w0t0p0 __CFBundleIdentifier=com.googlecode.iterm2", nil
+			return "tmux attach TERM_PROGRAM=Ghostty __CFBundleIdentifier=com.mitchellh.ghostty", nil
 		},
 	}
 
@@ -53,21 +53,24 @@ func TestDetectITermFromEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detect() error = %v", err)
 	}
-	if info.Kind != KindITerm {
-		t.Fatalf("kind = %q, want %q", info.Kind, KindITerm)
+	if info.Kind != KindUnknown {
+		t.Fatalf("kind = %q, want %q", info.Kind, KindUnknown)
 	}
-	if info.App.BundleID != "com.googlecode.iterm2" {
-		t.Fatalf("bundle id = %q, want %q", info.App.BundleID, "com.googlecode.iterm2")
+	if info.App.BundleID != "com.mitchellh.ghostty" {
+		t.Fatalf("bundle id = %q, want %q", info.App.BundleID, "com.mitchellh.ghostty")
+	}
+	if info.App.Name != "Ghostty" {
+		t.Fatalf("name = %q, want %q", info.App.Name, "Ghostty")
 	}
 }
 
-func TestDetectITermWinsOverInheritedCMUXEnvironment(t *testing.T) {
+func TestDetectDirectBundleIDWinsOverInheritedCMUXEnvironment(t *testing.T) {
 	d := detector{
 		listClients: func(sessionName string) ([]client, error) {
 			return []client{{PID: 321, Activity: 1}}, nil
 		},
 		inspectCommand: func(pid int) (string, error) {
-			return "tmux attach TERM_PROGRAM=iTerm.app ITERM_SESSION_ID=w0t0p0 __CFBundleIdentifier=com.googlecode.iterm2 CMUX_WORKSPACE_ID=workspace:1 CMUX_BUNDLE_ID=com.cmuxterm.app", nil
+			return "tmux attach TERM_PROGRAM=Ghostty __CFBundleIdentifier=com.mitchellh.ghostty CMUX_WORKSPACE_ID=workspace:1 CMUX_BUNDLE_ID=com.cmuxterm.app", nil
 		},
 	}
 
@@ -75,14 +78,39 @@ func TestDetectITermWinsOverInheritedCMUXEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("detect() error = %v", err)
 	}
-	if info.Kind != KindITerm {
-		t.Fatalf("kind = %q, want %q", info.Kind, KindITerm)
+	if info.Kind != KindUnknown {
+		t.Fatalf("kind = %q, want %q", info.Kind, KindUnknown)
 	}
 	if info.CMUX != nil {
-		t.Fatalf("cmux metadata = %#v, want nil for iTerm client", info.CMUX)
+		t.Fatalf("cmux metadata = %#v, want nil for direct app client", info.CMUX)
 	}
-	if info.App.BundleID != "com.googlecode.iterm2" {
-		t.Fatalf("bundle id = %q, want %q", info.App.BundleID, "com.googlecode.iterm2")
+	if info.App.BundleID != "com.mitchellh.ghostty" {
+		t.Fatalf("bundle id = %q, want %q", info.App.BundleID, "com.mitchellh.ghostty")
+	}
+}
+
+func TestDetectCMUXWinsWhenBundleMatchesCMUX(t *testing.T) {
+	d := detector{
+		listClients: func(sessionName string) ([]client, error) {
+			return []client{{PID: 321, Activity: 1}}, nil
+		},
+		inspectCommand: func(pid int) (string, error) {
+			return "tmux attach TERM_PROGRAM=WarpTerminal __CFBundleIdentifier=dev.cmux CMUX_WORKSPACE_ID=workspace:1 CMUX_BUNDLE_ID=dev.cmux", nil
+		},
+	}
+
+	info, err := d.detect("asm-default")
+	if err != nil {
+		t.Fatalf("detect() error = %v", err)
+	}
+	if info.Kind != KindCMUX {
+		t.Fatalf("kind = %q, want %q", info.Kind, KindCMUX)
+	}
+	if info.CMUX == nil || info.CMUX.WorkspaceID != "workspace:1" {
+		t.Fatalf("cmux metadata = %#v, want workspace populated", info.CMUX)
+	}
+	if info.App.BundleID != "dev.cmux" {
+		t.Fatalf("bundle id = %q, want %q", info.App.BundleID, "dev.cmux")
 	}
 }
 

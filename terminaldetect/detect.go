@@ -15,10 +15,8 @@ const commandTimeout = 3 * time.Second
 type Kind string
 
 const (
-	KindUnknown  Kind = "unknown"
-	KindCMUX     Kind = "cmux"
-	KindITerm    Kind = "iterm"
-	KindTerminal Kind = "terminal"
+	KindUnknown Kind = "unknown"
+	KindCMUX    Kind = "cmux"
 )
 
 // App is the best-effort originating application identity for the active
@@ -98,8 +96,7 @@ func (d detector) detect(sessionName string) (Info, error) {
 		Env:       env,
 	}
 
-	if kind := detectDirectTerminalKind(env); kind != KindUnknown {
-		info.Kind = kind
+	if shouldPreferDirectApp(info.App, env) {
 		return info, nil
 	}
 
@@ -216,8 +213,6 @@ func collectKnownEnv(command string) map[string]string {
 		"TERM_PROGRAM",
 		"TERM_PROGRAM_VERSION",
 		"LC_TERMINAL",
-		"ITERM_SESSION_ID",
-		"TERM_SESSION_ID",
 		"__CFBundleIdentifier",
 	} {
 		if value, ok := findEnvValue(command, key); ok {
@@ -229,7 +224,7 @@ func collectKnownEnv(command string) map[string]string {
 
 func detectApp(env map[string]string) App {
 	bundleID := strings.TrimSpace(env["__CFBundleIdentifier"])
-	name := normalizeTerminalName(firstNonEmpty(
+	name := normalizeAppLabel(firstNonEmpty(
 		env["TERM_PROGRAM"],
 		env["LC_TERMINAL"],
 		bundleID,
@@ -242,28 +237,25 @@ func detectApp(env map[string]string) App {
 	}
 }
 
-func detectDirectTerminalKind(env map[string]string) Kind {
-	switch {
-	case env["ITERM_SESSION_ID"] != "":
-		return KindITerm
-	case env["TERM_PROGRAM"] == "iTerm.app", env["LC_TERMINAL"] == "iTerm2":
-		return KindITerm
-	case env["TERM_PROGRAM"] == "Apple_Terminal":
-		return KindTerminal
-	default:
-		return KindUnknown
+func shouldPreferDirectApp(app App, env map[string]string) bool {
+	bundleID := strings.TrimSpace(app.BundleID)
+	if bundleID == "" {
+		return false
 	}
+
+	cmuxBundleID := strings.TrimSpace(env["CMUX_BUNDLE_ID"])
+	if cmuxBundleID == "" {
+		return true
+	}
+
+	return bundleID != cmuxBundleID
 }
 
-func normalizeTerminalName(name string) string {
-	switch strings.TrimSpace(name) {
-	case "iTerm.app", "iTerm2":
-		return "iTerm"
-	case "Apple_Terminal":
-		return "Terminal"
-	default:
-		return strings.TrimSpace(name)
-	}
+func normalizeAppLabel(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimSuffix(name, ".app")
+	name = strings.NewReplacer("_", " ", "-", " ", ".", " ").Replace(name)
+	return strings.Join(strings.Fields(name), " ")
 }
 
 func firstNonEmpty(values ...string) string {
