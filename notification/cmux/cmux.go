@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -110,14 +111,18 @@ func buildEnv(info terminaldetect.Info) []string {
 	if info.CMUX != nil {
 		meta = *info.CMUX
 	}
-	var env []string
+	envMap := make(map[string]string)
+	for key, value := range info.Env {
+		if trimmedKey := strings.TrimSpace(key); trimmedKey != "" && value != "" {
+			envMap[trimmedKey] = value
+		}
+	}
 	for _, key := range []string{"HOME", "PATH", "LANG", "TMPDIR", "USER", "LOGNAME", "SHELL"} {
-		if value := strings.TrimSpace(info.Env[key]); value != "" {
-			env = append(env, key+"="+value)
+		if envMap[key] != "" {
 			continue
 		}
 		if value, ok := envValue(currentEnv(), key); ok && value != "" {
-			env = append(env, key+"="+value)
+			envMap[key] = value
 		}
 	}
 	for _, kv := range [][2]string{
@@ -131,8 +136,17 @@ func buildEnv(info terminaldetect.Info) []string {
 		{"CMUX_BUNDLE_ID", meta.BundleID},
 	} {
 		if strings.TrimSpace(kv[1]) != "" {
-			env = append(env, kv[0]+"="+kv[1])
+			envMap[kv[0]] = kv[1]
 		}
+	}
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		env = append(env, key+"="+envMap[key])
 	}
 	return env
 }

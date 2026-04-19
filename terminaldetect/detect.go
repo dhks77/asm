@@ -44,6 +44,7 @@ type Info struct {
 	App       App
 	CMUX      *CMUXMetadata
 	ClientPID int
+	ClientTTY string
 	Env       map[string]string
 }
 
@@ -53,6 +54,7 @@ type detector struct {
 }
 
 type client struct {
+	TTY      string
 	PID      int
 	Activity int64
 }
@@ -88,11 +90,12 @@ func (d detector) detect(sessionName string) (Info, error) {
 		return Info{Kind: KindUnknown}, err
 	}
 
-	env := collectKnownEnv(command)
+	env := collectEnv(command)
 	info := Info{
 		Kind:      KindUnknown,
 		App:       detectApp(env),
 		ClientPID: current.PID,
+		ClientTTY: strings.TrimSpace(current.TTY),
 		Env:       env,
 	}
 
@@ -167,6 +170,7 @@ func parseClients(out string) []client {
 			continue
 		}
 		clients = append(clients, client{
+			TTY:      strings.TrimSpace(fields[0]),
 			PID:      pid,
 			Activity: parseActivity(fields[2]),
 		})
@@ -192,32 +196,31 @@ func mostRecentClient(clients []client) (client, bool) {
 	return best, true
 }
 
-func collectKnownEnv(command string) map[string]string {
+func collectEnv(command string) map[string]string {
 	env := make(map[string]string)
-	for _, key := range []string{
-		"HOME",
-		"PATH",
-		"LANG",
-		"TMPDIR",
-		"USER",
-		"LOGNAME",
-		"SHELL",
-		"CMUX_WORKSPACE_ID",
-		"CMUX_SURFACE_ID",
-		"CMUX_TAB_ID",
-		"CMUX_PANEL_ID",
-		"CMUX_SOCKET_PATH",
-		"CMUX_SOCKET",
-		"CMUX_BUNDLED_CLI_PATH",
-		"CMUX_BUNDLE_ID",
-		"TERM_PROGRAM",
-		"TERM_PROGRAM_VERSION",
-		"LC_TERMINAL",
-		"__CFBundleIdentifier",
-	} {
-		if value, ok := findEnvValue(command, key); ok {
-			env[key] = value
+	for i := 0; i < len(command); i++ {
+		if i > 0 && command[i-1] != ' ' && command[i-1] != '\t' {
+			continue
 		}
+		if !isEnvNameStart(command[i]) {
+			continue
+		}
+
+		j := i + 1
+		for j < len(command) && isEnvNamePart(command[j]) {
+			j++
+		}
+		if j >= len(command) || command[j] != '=' {
+			continue
+		}
+
+		key := command[i:j]
+		value, ok := findEnvValue(command[i:], key)
+		if !ok {
+			continue
+		}
+		env[key] = value
+		i = j
 	}
 	return env
 }

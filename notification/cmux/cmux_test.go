@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,7 @@ func TestBuildEnvUsesMinimalBaseEnv(t *testing.T) {
 		},
 	})
 
-	want := []string{
+	for _, want := range []string{
 		"HOME=/tmp/home",
 		"PATH=/usr/bin:/bin",
 		"LANG=en_US.UTF-8",
@@ -74,9 +75,10 @@ func TestBuildEnvUsesMinimalBaseEnv(t *testing.T) {
 		"CMUX_WORKSPACE_ID=workspace:1",
 		"CMUX_SURFACE_ID=surface:2",
 		"CMUX_BUNDLED_CLI_PATH=/tmp/cmux-bin",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("buildEnv() = %#v, want %#v", got, want)
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("buildEnv() missing %q in %#v", want, got)
+		}
 	}
 }
 

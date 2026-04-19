@@ -197,12 +197,18 @@ picker 검색은 **열려 있는 세션들**에만 적용되며 다음을 매칭
 #     "command":"aider",
 #     "args":[],
 #     "resume_args":["--resume"],
-#     "needs_content":true
+#     "needs_content":true,
+#     "managed_events":true
 #   }
 
 # 상태 감지
 echo '{"title":"...","content":"..."}' | <plugin> detect-state
 # → {"state":"thinking"}
+
+# provider-native state/turn event 정규화 (선택)
+# managed_events=true 일 때만 사용
+echo '{"type":"agent-turn-complete","cwd":"/path","last-assistant-message":"done"}' | <plugin> handle-event
+# → {"cwd":"/path","state":"idle","notify":true,"title":"optional title","body":"done"}
 
 # 설정 필드 (선택)
 <plugin> config-fields

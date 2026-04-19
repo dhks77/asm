@@ -17,6 +17,8 @@ func TestSendRequestUsesCMUXWhenDetected(t *testing.T) {
 	prevInside := asmtmuxIsInsideTmux
 	prevEnable := enableTMUXPass
 	prevPassthrough := sendTMUXPassthrough
+	prevTTY := sendClientTTYNotice
+	prevStdout := stdoutSupportsTMUX
 	defer func() {
 		detectTerminal = prevDetect
 		sendCMUXNotification = prevCMUX
@@ -24,6 +26,8 @@ func TestSendRequestUsesCMUXWhenDetected(t *testing.T) {
 		asmtmuxIsInsideTmux = prevInside
 		enableTMUXPass = prevEnable
 		sendTMUXPassthrough = prevPassthrough
+		sendClientTTYNotice = prevTTY
+		stdoutSupportsTMUX = prevStdout
 	}()
 
 	cmuxCalls := 0
@@ -31,6 +35,8 @@ func TestSendRequestUsesCMUXWhenDetected(t *testing.T) {
 	asmtmuxIsInsideTmux = func() bool { return false }
 	enableTMUXPass = func() {}
 	sendTMUXPassthrough = func(title, body string) error { return nil }
+	sendClientTTYNotice = func(ttyPath, title, body string) error { return nil }
+	stdoutSupportsTMUX = func() bool { return true }
 	detectTerminal = func(sessionName string) (terminaldetect.Info, error) {
 		if sessionName != "asm-default" {
 			t.Fatalf("Detect() session = %q, want %q", sessionName, "asm-default")
@@ -69,6 +75,8 @@ func TestSendRequestFallsBackToOSWhenCMUXFails(t *testing.T) {
 	prevInside := asmtmuxIsInsideTmux
 	prevEnable := enableTMUXPass
 	prevPassthrough := sendTMUXPassthrough
+	prevTTY := sendClientTTYNotice
+	prevStdout := stdoutSupportsTMUX
 	defer func() {
 		detectTerminal = prevDetect
 		sendCMUXNotification = prevCMUX
@@ -76,6 +84,8 @@ func TestSendRequestFallsBackToOSWhenCMUXFails(t *testing.T) {
 		asmtmuxIsInsideTmux = prevInside
 		enableTMUXPass = prevEnable
 		sendTMUXPassthrough = prevPassthrough
+		sendClientTTYNotice = prevTTY
+		stdoutSupportsTMUX = prevStdout
 	}()
 
 	cmuxCalls := 0
@@ -83,6 +93,8 @@ func TestSendRequestFallsBackToOSWhenCMUXFails(t *testing.T) {
 	asmtmuxIsInsideTmux = func() bool { return false }
 	enableTMUXPass = func() {}
 	sendTMUXPassthrough = func(title, body string) error { return nil }
+	sendClientTTYNotice = func(ttyPath, title, body string) error { return nil }
+	stdoutSupportsTMUX = func() bool { return true }
 	detectTerminal = func(sessionName string) (terminaldetect.Info, error) {
 		return terminaldetect.Info{
 			Kind: terminaldetect.KindCMUX,
@@ -116,6 +128,8 @@ func TestSendRequestUsesHelperForCMUXInsideTmux(t *testing.T) {
 	prevInside := asmtmuxIsInsideTmux
 	prevEnable := enableTMUXPass
 	prevPassthrough := sendTMUXPassthrough
+	prevTTY := sendClientTTYNotice
+	prevStdout := stdoutSupportsTMUX
 	defer func() {
 		detectTerminal = prevDetect
 		spawnHelper = prevSpawn
@@ -124,6 +138,8 @@ func TestSendRequestUsesHelperForCMUXInsideTmux(t *testing.T) {
 		asmtmuxIsInsideTmux = prevInside
 		enableTMUXPass = prevEnable
 		sendTMUXPassthrough = prevPassthrough
+		sendClientTTYNotice = prevTTY
+		stdoutSupportsTMUX = prevStdout
 	}()
 
 	spawnCalls := 0
@@ -137,6 +153,8 @@ func TestSendRequestUsesHelperForCMUXInsideTmux(t *testing.T) {
 	asmtmuxIsInsideTmux = func() bool { return true }
 	enableTMUXPass = func() { enableCalls++ }
 	sendTMUXPassthrough = func(title, body string) error { return errors.New("passthrough failed") }
+	sendClientTTYNotice = func(ttyPath, title, body string) error { return errors.New("tty failed") }
+	stdoutSupportsTMUX = func() bool { return true }
 	spawnHelper = func(req Request, info terminaldetect.Info) error {
 		spawnCalls++
 		return nil
@@ -168,6 +186,8 @@ func TestSendRequestUsesTMUXPassthroughForCMUXInsideTmux(t *testing.T) {
 	prevInside := asmtmuxIsInsideTmux
 	prevEnable := enableTMUXPass
 	prevPassthrough := sendTMUXPassthrough
+	prevTTY := sendClientTTYNotice
+	prevStdout := stdoutSupportsTMUX
 	defer func() {
 		detectTerminal = prevDetect
 		spawnHelper = prevSpawn
@@ -176,6 +196,8 @@ func TestSendRequestUsesTMUXPassthroughForCMUXInsideTmux(t *testing.T) {
 		asmtmuxIsInsideTmux = prevInside
 		enableTMUXPass = prevEnable
 		sendTMUXPassthrough = prevPassthrough
+		sendClientTTYNotice = prevTTY
+		stdoutSupportsTMUX = prevStdout
 	}()
 
 	passthroughCalls := 0
@@ -192,6 +214,11 @@ func TestSendRequestUsesTMUXPassthroughForCMUXInsideTmux(t *testing.T) {
 		passthroughCalls++
 		return nil
 	}
+	sendClientTTYNotice = func(ttyPath, title, body string) error {
+		t.Fatal("client tty should not be called when passthrough succeeds")
+		return nil
+	}
+	stdoutSupportsTMUX = func() bool { return true }
 	spawnHelper = func(req Request, info terminaldetect.Info) error {
 		t.Fatal("helper spawn should not be called when passthrough succeeds")
 		return nil
@@ -223,6 +250,8 @@ func TestSendRequestUsesTMUXPassthroughForNonASCIIInsideTmux(t *testing.T) {
 	prevInside := asmtmuxIsInsideTmux
 	prevEnable := enableTMUXPass
 	prevPassthrough := sendTMUXPassthrough
+	prevTTY := sendClientTTYNotice
+	prevStdout := stdoutSupportsTMUX
 	defer func() {
 		detectTerminal = prevDetect
 		spawnHelper = prevSpawn
@@ -231,6 +260,8 @@ func TestSendRequestUsesTMUXPassthroughForNonASCIIInsideTmux(t *testing.T) {
 		asmtmuxIsInsideTmux = prevInside
 		enableTMUXPass = prevEnable
 		sendTMUXPassthrough = prevPassthrough
+		sendClientTTYNotice = prevTTY
+		stdoutSupportsTMUX = prevStdout
 	}()
 
 	spawnCalls := 0
@@ -248,6 +279,11 @@ func TestSendRequestUsesTMUXPassthroughForNonASCIIInsideTmux(t *testing.T) {
 		passthroughCalls++
 		return nil
 	}
+	sendClientTTYNotice = func(ttyPath, title, body string) error {
+		t.Fatal("client tty should not be called when passthrough succeeds")
+		return nil
+	}
+	stdoutSupportsTMUX = func() bool { return true }
 	spawnHelper = func(req Request, info terminaldetect.Info) error {
 		spawnCalls++
 		return nil
@@ -271,6 +307,74 @@ func TestSendRequestUsesTMUXPassthroughForNonASCIIInsideTmux(t *testing.T) {
 	}
 	if enableCalls != 1 {
 		t.Fatalf("enable passthrough calls = %d, want 1", enableCalls)
+	}
+}
+
+func TestSendRequestSkipsTMUXPassthroughWhenStdoutIsNotTTY(t *testing.T) {
+	prevDetect := detectTerminal
+	prevSpawn := spawnHelper
+	prevCMUX := sendCMUXNotification
+	prevOS := sendOSNotification
+	prevInside := asmtmuxIsInsideTmux
+	prevEnable := enableTMUXPass
+	prevPassthrough := sendTMUXPassthrough
+	prevTTY := sendClientTTYNotice
+	prevStdout := stdoutSupportsTMUX
+	defer func() {
+		detectTerminal = prevDetect
+		spawnHelper = prevSpawn
+		sendCMUXNotification = prevCMUX
+		sendOSNotification = prevOS
+		asmtmuxIsInsideTmux = prevInside
+		enableTMUXPass = prevEnable
+		sendTMUXPassthrough = prevPassthrough
+		sendClientTTYNotice = prevTTY
+		stdoutSupportsTMUX = prevStdout
+	}()
+
+	passthroughCalls := 0
+	enableCalls := 0
+	ttyCalls := 0
+	detectTerminal = func(sessionName string) (terminaldetect.Info, error) {
+		return terminaldetect.Info{
+			Kind:      terminaldetect.KindCMUX,
+			CMUX:      &terminaldetect.CMUXMetadata{WorkspaceID: "workspace:1"},
+			ClientTTY: "/dev/ttys011",
+		}, nil
+	}
+	asmtmuxIsInsideTmux = func() bool { return true }
+	stdoutSupportsTMUX = func() bool { return false }
+	enableTMUXPass = func() { enableCalls++ }
+	sendTMUXPassthrough = func(title, body string) error {
+		passthroughCalls++
+		return nil
+	}
+	sendClientTTYNotice = func(ttyPath, title, body string) error {
+		ttyCalls++
+		if ttyPath != "/dev/ttys011" {
+			t.Fatalf("ttyPath = %q, want %q", ttyPath, "/dev/ttys011")
+		}
+		return nil
+	}
+	spawnHelper = func(req Request, info terminaldetect.Info) error {
+		t.Fatal("helper spawn should not be called when client tty succeeds")
+		return nil
+	}
+	sendOSNotification = func(title, body string, info terminaldetect.Info) error {
+		t.Fatal("os backend should not be called when client tty succeeds")
+		return nil
+	}
+
+	SendRequest(Request{Title: "ASM", Body: "done", Provider: "codex"})
+
+	if passthroughCalls != 0 {
+		t.Fatalf("passthrough calls = %d, want 0", passthroughCalls)
+	}
+	if enableCalls != 0 {
+		t.Fatalf("enable passthrough calls = %d, want 0", enableCalls)
+	}
+	if ttyCalls != 1 {
+		t.Fatalf("client tty calls = %d, want 1", ttyCalls)
 	}
 }
 
@@ -340,6 +444,13 @@ func TestBuildTMUXPassthroughNotificationUsesOSC777ForASCII(t *testing.T) {
 	got := buildTMUXPassthroughNotification("ASM", "done")
 	if !strings.Contains(got, "\x1b\x1b]777;notify;ASM;done\x07") {
 		t.Fatalf("buildTMUXPassthroughNotification() = %q, want wrapped OSC 777 payload", got)
+	}
+}
+
+func TestBuildDirectNotificationUsesOSC777ForASCII(t *testing.T) {
+	got := buildDirectNotification("ASM", "done")
+	if got != "\x1b]777;notify;ASM;done\x07" {
+		t.Fatalf("buildDirectNotification() = %q, want raw OSC 777 payload", got)
 	}
 }
 

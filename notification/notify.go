@@ -38,7 +38,9 @@ var (
 	asmtmuxIsInsideTmux  = asmtmux.IsInsideTmux
 	enableTMUXPass       = asmtmux.EnablePassthrough
 	sendTMUXPassthrough  = defaultSendTMUXPassthrough
+	sendClientTTYNotice  = defaultSendClientTTYNotice
 	spawnHelper          = defaultSpawnHelper
+	stdoutSupportsTMUX   = defaultStdoutSupportsTMUX
 )
 
 // Send sends a desktop notification. Best-effort: delivery failures are
@@ -69,12 +71,24 @@ func SendRequest(req Request) {
 		req.SessionName, req.Provider, info.Kind, info.App.BundleID, req.Title)
 
 	if info.Kind == terminaldetect.KindCMUX && asmtmuxIsInsideTmux() {
-		enableTMUXPass()
-		if err := sendTMUXPassthrough(req.Title, req.Body); err == nil {
-			asmlog.Debugf("notification: tmux-passthrough sent session=%q", req.SessionName)
-			return
+		if stdoutSupportsTMUX() {
+			enableTMUXPass()
+			if err := sendTMUXPassthrough(req.Title, req.Body); err == nil {
+				asmlog.Debugf("notification: tmux-passthrough sent session=%q", req.SessionName)
+				return
+			} else {
+				asmlog.Debugf("notification: tmux-passthrough failed session=%q err=%v", req.SessionName, err)
+			}
 		} else {
-			asmlog.Debugf("notification: tmux-passthrough failed session=%q err=%v", req.SessionName, err)
+			asmlog.Debugf("notification: tmux-passthrough skipped session=%q reason=stdout-not-tty", req.SessionName)
+		}
+		if tty := strings.TrimSpace(info.ClientTTY); tty != "" {
+			if err := sendClientTTYNotice(tty, req.Title, req.Body); err == nil {
+				asmlog.Debugf("notification: client-tty sent session=%q tty=%q", req.SessionName, tty)
+				return
+			} else {
+				asmlog.Debugf("notification: client-tty failed session=%q tty=%q err=%v", req.SessionName, tty, err)
+			}
 		}
 		if err := spawnHelper(req, info); err == nil {
 			asmlog.Debugf("notification: helper spawned session=%q", req.SessionName)
@@ -145,11 +159,46 @@ func defaultSendTMUXPassthrough(title, body string) error {
 	return err
 }
 
-func buildTMUXPassthroughNotification(title, body string) string {
-	if containsNonASCII(title) || containsNonASCII(body) {
-		return wrapTMUXPassthrough(buildOSC99Notification(title, body))
+func defaultSendClientTTYNotice(ttyPath, title, body string) error {
+	ttyPath = strings.TrimSpace(ttyPath)
+	if ttyPath == "" {
+		return os.ErrInvalid
 	}
-	return wrapTMUXPassthrough(buildOSC777Notification(title, body))
+	title = sanitizeText(title, 180)
+	body = sanitizeText(body, 180)
+	if title == "" {
+		title = "ASM"
+	}
+	if body == "" {
+		body = "done"
+	}
+	seq := buildDirectNotification(title, body)
+	f, err := os.OpenFile(ttyPath, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(seq)
+	return err
+}
+
+func defaultStdoutSupportsTMUX() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func buildTMUXPassthroughNotification(title, body string) string {
+	return wrapTMUXPassthrough(buildDirectNotification(title, body))
+}
+
+func buildDirectNotification(title, body string) string {
+	if containsNonASCII(title) || containsNonASCII(body) {
+		return buildOSC99Notification(title, body)
+	}
+	return buildOSC777Notification(title, body)
 }
 
 func buildOSC777Notification(title, body string) string {
