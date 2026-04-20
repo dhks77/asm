@@ -1,6 +1,9 @@
 package tmux
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestSessionNameFollowsSessionID(t *testing.T) {
 	SetSessionID("alpha_1")
@@ -74,5 +77,36 @@ func TestSanitizeCapturedOutputDropsInvalidUTF8(t *testing.T) {
 	got := sanitizeCapturedOutput([]byte{'a', 0xff, 'b', 0xfe, 'c'})
 	if got != "abc" {
 		t.Fatalf("sanitizeCapturedOutput() = %q, want %q", got, "abc")
+	}
+}
+
+func TestClipboardCopyCommandPrefersFirstAvailableHelper(t *testing.T) {
+	prev := execLookPath
+	execLookPath = func(file string) (string, error) {
+		switch file {
+		case "pbcopy":
+			return "/usr/bin/pbcopy", nil
+		case "wl-copy":
+			return "/usr/bin/wl-copy", nil
+		default:
+			return "", errors.New("missing")
+		}
+	}
+	defer func() { execLookPath = prev }()
+
+	if got := clipboardCopyCommand(); got != "pbcopy" {
+		t.Fatalf("clipboardCopyCommand() = %q, want %q", got, "pbcopy")
+	}
+}
+
+func TestClipboardCopyCommandFallsBackToEmptyWhenUnavailable(t *testing.T) {
+	prev := execLookPath
+	execLookPath = func(file string) (string, error) {
+		return "", errors.New("missing")
+	}
+	defer func() { execLookPath = prev }()
+
+	if got := clipboardCopyCommand(); got != "" {
+		t.Fatalf("clipboardCopyCommand() = %q, want empty", got)
 	}
 }

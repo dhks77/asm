@@ -17,6 +17,8 @@ import (
 	"github.com/nhn/asm/shelljoin"
 )
 
+var execLookPath = exec.LookPath
+
 // SessionID is the active logical asm session identifier.
 var SessionID = "default"
 
@@ -136,7 +138,7 @@ func HandoffFilePath() string {
 }
 
 func IsAvailable() bool {
-	_, err := exec.LookPath("tmux")
+	_, err := execLookPath("tmux")
 	return err == nil
 }
 
@@ -345,6 +347,10 @@ func InstallRootBindings() {
 		fmt.Sprintf("set-option -t %s @asm-client-focused 1", SessionName),
 	).Run()
 
+	// Keep tmux's default copy-mode gestures, but route them to the host
+	// clipboard when a supported copy command is available.
+	ConfigureClipboardCopy()
+
 	// Enable mouse support for scrollback in working panel
 	exec.Command("tmux", "set-option", "-t", SessionName, "mouse", "on").Run()
 
@@ -354,6 +360,33 @@ func InstallRootBindings() {
 		"send-keys -M",
 		"if-shell -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e'",
 	).Run()
+}
+
+// ConfigureClipboardCopy teaches tmux's default copy-mode bindings how to
+// reach the host clipboard. This is a server option because tmux's
+// copy-pipe-and-cancel binding reads copy-command from the server scope.
+func ConfigureClipboardCopy() {
+	if cmd := clipboardCopyCommand(); cmd != "" {
+		runTmux("set-option", "-s", "copy-command", cmd)
+	}
+}
+
+func clipboardCopyCommand() string {
+	candidates := []struct {
+		name    string
+		command string
+	}{
+		{name: "pbcopy", command: "pbcopy"},
+		{name: "wl-copy", command: "wl-copy"},
+		{name: "xclip", command: "xclip -in -selection clipboard"},
+		{name: "xsel", command: "xsel --clipboard --input"},
+	}
+	for _, candidate := range candidates {
+		if _, err := execLookPath(candidate.name); err == nil {
+			return candidate.command
+		}
+	}
+	return ""
 }
 
 // EnablePassthrough turns on tmux passthrough so wrapped OSC sequences can
