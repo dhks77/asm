@@ -33,3 +33,39 @@ func TestJoin(t *testing.T) {
 		})
 	}
 }
+
+func TestJoinCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    string
+	}{
+		{
+			name:    "bare command stays unquoted for alias expansion",
+			command: "claude",
+			args:    []string{"--continue"},
+			want:    "claude '--continue'",
+		},
+		{
+			name:    "tilde command stays unquoted",
+			command: "~/bin/claude",
+			args:    []string{"--continue"},
+			want:    "~/bin/claude '--continue'",
+		},
+		{
+			name:    "command with spaces is quoted",
+			command: "/Applications/Claude Code/bin/claude",
+			args:    []string{"--continue"},
+			want:    "'/Applications/Claude Code/bin/claude' '--continue'",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := JoinCommand(tc.command, tc.args...); got != tc.want {
+				t.Fatalf("JoinCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

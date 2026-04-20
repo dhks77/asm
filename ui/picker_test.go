@@ -134,6 +134,133 @@ func TestPickerFilteredDirectoriesMatchesRepoLabelAndPath(t *testing.T) {
 	}
 }
 
+func TestPickerOrderedActiveSessionsFollowPickerRows(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{
+			{Name: "billing-a", Path: "/tmp/billing/a"},
+			{Name: "accounts-a", Path: "/tmp/accounts/a"},
+			{Name: "billing-b", Path: "/tmp/billing/b"},
+			{Name: "accounts-b", Path: "/tmp/accounts/b"},
+		},
+		repoRoots: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+			"/tmp/accounts/b": "accounts",
+		},
+		repoLabels: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+			"/tmp/accounts/b": "accounts",
+		},
+		repoColors: map[string]string{},
+		activeKinds: map[string]asmtmux.SessionKind{
+			"/tmp/accounts/b": asmtmux.SessionTerm,
+			"/tmp/billing/a":  asmtmux.SessionAI,
+			"/tmp/billing/b":  asmtmux.SessionAI,
+		},
+		branches:      map[string]string{},
+		taskInfos:     map[string]tracker.TaskInfo{},
+		selectedItems: map[string]bool{},
+	}
+
+	active := m.orderedActiveSessions()
+	var got []string
+	for _, session := range active {
+		got = append(got, session.wt.Path)
+	}
+
+	want := []string{
+		"/tmp/accounts/b",
+		"/tmp/billing/a",
+		"/tmp/billing/b",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("active order = %v, want %v", got, want)
+	}
+}
+
+func TestPickerNextActiveSessionUsesCursorWhenPickerFocused(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{
+			{Name: "billing-a", Path: "/tmp/billing/a"},
+			{Name: "accounts-a", Path: "/tmp/accounts/a"},
+			{Name: "billing-b", Path: "/tmp/billing/b"},
+		},
+		repoRoots: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+		},
+		repoLabels: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+		},
+		repoColors: map[string]string{},
+		activeKinds: map[string]asmtmux.SessionKind{
+			"/tmp/accounts/a": asmtmux.SessionAI,
+			"/tmp/billing/a":  asmtmux.SessionAI,
+			"/tmp/billing/b":  asmtmux.SessionAI,
+		},
+		branches:      map[string]string{},
+		taskInfos:     map[string]tracker.TaskInfo{},
+		selectedItems: map[string]bool{},
+		focused:       true,
+		workingPath:   "/tmp/accounts/a",
+		cursor:        1, // /tmp/billing/a in picker sort order
+	}
+
+	next, ok := m.nextActiveSession(+1)
+	if !ok {
+		t.Fatal("nextActiveSession returned false")
+	}
+	if next.wt == nil || next.wt.Path != "/tmp/billing/b" {
+		t.Fatalf("nextActiveSession path = %v, want %q", next.wt, "/tmp/billing/b")
+	}
+}
+
+func TestPickerNextActiveSessionUsesFrontWhenPickerNotFocused(t *testing.T) {
+	m := PickerModel{
+		directories: []worktree.Worktree{
+			{Name: "billing-a", Path: "/tmp/billing/a"},
+			{Name: "accounts-a", Path: "/tmp/accounts/a"},
+			{Name: "billing-b", Path: "/tmp/billing/b"},
+		},
+		repoRoots: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+		},
+		repoLabels: map[string]string{
+			"/tmp/billing/a":  "billing",
+			"/tmp/accounts/a": "accounts",
+			"/tmp/billing/b":  "billing",
+		},
+		repoColors: map[string]string{},
+		activeKinds: map[string]asmtmux.SessionKind{
+			"/tmp/accounts/a": asmtmux.SessionAI,
+			"/tmp/billing/a":  asmtmux.SessionAI,
+			"/tmp/billing/b":  asmtmux.SessionAI,
+		},
+		branches:      map[string]string{},
+		taskInfos:     map[string]tracker.TaskInfo{},
+		selectedItems: map[string]bool{},
+		focused:       false,
+		workingPath:   "/tmp/accounts/a",
+		cursor:        1,
+	}
+
+	next, ok := m.nextActiveSession(+1)
+	if !ok {
+		t.Fatal("nextActiveSession returned false")
+	}
+	if next.wt == nil || next.wt.Path != "/tmp/billing/a" {
+		t.Fatalf("nextActiveSession path = %v, want %q", next.wt, "/tmp/billing/a")
+	}
+}
+
 func TestPickerSeedsCachedBranchAndQueuesMetadataSequentially(t *testing.T) {
 	m := PickerModel{
 		branches:       map[string]string{},

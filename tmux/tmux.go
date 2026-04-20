@@ -276,6 +276,11 @@ func InstallRootBindings() {
 	const inAsm = "#{m:asm-*,#{session_name}}"
 	const inUtility = "#{==:#{@asm-utility-open},1}"
 
+	// Clean up stale server-wide bindings that older asm versions installed.
+	// Root-table bindings persist in the tmux server even after the binary is
+	// replaced, so removed shortcuts must be explicitly unbound here.
+	_ = exec.Command("tmux", "unbind-key", "-T", "root", "Tab").Run()
+
 	// Simple routed key: inside asm session, deliver an F-key to the
 	// picker pane; outside, pass the key through unchanged.
 	pp := pickerPane()
@@ -292,33 +297,28 @@ func InstallRootBindings() {
 
 	// Utility dialogs run in the working panel and need some keys to reach the
 	// dialog process itself instead of being swallowed by picker-level global
-	// shortcuts. When a utility window is focused, pass the original key
-	// through unchanged; otherwise route to the picker pane.
+	// shortcuts. When a utility window is focused, deliver the key to the
+	// working pane where the dialog lives; otherwise route to the picker pane.
 	bindRoutedUnlessUtility := func(key, pickerKey, utilityKey string) {
-		utilityTarget := pickerRef
-		if utilityKey == "Tab" || utilityKey == "BTab" || strings.HasPrefix(utilityKey, "F") {
-			utilityTarget = workingTarget()
-		}
 		_ = exec.Command("tmux", "bind-key", "-T", "root", key,
 			"if-shell", "-F", inAsm,
-			fmt.Sprintf("if-shell -F '%s' 'send-keys -t %s %s' 'send-keys -t %s %s'", inUtility, utilityTarget, utilityKey, pickerRef, pickerKey),
+			fmt.Sprintf("if-shell -F '%s' 'send-keys -t %s %s' 'send-keys -t %s %s'", inUtility, workingTarget(), utilityKey, pickerRef, pickerKey),
 			"send-keys "+key,
 		).Run()
 	}
 
 	bindRouted("C-t", "F12")                     // toggle terminal/AI
 	bindRoutedUnlessUtility("C-n", "F10", "F10") // launcher in picker, new-branch in worktree dialog
-	bindRouted("C-s", "F9")                      // settings
+	bindRoutedUnlessUtility("C-s", "F9", "C-s")  // settings / save in dialog
 	bindRouted("C-q", "F8")                      // quit
 	bindRouted("C-w", "F7")                      // create worktree
 	bindRouted("C-d", "F6")                      // delete directory
 	bindRouted("C-p", "F4")                      // provider selection
 	bindRouted("C-k", "F3")                      // kill selected session
 	bindRouted("C-l", "C-l")                     // toggle picker panel visibility
-	bindRouted("C-o", "o")                       // open task URL
+	bindRouted("C-o", "C-o")                     // open task URL
 	bindRouted("C-]", "F1")                      // rotate to next active session
 	bindRouted("C-e", "F2")                      // open worktree in IDE
-	bindRoutedUnlessUtility("Tab", "Tab", "Tab")
 
 	// Ctrl+g: toggle pane focus — pane-index dependent.
 	//   working panel → select picker
@@ -798,7 +798,7 @@ func CreateDirectoryWindow(targetPath, dirPath, command string, args []string) e
 	}
 	syncHiddenWindowSize(winName)
 
-	aiCmd := shelljoin.Join(append([]string{command}, args...)...)
+	aiCmd := shelljoin.JoinCommand(command, args...)
 
 	// After AI exits: signal via wait-for (instant event detection)
 	exitSignal := fmt.Sprintf("tmux wait-for -S %s", ExitSignalName(targetPath))

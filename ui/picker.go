@@ -1497,59 +1497,108 @@ func (m *PickerModel) adjustViewTop() {
 	}
 }
 
-// rotateSession cycles the working panel through active sessions (delta=+1 next, -1 prev).
-// Preserves zoom state. No-op if fewer than 2 active sessions.
-func (m *PickerModel) rotateSession(delta int) tea.Cmd {
-	activeSet := make(map[string]bool)
-	for _, n := range asmtmux.ListDirectoryWindows() {
-		activeSet[n] = true
+type activePickerSession struct {
+	wt   *worktree.Worktree
+	kind asmtmux.SessionKind
+}
+
+// orderedActiveSessions returns active targets in the exact order shown in the
+// picker: current filter, repo grouping, and active-row sorting included.
+func (m *PickerModel) orderedActiveSessions() []activePickerSession {
+	filtered := m.filteredDirectories()
+	active := make([]activePickerSession, 0, len(filtered))
+	for _, wi := range filtered {
+		wt := &m.directories[wi]
+		kind := m.activeKinds[wt.Path]
+		if kind == 0 {
+			continue
+		}
+		active = append(active, activePickerSession{wt: wt, kind: kind})
+	}
+	return active
+}
+
+func (m *PickerModel) showActiveSession(session activePickerSession) {
+	if session.kind.HasAI() {
+		m.showInWorkingPanel(session.wt)
+		return
 	}
 
-	// Build ordered list of active worktrees (scan order).
-	var active []*worktree.Worktree
-	for i := range m.directories {
-		if activeSet[m.directories[i].Path] {
-			active = append(active, &m.directories[i])
+	wasZoomed := asmtmux.IsWorkingPanelZoomed()
+	asmtmux.EnsureWorkingPanel()
+	m.swapOutWorkingPanel()
+	if m.swapTermToWorkingPanel(session.wt.Path) {
+		m.focusWorkingPanel()
+		if wasZoomed {
+			_ = asmtmux.ZoomWorkingPanel()
+			m.workingZoomed = true
+		}
+		_ = recent.Record(session.wt.Path)
+	}
+}
+
+func (m *PickerModel) rotationAnchorPath() string {
+	if m.focused {
+		if wt := m.selectedDirectory(); wt != nil && m.activeKinds[wt.Path] != 0 {
+			return wt.Path
 		}
 	}
+	if m.workingPath != "" {
+		return m.workingPath
+	}
+	return m.termPath
+}
+
+func (m *PickerModel) nextActiveSession(delta int) (activePickerSession, bool) {
+	active := m.orderedActiveSessions()
 	if len(active) == 0 {
-		return nil
+		return activePickerSession{}, false
 	}
 
-	// Find current position. If nothing is shown, jump to first/last.
-	currentPath := m.workingPath
-	if currentPath == "" {
-		currentPath = m.termPath
-	}
+	currentPath := m.rotationAnchorPath()
 	idx := -1
-	for i, wt := range active {
-		if wt.Path == currentPath {
+	for i, session := range active {
+		if session.wt.Path == currentPath {
 			idx = i
 			break
 		}
 	}
-	var next *worktree.Worktree
+
 	if idx < 0 {
 		if delta >= 0 {
-			next = active[0]
-		} else {
-			next = active[len(active)-1]
+			return active[0], true
 		}
-	} else {
-		if len(active) < 2 {
-			// Only session is already shown — just focus it.
-			m.stabilizeCursor(active[idx].Path)
-			asmtmux.FocusWorkingPanel()
-			return nil
-		}
-		ni := (idx + delta) % len(active)
-		if ni < 0 {
-			ni += len(active)
-		}
-		next = active[ni]
+		return active[len(active)-1], true
 	}
 
-	m.showInWorkingPanel(next)
+	if len(active) < 2 {
+		return active[idx], true
+	}
+
+	ni := (idx + delta) % len(active)
+	if ni < 0 {
+		ni += len(active)
+	}
+	return active[ni], true
+}
+
+// rotateSession cycles the working panel through active sessions (delta=+1 next, -1 prev).
+// Preserves zoom state. No-op if fewer than 2 active sessions.
+func (m *PickerModel) rotateSession(delta int) tea.Cmd {
+	next, ok := m.nextActiveSession(delta)
+	if !ok {
+		return nil
+	}
+
+	currentPath := m.rotationAnchorPath()
+	if next.wt != nil && next.wt.Path == currentPath {
+		// Only active session is already selected/shown — just focus it.
+		m.stabilizeCursor(next.wt.Path)
+		asmtmux.FocusWorkingPanel()
+		return nil
+	}
+
+	m.showActiveSession(next)
 	return nil
 }
 
